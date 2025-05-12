@@ -7,3 +7,123 @@ datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
+
+// Enum para tipos de proveedores
+enum ProviderType {
+  MATERIAL_SUPPLIER
+  SERVICE_PROVIDER
+  DISTRIBUTOR
+  MANUFACTURER
+  OTHER
+}
+
+// Enum for alert status
+enum AlertStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// Modelo para Proveedores
+model Provider {
+  id         String             @id @default(cuid())
+  name       String
+  type       ProviderType
+  cif        String             @unique // Número de Identificación Fiscal
+  email      String?
+  phone      String?
+  address    String?
+  createdAt  DateTime           @default(now())
+  updatedAt  DateTime           @updatedAt
+  invoices   Invoice[]
+  materials  MaterialProvider[]
+  PriceAlert PriceAlert[]
+
+  @@index([type])
+}
+
+// Modelo para Facturas
+model Invoice {
+  id          String        @id @default(cuid())
+  invoiceCode String        @unique // Código único de factura
+  providerId  String
+  provider    Provider      @relation(fields: [providerId], references: [id])
+  issueDate   DateTime
+  totalAmount Decimal       @db.Decimal(10, 2)
+  pdfUrl      String? // URL al archivo PDF almacenado
+  status      String        @default("PENDING") // PENDING, PROCESSED, APPROVED, etc.
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  items       InvoiceItem[]
+
+  @@index([providerId])
+  @@index([issueDate])
+}
+
+// Modelo para Materiales
+model Material {
+  id           String             @id @default(cuid())
+  code         String             @unique // Código único del material
+  name         String
+  description  String?
+  unit         String // Unidad de medida (kg, litros, unidades, etc.)
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+  providers    MaterialProvider[]
+  invoiceItems InvoiceItem[]
+  PriceAlert   PriceAlert[]
+
+  @@index([code])
+}
+
+// Modelo para Items de Factura
+model InvoiceItem {
+  id         String   @id @default(cuid())
+  invoiceId  String
+  invoice    Invoice  @relation(fields: [invoiceId], references: [id])
+  materialId String
+  material   Material @relation(fields: [materialId], references: [id])
+  quantity   Decimal  @db.Decimal(10, 2)
+  unitPrice  Decimal  @db.Decimal(10, 2)
+  totalPrice Decimal  @db.Decimal(10, 2)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([invoiceId])
+  @@index([materialId])
+}
+
+// Tabla de relación entre Materiales y Proveedores
+model MaterialProvider {
+  id         String   @id @default(cuid())
+  materialId String
+  material   Material @relation(fields: [materialId], references: [id])
+  providerId String
+  provider   Provider @relation(fields: [providerId], references: [id])
+  lastPrice  Decimal  @db.Decimal(10, 2)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([materialId, providerId])
+  @@index([materialId])
+  @@index([providerId])
+}
+
+// Modelo para Alertas de Precios
+model PriceAlert {
+  id         String      @id @default(cuid())
+  materialId String
+  material   Material    @relation(fields: [materialId], references: [id])
+  providerId String
+  provider   Provider    @relation(fields: [providerId], references: [id])
+  oldPrice   Decimal     @db.Decimal(10, 2)
+  newPrice   Decimal     @db.Decimal(10, 2)
+  percentage Decimal     @db.Decimal(10, 2)
+  status     AlertStatus @default(PENDING)
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  @@index([materialId])
+  @@index([providerId])
+  @@index([status])
+}

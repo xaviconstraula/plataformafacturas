@@ -1,16 +1,18 @@
-import { InvoiceDetails } from "@/components/invoices/invoice-details"
+import { InvoiceDetails } from "@/components/invoice-details"
 
 interface InvoicePageProps {
-  params: {
+  params: Promise<{
     id: string
-  }
+  }>
 }
 
-export default function InvoicePage({ params }: InvoicePageProps) {
+export default async function InvoicePage({ params }: InvoicePageProps) {
+  const { id } = await params
+
   return (
     <div className="flex flex-col gap-6">
       <h1 className="text-3xl font-bold">Detalles de Factura</h1>
-      <InvoiceDetails id={params.id} />
+      <InvoiceDetails id={id} />
     </div>
   )
 }

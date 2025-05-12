@@ -3,8 +3,11 @@ import { SupplierList } from "@/components/supplier-list"
 import { Button } from "@/components/ui/button"
 import { PlusIcon } from "lucide-react"
 import Link from "next/link"
+import { getSuppliers } from "@/lib/actions/proveedores"
 
-export default function SuppliersPage() {
+export default async function SuppliersPage() {
+  const { suppliers } = await getSuppliers()
+
   return (
     <div className="flex flex-col gap-6">
       <div className="flex items-center justify-between">
@@ -18,7 +21,7 @@ export default function SuppliersPage() {
       </div>
 
       <Suspense fallback={<div className="h-96 rounded-lg bg-muted animate-pulse" />}>
-        <SupplierList />
+        <SupplierList suppliers={suppliers} />
       </Suspense>
     </div>
   )

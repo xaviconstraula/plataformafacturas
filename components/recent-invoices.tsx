@@ -1,10 +1,19 @@
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { formatCurrency } from "@/lib/utils"
-import { getDashboardStats } from "@/lib/mock-data"
 
-export function RecentInvoices() {
-  const { recentInvoices } = getDashboardStats()
+interface RecentInvoice {
+  id: string
+  supplier: string
+  material: string
+  amount: number
+  date: string
+}
 
+interface RecentInvoicesProps {
+  recentInvoices: RecentInvoice[]
+}
+
+export function RecentInvoices({ recentInvoices }: RecentInvoicesProps) {
   return (
     <div className="space-y-8">
       {recentInvoices.map((invoice) => (

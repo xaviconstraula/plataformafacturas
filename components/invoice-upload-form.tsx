@@ -10,7 +10,7 @@ import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "
 import { Input } from "@/components/ui/input"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Card, CardContent } from "@/components/ui/card"
-import { FileUploader } from "@/components/invoices/file-uploader"
+import { FileUploader } from "@/components/file-uploader"
 import { Textarea } from "@/components/ui/textarea"
 import { toast } from "sonner"
 import { simulateCreateInvoice, simulatePdfExtraction } from "@/lib/mock-data"
@@ -61,20 +61,18 @@ export function InvoiceUploadForm() {
       // Simulamos la creación de la factura
       await simulateCreateInvoice(values)
 
-      toast({
-        title: "Factura creada",
-        description: "La factura ha sido creada exitosamente.",
+      toast.success("Factura creada", {
+        description: "La factura ha sido creada exitosamente."
       })
 
       // Redirigir a la lista de facturas
       setTimeout(() => {
         router.push("/facturas")
       }, 1500)
-    } catch (error) {
-      toast({
-        title: "Error",
-        description: "Ocurrió un error al crear la factura.",
-        variant: "destructive",
+    } catch (error: unknown) {
+      console.error("Error al crear la factura:", error)
+      toast.error("Error", {
+        description: "Ocurrió un error al crear la factura."
       })
     }
   }
@@ -111,19 +109,17 @@ export function InvoiceUploadForm() {
 
         setActiveTab("manual")
 
-        toast({
-          title: "PDF procesado",
-          description: "Los datos han sido extraídos del PDF. Por favor, verifique y complete la información.",
+        toast.success("PDF procesado", {
+          description: "Los datos han sido extraídos del PDF. Por favor, verifique y complete la información."
         })
       }, 1000)
-    } catch (error) {
+    } catch (error: unknown) {
+      console.error("Error al procesar el PDF:", error)
       setIsUploading(false)
       clearInterval(interval)
 
-      toast({
-        title: "Error",
-        description: "Ocurrió un error al procesar el PDF.",
-        variant: "destructive",
+      toast.error("Error", {
+        description: "Ocurrió un error al procesar el PDF."
       })
     }
   }

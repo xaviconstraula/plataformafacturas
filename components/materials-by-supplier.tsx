@@ -1,17 +1,34 @@
 "use client"
 
 import { Cell, Legend, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts"
-import { materialsBySupplierData } from "@/lib/mock-data"
+import { getMaterialsBySupplierType } from "@/lib/actions/dashboard"
+import { useEffect, useState } from "react"
 
 const COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#6366f1", "#ec4899"]
 
+interface MaterialData {
+  name: string
+  value: number
+  supplier: string
+}
+
 export function MaterialsBySupplier() {
+  const [data, setData] = useState<MaterialData[]>([])
+
+  useEffect(() => {
+    async function fetchData() {
+      const materialsData = await getMaterialsBySupplierType()
+      setData(materialsData)
+    }
+    fetchData()
+  }, [])
+
   return (
     <div className="h-[350px] w-full">
       <ResponsiveContainer width="100%" height="100%">
         <PieChart>
           <Pie
-            data={materialsBySupplierData}
+            data={data}
             cx="50%"
             cy="50%"
             labelLine={false}
@@ -20,7 +37,7 @@ export function MaterialsBySupplier() {
             dataKey="value"
             label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
           >
-            {materialsBySupplierData.map((entry, index) => (
+            {data.map((entry, index) => (
               <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
             ))}
           </Pie>

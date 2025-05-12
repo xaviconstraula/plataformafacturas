@@ -1,43 +1,49 @@
 "use client"
 
-import { useState, useEffect } from "react"
 import Link from "next/link"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Button } from "@/components/ui/button"
 import { ChevronLeftIcon, ChevronRightIcon, EyeIcon } from "lucide-react"
 import { formatCurrency } from "@/lib/utils"
-import { filterInvoices, type Invoice } from "@/lib/mock-data"
 
 interface InvoiceListProps {
-  searchParams?: {
-    month?: string
-    quarter?: string
-    year?: string
-    supplier?: string
-    search?: string
-  }
+  invoices: {
+    id: string
+    invoiceCode: string
+    provider: {
+      name: string
+    }
+    items: {
+      quantity: number
+      totalPrice: number
+      material: {
+        name: string
+      }
+    }[]
+    issueDate: Date
+  }[]
+  totalPages: number
+  currentPage: number
+  pageSize: number
+  totalCount: number
+  searchParams: Record<string, string | undefined>
 }
 
-export function InvoiceList({ searchParams }: InvoiceListProps = {}) {
-  const [page, setPage] = useState(1)
-  const [filteredInvoices, setFilteredInvoices] = useState<Invoice[]>([])
-  const itemsPerPage = 5
+export function InvoiceList({ invoices, totalPages, currentPage, pageSize, totalCount, searchParams }: InvoiceListProps) {
 
-  useEffect(() => {
-    // Aplicar filtros cuando cambien los parámetros de búsqueda
-    const filtered = filterInvoices({
-      month: searchParams?.month,
-      quarter: searchParams?.quarter,
-      year: searchParams?.year,
-      supplier: searchParams?.supplier,
-      searchTerm: searchParams?.search,
+  function createPageURL(pageNumber: number): string {
+    const params = new URLSearchParams()
+    Object.entries(searchParams).forEach(([key, value]) => {
+      if (value && key !== 'page') {
+        params.set(key, value)
+      }
     })
-    setFilteredInvoices(filtered)
-    setPage(1) // Resetear a la primera página cuando cambian los filtros
-  }, [searchParams])
+    params.set('page', String(pageNumber))
+    return `/facturas?${params.toString()}`
+  }
 
-  const totalPages = Math.ceil(filteredInvoices.length / itemsPerPage)
-  const paginatedInvoices = filteredInvoices.slice((page - 1) * itemsPerPage, page * itemsPerPage)
+  const startItem = (currentPage - 1) * pageSize + 1
+  const endItem = Math.min(currentPage * pageSize, totalCount)
 
   return (
     <div className="space-y-4">
@@ -55,15 +61,15 @@ export function InvoiceList({ searchParams }: InvoiceListProps = {}) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {paginatedInvoices.length > 0 ? (
-              paginatedInvoices.map((invoice) => (
+            {invoices.length > 0 ? (
+              invoices.map((invoice) => (
                 <TableRow key={invoice.id}>
-                  <TableCell className="font-medium">{invoice.code}</TableCell>
-                  <TableCell>{invoice.supplier}</TableCell>
-                  <TableCell>{invoice.material}</TableCell>
-                  <TableCell>{invoice.quantity}</TableCell>
-                  <TableCell>{formatCurrency(invoice.amount)}</TableCell>
-                  <TableCell>{new Date(invoice.date).toLocaleDateString("es-ES")}</TableCell>
+                  <TableCell className="font-medium">{invoice.invoiceCode}</TableCell>
+                  <TableCell>{invoice.provider.name}</TableCell>
+                  <TableCell>{invoice.items[0]?.material.name || 'N/A'}</TableCell>
+                  <TableCell>{invoice.items[0]?.quantity || 0}</TableCell>
+                  <TableCell>{formatCurrency(Number(invoice.items[0]?.totalPrice || 0))}</TableCell>
+                  <TableCell>{invoice.issueDate.toLocaleDateString("es-ES")}</TableCell>
                   <TableCell>
                     <Link href={`/facturas/${invoice.id}`}>
                       <Button variant="ghost" size="icon">
@@ -76,7 +82,7 @@ export function InvoiceList({ searchParams }: InvoiceListProps = {}) {
             ) : (
               <TableRow>
                 <TableCell colSpan={7} className="h-24 text-center">
-                  No se encontraron facturas con los filtros aplicados.
+                  {totalCount === 0 && !searchParams.size ? 'No hay facturas creadas todavía.' : 'No se encontraron facturas con los filtros aplicados.'}
                 </TableCell>
               </TableRow>
             )}
@@ -84,22 +90,28 @@ export function InvoiceList({ searchParams }: InvoiceListProps = {}) {
         </Table>
       </div>
 
-      {filteredInvoices.length > 0 && (
-        <div className="flex items-center justify-end space-x-2">
-          <Button variant="outline" size="icon" onClick={() => setPage(page > 1 ? page - 1 : 1)} disabled={page === 1}>
-            <ChevronLeftIcon className="h-4 w-4" />
-          </Button>
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between space-x-2">
           <div className="text-sm text-muted-foreground">
-            Página {page} de {totalPages}
+            Mostrando {startItem} a {endItem} de {totalCount} facturas
           </div>
-          <Button
-            variant="outline"
-            size="icon"
-            onClick={() => setPage(page < totalPages ? page + 1 : totalPages)}
-            disabled={page === totalPages}
-          >
-            <ChevronRightIcon className="h-4 w-4" />
-          </Button>
+          <div className="flex items-center space-x-2">
+            <Button variant="outline" size="sm" disabled={currentPage <= 1} asChild>
+              <Link href={createPageURL(currentPage - 1)} aria-disabled={currentPage <= 1}>
+                <ChevronLeftIcon className="h-4 w-4 mr-1" />
+                Anterior
+              </Link>
+            </Button>
+            <div className="text-sm font-medium">
+              Página {currentPage} de {totalPages}
+            </div>
+            <Button variant="outline" size="sm" disabled={currentPage >= totalPages} asChild>
+              <Link href={createPageURL(currentPage + 1)} aria-disabled={currentPage >= totalPages}>
+                Siguiente
+                <ChevronRightIcon className="h-4 w-4 ml-1" />
+              </Link>
+            </Button>
+          </div>
         </div>
       )}
     </div>

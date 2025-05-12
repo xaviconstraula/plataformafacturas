@@ -4,19 +4,17 @@ import { filterInvoices, simulateCreateInvoice } from "@/lib/mock-data"
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url)
-    const month = searchParams.get("month")
-    const quarter = searchParams.get("quarter")
-    const year = searchParams.get("year")
-    const supplier = searchParams.get("supplier")
-    const search = searchParams.get("search")
 
-    const invoices = filterInvoices({
-      month,
-      quarter,
-      year,
-      supplier,
-      searchTerm: search,
-    })
+    // Convert null values to undefined
+    const params = {
+      month: searchParams.get("month") || undefined,
+      quarter: searchParams.get("quarter") || undefined,
+      year: searchParams.get("year") || undefined,
+      supplier: searchParams.get("supplier") || undefined,
+      searchTerm: searchParams.get("search") || undefined,
+    }
+
+    const invoices = filterInvoices(params)
 
     return NextResponse.json(invoices)
   } catch (error) {

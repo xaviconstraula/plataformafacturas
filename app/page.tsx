@@ -4,10 +4,13 @@ import { Overview } from "@/components/overview"
 import { RecentInvoices } from "@/components/recent-invoices"
 import { PriceAlerts } from "@/components/price-alerts"
 import { MaterialsBySupplier } from "@/components/materials-by-supplier"
-import { getDashboardStats } from "@/lib/mock-data"
+import { getDashboardStats, getOverviewData } from "@/lib/actions/dashboard"
 
-export default function Home() {
-  const stats = getDashboardStats()
+export default async function Home() {
+  const [stats, overviewData] = await Promise.all([
+    getDashboardStats(),
+    getOverviewData()
+  ])
 
   return (
     <div className="flex flex-col gap-6">
@@ -21,7 +24,6 @@ export default function Home() {
             </CardHeader>
             <CardContent>
               <div className="text-2xl font-bold">{stats.totalInvoices}</div>
-              <p className="text-xs text-muted-foreground">+10% desde el mes pasado</p>
             </CardContent>
           </Card>
         </Suspense>
@@ -32,8 +34,7 @@ export default function Home() {
               <CardTitle className="text-sm font-medium">Proveedores</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{stats.totalSuppliers}</div>
-              <p className="text-xs text-muted-foreground">+2 nuevos este mes</p>
+              <div className="text-2xl font-bold">{stats.totalProviders}</div>
             </CardContent>
           </Card>
         </Suspense>
@@ -45,7 +46,6 @@ export default function Home() {
             </CardHeader>
             <CardContent>
               <div className="text-2xl font-bold">{stats.totalMaterials}</div>
-              <p className="text-xs text-muted-foreground">+5 desde el mes pasado</p>
             </CardContent>
           </Card>
         </Suspense>
@@ -57,7 +57,6 @@ export default function Home() {
             </CardHeader>
             <CardContent>
               <div className="text-2xl font-bold">{stats.pendingAlerts}</div>
-              <p className="text-xs text-muted-foreground">Requieren atención</p>
             </CardContent>
           </Card>
         </Suspense>
@@ -71,7 +70,7 @@ export default function Home() {
           </CardHeader>
           <CardContent>
             <Suspense fallback={<div className="h-80 rounded-lg bg-muted animate-pulse" />}>
-              <Overview />
+              <Overview data={overviewData} />
             </Suspense>
           </CardContent>
         </Card>
@@ -83,7 +82,7 @@ export default function Home() {
           </CardHeader>
           <CardContent>
             <Suspense fallback={<div className="h-80 rounded-lg bg-muted animate-pulse" />}>
-              <RecentInvoices />
+              <RecentInvoices recentInvoices={stats.recentInvoices} />
             </Suspense>
           </CardContent>
         </Card>
