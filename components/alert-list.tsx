@@ -98,7 +98,7 @@ export function AlertList({ initialAlerts }: AlertListProps) {
           </CardHeader>
           <CardContent>
             <div className="space-y-4">
-              <div className="flex justify-between">
+              <div className="flex gap-10">
                 <div>
                   <p className="text-sm text-muted-foreground">Precio anterior</p>
                   <p className="text-lg font-medium">{formatCurrency(alert.previousPrice)}</p>

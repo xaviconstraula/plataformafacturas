@@ -25,7 +25,6 @@ async function main() {
                 code: 'MAT-001',
                 name: 'Cemento Portland',
                 description: 'Cemento de alta resistencia',
-                unit: 'kg'
             }
         }),
         prisma.material.create({
@@ -33,7 +32,6 @@ async function main() {
                 code: 'MAT-002',
                 name: 'Varilla de Acero',
                 description: 'Varilla corrugada 12mm',
-                unit: 'unidad'
             }
         }),
         prisma.material.create({
@@ -41,7 +39,7 @@ async function main() {
                 code: 'MAT-003',
                 name: 'Arena Fina',
                 description: 'Arena para construcción',
-                unit: 'm³'
+
             }
         }),
         prisma.material.create({
@@ -49,15 +47,14 @@ async function main() {
                 code: 'MAT-004',
                 name: 'Ladrillo Cerámico',
                 description: 'Ladrillo hueco doble',
-                unit: 'unidad'
+
             }
         }),
         prisma.material.create({
             data: {
                 code: 'MAT-005',
                 name: 'Pintura Blanca',
-                description: 'Pintura látex interior',
-                unit: 'litro'
+                description: 'Pintura látex interior'
             }
         })
     ])
@@ -156,15 +153,15 @@ async function main() {
                 const margin = provider.type === ProviderType.MANUFACTURER ? 1.0 :
                     provider.type === ProviderType.DISTRIBUTOR ? 1.15 : 1.25
                 const quantity = 10 + (j * 5) // 10, 15, 20...
-                const unitPrice = Number((basePrice * margin).toFixed(2))
-                const totalPrice = Number((quantity * unitPrice).toFixed(2))
+                const price = Number((basePrice * margin).toFixed(2))
+                const totalPrice = Number((quantity * price).toFixed(2))
 
                 await prisma.invoiceItem.create({
                     data: {
                         invoiceId: invoice.id,
                         materialId: material.id,
                         quantity,
-                        unitPrice,
+                        unitPrice: price,
                         totalPrice
                     }
                 })

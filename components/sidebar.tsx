@@ -4,7 +4,6 @@ import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { cn } from "@/lib/utils"
 import {
-  BarChart3Icon,
   FileTextIcon,
   HomeIcon,
   PackageIcon,
@@ -42,17 +41,7 @@ const navItems = [
     name: "Alertas",
     href: "/alertas",
     icon: AlertTriangleIcon,
-  },
-  {
-    name: "Reportes",
-    href: "/reportes",
-    icon: BarChart3Icon,
-  },
-  {
-    name: "Configuracion",
-    href: "/configuracion",
-    icon: Settings,
-  },
+  }
 ]
 
 export default function Sidebar() {

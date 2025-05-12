@@ -1,10 +1,11 @@
 "use client"
 
 import { useState } from "react"
-import Link from "next/link"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Button } from "@/components/ui/button"
-import { ChevronLeftIcon, ChevronRightIcon, EyeIcon } from "lucide-react"
+import { ChevronLeftIcon, ChevronRightIcon, PencilIcon, TrashIcon } from "lucide-react"
+import { EditMaterialDialog } from './edit-material-dialog'
+import { DeleteMaterialDialog } from './delete-material-dialog'
 
 interface MaterialListProps {
   materials: {
@@ -12,7 +13,6 @@ interface MaterialListProps {
     code: string
     name: string
     description: string | null
-    unit: string
     _count: {
       invoiceItems: number
     }
@@ -32,35 +32,36 @@ export function MaterialList({ materials }: MaterialListProps) {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Código</TableHead>
               <TableHead>Nombre</TableHead>
               <TableHead>Descripción</TableHead>
-              <TableHead>Unidad</TableHead>
               <TableHead>Facturas</TableHead>
-              <TableHead className="w-[80px]">Acciones</TableHead>
+              <TableHead className="w-[100px]">Acciones</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {paginatedMaterials.length > 0 ? (
               paginatedMaterials.map((material) => (
                 <TableRow key={material.id}>
-                  <TableCell className="font-medium">{material.code}</TableCell>
                   <TableCell>{material.name}</TableCell>
                   <TableCell>{material.description || 'N/A'}</TableCell>
-                  <TableCell>{material.unit}</TableCell>
                   <TableCell>{material._count.invoiceItems}</TableCell>
-                  <TableCell>
-                    <Link href={`/materiales/${material.id}`}>
-                      <Button variant="ghost" size="icon">
-                        <EyeIcon className="h-4 w-4" />
+                  <TableCell className="space-x-1">
+                    <EditMaterialDialog materialId={material.id}>
+                      <Button variant="ghost" size="icon" aria-label="Editar material">
+                        <PencilIcon className="h-4 w-4" />
                       </Button>
-                    </Link>
+                    </EditMaterialDialog>
+                    <DeleteMaterialDialog materialId={material.id} materialName={material.name}>
+                      <Button variant="ghost" size="icon" className="text-destructive hover:text-destructive" aria-label="Eliminar material">
+                        <TrashIcon className="h-4 w-4" />
+                      </Button>
+                    </DeleteMaterialDialog>
                   </TableCell>
                 </TableRow>
               ))
             ) : (
               <TableRow>
-                <TableCell colSpan={6} className="h-24 text-center">
+                <TableCell colSpan={4} className="h-24 text-center">
                   No se encontraron materiales.
                 </TableCell>
               </TableRow>

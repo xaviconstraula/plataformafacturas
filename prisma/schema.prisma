@@ -66,7 +66,6 @@ model Material {
   code         String             @unique // Código único del material
   name         String
   description  String?
-  unit         String // Unidad de medida (kg, litros, unidades, etc.)
   createdAt    DateTime           @default(now())
   updatedAt    DateTime           @updatedAt
   providers    MaterialProvider[]
@@ -126,4 +125,16 @@ model PriceAlert {
   @@index([materialId])
   @@index([providerId])
   @@index([status])
+}
+
+// Modelo para Usuarios
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([email])
 }
