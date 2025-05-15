@@ -12,19 +12,47 @@ import {
 } from '@/components/ui/dialog'
 import { PlusIcon } from 'lucide-react'
 import { InvoiceDropzone } from '@/components/invoice-dropzone'
+import { toast } from "sonner"
 
 // TODO: Import and implement InvoiceDropzone component
 
 export function NewInvoiceButton() {
-    const [isOpen, setIsOpen] = useState(false)
+    const [isOpen, setIsOpen] = useState(false)    // Handler for when files are accepted by the dropzone
+    async function handleFilesAccepted(files: File[]) {
+        try {
+            // Process each file through the PDF extraction API
+            for (const file of files) {
+                const formData = new FormData()
+                formData.append("file", file)
 
-    // Handler for when files are accepted by the dropzone
-    function handleFilesAccepted(files: File[]) {
-        console.log('Accepted files:', files)
-        // Here you would typically initiate the upload process or pass files to another handler
-        // For example, you might call a server action to process these files.
-        // After processing, you might want to close the dialog:
-        // setIsOpen(false);
+                const response = await fetch("/api/mock/pdf-extract", {
+                    method: "POST",
+                    body: formData,
+                })
+
+                if (!response.ok) {
+                    throw new Error(`Error processing file ${file.name}`)
+                }
+
+                const data = await response.json()
+
+                // TODO: Save the extracted data using a server action
+                console.log("Extracted data:", data)
+            }
+
+            // Close the dialog after successful processing
+            setIsOpen(false)
+
+            // Show success message
+            toast.success("Facturas procesadas correctamente", {
+                description: "Los datos han sido extraídos y guardados."
+            })
+        } catch (error: unknown) {
+            console.error("Error processing files:", error)
+            toast.error("Error al procesar las facturas", {
+                description: (error instanceof Error) ? error.message : "Ocurrió un error inesperado"
+            })
+        }
     }
 
     return (

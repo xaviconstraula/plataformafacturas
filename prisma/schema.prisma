@@ -10,11 +10,8 @@ datasource db {
 
 // Enum para tipos de proveedores
 enum ProviderType {
-  MATERIAL_SUPPLIER
-  SERVICE_PROVIDER
-  DISTRIBUTOR
-  MANUFACTURER
-  OTHER
+  MATERIAL_SUPPLIER // Proveedor de suministro de materiales
+  MACHINERY_RENTAL // Proveedor de alquiler de maquinaria
 }
 
 // Enum for alert status

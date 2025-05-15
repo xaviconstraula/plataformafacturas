@@ -14,6 +14,7 @@ interface InvoiceDropzoneProps {
 
 export function InvoiceDropzone({ onFilesAccepted, className }: InvoiceDropzoneProps) {
     const [files, setFiles] = useState<File[]>([])
+    const [isUploading, setIsUploading] = useState(false)
 
     const onDrop = useCallback(
         (acceptedFiles: File[], fileRejections: FileRejection[]) => {
@@ -27,7 +28,18 @@ export function InvoiceDropzone({ onFilesAccepted, className }: InvoiceDropzoneP
                 })
             }
 
-            setFiles((prevFiles) => [...prevFiles, ...acceptedFiles])
+            // Filter out any files that are too large
+            const validFiles = acceptedFiles.filter(file => {
+                if (file.size > 5 * 1024 * 1024) {
+                    toast.error(`El archivo ${file.name} es demasiado grande`, {
+                        description: "El tamaño máximo permitido es 5MB"
+                    })
+                    return false
+                }
+                return true
+            })
+
+            setFiles((prevFiles) => [...prevFiles, ...validFiles])
         },
         [],
     )
@@ -42,13 +54,17 @@ export function InvoiceDropzone({ onFilesAccepted, className }: InvoiceDropzoneP
 
     function removeFile(index: number) {
         setFiles((prevFiles) => prevFiles.filter((_, i) => i !== index))
-    }
-
-    function handleUpload() {
+    } async function handleUpload() {
         if (files.length > 0) {
-            onFilesAccepted(files)
-            // Optionally clear files after passing them up
-            // setFiles([])
+            setIsUploading(true)
+            try {
+                await onFilesAccepted(files)
+                setFiles([]) // Clear files after successful upload
+            } catch (error) {
+                console.error("Error uploading files:", error)
+            } finally {
+                setIsUploading(false)
+            }
         }
     }
 
@@ -115,9 +131,19 @@ export function InvoiceDropzone({ onFilesAccepted, className }: InvoiceDropzoneP
                                 </Button>
                             </li>
                         ))}
-                    </ul>
-                    <Button onClick={handleUpload} className="w-full">
-                        Procesar {files.length} Factura{files.length > 1 ? 's' : ''}
+                    </ul>                    <Button
+                        onClick={handleUpload}
+                        className="w-full"
+                        disabled={isUploading}
+                    >
+                        {isUploading ? (
+                            <div className="flex items-center gap-2">
+                                <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                                <span>Procesando...</span>
+                            </div>
+                        ) : (
+                            `Procesar ${files.length} Factura${files.length > 1 ? 's' : ''}`
+                        )}
                     </Button>
                 </div>
             )}

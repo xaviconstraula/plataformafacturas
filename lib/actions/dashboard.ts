@@ -97,47 +97,58 @@ export async function getOverviewData() {
 }
 
 export async function getMaterialsBySupplierType() {
-    const materialProviders = await prisma.materialProvider.findMany({
-        select: {
-            material: {
-                select: {
-                    name: true
+    const materials = await prisma.material.findMany({
+        include: {
+            providers: {
+                include: {
+                    provider: true
                 }
             },
-            provider: {
-                select: {
-                    type: true
+            invoiceItems: {
+                include: {
+                    invoice: {
+                        include: {
+                            provider: true
+                        }
+                    }
                 }
             }
-        },
-        orderBy: {
-            materialId: 'desc'
         }
-    })
+    });
 
-    // Group and count materials by provider type
-    const groupedData = materialProviders.reduce((acc: Record<string, Record<string, number>>, curr) => {
-        const materialName = curr.material.name
-        const providerType = curr.provider.type
+    const materialsByType: Record<string, {
+        materialCount: number,
+        totalValue: number
+        providerType: 'MATERIAL_SUPPLIER' | 'MACHINERY_RENTAL'
+    }> = {};
 
-        if (!acc[materialName]) {
-            acc[materialName] = {}
+    // Process each material
+    for (const material of materials) {
+        // Get the most common provider type for this material
+        const providerTypes = material.invoiceItems.map(item => item.invoice.provider.type);
+        const typeCount = providerTypes.reduce((acc, type) => {
+            acc[type] = (acc[type] || 0) + 1;
+            return acc;
+        }, {} as Record<string, number>);
+
+        const dominantType = Object.entries(typeCount)
+            .sort(([, a], [, b]) => b - a)[0]?.[0] as 'MATERIAL_SUPPLIER' | 'MACHINERY_RENTAL';
+
+        if (dominantType) {
+            materialsByType[material.name] = {
+                materialCount: material.invoiceItems.length,
+                totalValue: material.invoiceItems.reduce((sum, item) => sum + Number(item.totalPrice), 0),
+                providerType: dominantType
+            };
         }
-        if (!acc[materialName][providerType]) {
-            acc[materialName][providerType] = 0
-        }
-        acc[materialName][providerType]++
-
-        return acc
-    }, {})
+    }
 
     // Convert to the format expected by the chart
-    const result = Object.entries(groupedData)
-        .map(([name, providers]) => ({
+    const result = Object.entries(materialsByType)
+        .map(([name, data]) => ({
             name,
-            value: Object.values(providers).reduce((sum, count) => sum + count, 0),
-            supplier: Object.entries(providers)
-                .sort(([, a], [, b]) => b - a)[0][0] // Get the provider type with highest count
+            value: data.totalValue,
+            supplier: data.providerType === 'MATERIAL_SUPPLIER' ? 'Materiales' : 'Maquinaria'
         }))
         .sort((a, b) => b.value - a.value)
         .slice(0, 5)

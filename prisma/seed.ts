@@ -18,8 +18,9 @@ async function main() {
     await prisma.material.deleteMany()
     await prisma.provider.deleteMany()
 
-    // Create Materials
+    // Create Materials and Equipment
     const materials = await Promise.all([
+        // Construction Materials
         prisma.material.create({
             data: {
                 code: 'MAT-001',
@@ -39,28 +40,28 @@ async function main() {
                 code: 'MAT-003',
                 name: 'Arena Fina',
                 description: 'Arena para construcción',
-
+            }
+        }),
+        // Equipment for Rental
+        prisma.material.create({
+            data: {
+                code: 'EQP-001',
+                name: 'Excavadora Compacta',
+                description: 'Excavadora 2T para obras menores',
             }
         }),
         prisma.material.create({
             data: {
-                code: 'MAT-004',
-                name: 'Ladrillo Cerámico',
-                description: 'Ladrillo hueco doble',
-
-            }
-        }),
-        prisma.material.create({
-            data: {
-                code: 'MAT-005',
-                name: 'Pintura Blanca',
-                description: 'Pintura látex interior'
+                code: 'EQP-002',
+                name: 'Montacargas Eléctrico',
+                description: 'Montacargas 1000kg capacidad',
             }
         })
     ])
 
     // Create Providers
     const providers = await Promise.all([
+        // Material Suppliers
         prisma.provider.create({
             data: {
                 name: 'Materiales Construcción Madrid SL',
@@ -73,61 +74,76 @@ async function main() {
         }),
         prisma.provider.create({
             data: {
-                name: 'Distribuciones Barcelona SA',
-                type: ProviderType.DISTRIBUTOR,
+                name: 'Suministros Construcción Barcelona SA',
+                type: ProviderType.MATERIAL_SUPPLIER,
                 cif: 'A87654321',
-                email: 'ventas@distbarcelona.com',
+                email: 'ventas@suministrosbcn.com',
                 phone: '934567890',
                 address: 'Avenida Diagonal 456, Barcelona'
             }
         }),
+        // Machinery Rental Providers
         prisma.provider.create({
             data: {
-                name: 'Fábrica de Cemento Valencia',
-                type: ProviderType.MANUFACTURER,
+                name: 'Alquiler Maquinaria Valencia SL',
+                type: ProviderType.MACHINERY_RENTAL,
                 cif: 'B98765432',
-                email: 'info@cementosvalencia.es',
+                email: 'info@maquinariavlc.es',
                 phone: '963214567',
                 address: 'Polígono Industrial 789, Valencia'
+            }
+        }),
+        prisma.provider.create({
+            data: {
+                name: 'Maquinaria Pesada Madrid',
+                type: ProviderType.MACHINERY_RENTAL,
+                cif: 'B76543210',
+                email: 'alquileres@maquinamad.es',
+                phone: '912345678',
+                address: 'Calle Industria 321, Madrid'
             }
         })
     ])
 
-    // Precios base para materiales (€)
+    // Precios base (€)
     const basePrices = {
-        'MAT-001': 89.99,  // Cemento Portland por kg
+        // Materiales de construcción
+        'MAT-001': 89.99,  // Cemento Portland por tonelada
         'MAT-002': 15.50,  // Varilla de Acero por unidad
         'MAT-003': 45.75,  // Arena Fina por m³
-        'MAT-004': 0.85,   // Ladrillo Cerámico por unidad
-        'MAT-005': 24.99   // Pintura Blanca por litro
+        // Maquinaria (precio por día)
+        'EQP-001': 150.00, // Excavadora Compacta
+        'EQP-002': 85.00,  // Montacargas
     }
 
     // Create MaterialProvider relationships with initial prices
     for (const material of materials) {
         for (const provider of providers) {
             const basePrice = basePrices[material.code as keyof typeof basePrices]
-            // Cada proveedor tiene un margen diferente
-            const margin = provider.type === ProviderType.MANUFACTURER ? 1.0 :
-                provider.type === ProviderType.DISTRIBUTOR ? 1.15 : 1.25
+            const isEquipment = material.code.startsWith('EQP-')
 
-            await prisma.materialProvider.create({
-                data: {
-                    materialId: material.id,
-                    providerId: provider.id,
-                    lastPrice: Number((basePrice * margin).toFixed(2))
-                }
-            })
+            // Solo crear relaciones apropiadas según el tipo de proveedor
+            if ((isEquipment && provider.type === ProviderType.MACHINERY_RENTAL) ||
+                (!isEquipment && provider.type === ProviderType.MATERIAL_SUPPLIER)) {
+                await prisma.materialProvider.create({
+                    data: {
+                        materialId: material.id,
+                        providerId: provider.id,
+                        lastPrice: Number(basePrice.toFixed(2))
+                    }
+                })
+            }
         }
     }
 
     // Create Invoices and Invoice Items
     const TODAY = new Date('2025-05-12')
     const startDate = new Date(TODAY)
-    startDate.setMonth(startDate.getMonth() - 5) // Start from 6 months ago (December 2024)
+    startDate.setMonth(startDate.getMonth() - 5) // Start from 6 months ago
 
     for (const provider of providers) {
         for (let i = 0; i < 5; i++) {
-            const randomMonthOffset = Math.floor(Math.random() * 6) // Random month between 0-5 months ago
+            const randomMonthOffset = Math.floor(Math.random() * 6)
             const createdAt = new Date(startDate)
             createdAt.setMonth(startDate.getMonth() + randomMonthOffset)
 
@@ -135,33 +151,38 @@ async function main() {
                 data: {
                     invoiceCode: `FAC-${provider.id.slice(-4)}-${String(i + 1).padStart(3, '0')}`,
                     providerId: provider.id,
-                    issueDate: randomDate(new Date('2024-12-01'), TODAY), // More recent issue dates
-                    totalAmount: 0, // Will be updated after adding items
+                    issueDate: randomDate(new Date('2024-12-01'), TODAY),
+                    totalAmount: 0,
                     status: 'PROCESSED',
                     pdfUrl: `https://storage.example.com/invoices/invoice-${provider.id}-${i + 1}.pdf`,
-                    createdAt // Set the createdAt date explicitly
+                    createdAt
                 }
             })
 
             // Add 2-3 items to each invoice
-            const itemCount = 2 + (i % 2) // Alternates between 2 and 3 items
+            const itemCount = 2 + (i % 2)
             let totalAmount = 0
 
+            // Filter materials based on provider type
+            const availableMaterials = materials.filter(m =>
+                (provider.type === ProviderType.MACHINERY_RENTAL && m.code.startsWith('EQP-')) ||
+                (provider.type === ProviderType.MATERIAL_SUPPLIER && m.code.startsWith('MAT-'))
+            )
+
             for (let j = 0; j < itemCount; j++) {
-                const material = materials[j % materials.length]
+                const material = availableMaterials[j % availableMaterials.length]
                 const basePrice = basePrices[material.code as keyof typeof basePrices]
-                const margin = provider.type === ProviderType.MANUFACTURER ? 1.0 :
-                    provider.type === ProviderType.DISTRIBUTOR ? 1.15 : 1.25
-                const quantity = 10 + (j * 5) // 10, 15, 20...
-                const price = Number((basePrice * margin).toFixed(2))
-                const totalPrice = Number((quantity * price).toFixed(2))
+                const quantity = material.code.startsWith('EQP-') ?
+                    1 + Math.floor(Math.random() * 5) : // 1-5 días de alquiler
+                    10 + (j * 5) // 10, 15, 20 unidades para materiales
+                const totalPrice = Number((quantity * basePrice).toFixed(2))
 
                 await prisma.invoiceItem.create({
                     data: {
                         invoiceId: invoice.id,
                         materialId: material.id,
                         quantity,
-                        unitPrice: price,
+                        unitPrice: basePrice,
                         totalPrice
                     }
                 })
@@ -176,16 +197,16 @@ async function main() {
             })
 
             // Create price alerts for significant increases (20% increase)
-            if (i === 4) { // Solo para la última factura de cada proveedor
-                const material = materials[0] // Alerta para el Cemento Portland
-                const oldPrice = basePrices['MAT-001']
-                const newPrice = oldPrice * 1.20 // 20% increase
+            if (i === 4) {
+                const material = availableMaterials[0]
+                const basePrice = basePrices[material.code as keyof typeof basePrices]
+                const newPrice = basePrice * 1.20
 
                 await prisma.priceAlert.create({
                     data: {
                         materialId: material.id,
                         providerId: provider.id,
-                        oldPrice,
+                        oldPrice: basePrice,
                         newPrice,
                         percentage: 20.00,
                         status: 'PENDING'

@@ -1,7 +1,6 @@
 import { Suspense } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Overview } from "@/components/overview"
-import { RecentInvoices } from "@/components/recent-invoices"
 import { PriceAlerts } from "@/components/price-alerts"
 import { MaterialsBySupplier } from "@/components/materials-by-supplier"
 import { getDashboardStats, getOverviewData } from "@/lib/actions/dashboard"
@@ -77,20 +76,6 @@ export default async function Home() {
 
         <Card className="col-span-3">
           <CardHeader>
-            <CardTitle>Facturas Recientes</CardTitle>
-            <CardDescription>Las últimas facturas procesadas</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Suspense fallback={<div className="h-80 rounded-lg bg-muted animate-pulse" />}>
-              <RecentInvoices recentInvoices={stats.recentInvoices} />
-            </Suspense>
-          </CardContent>
-        </Card>
-      </div>
-
-      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-7">
-        <Card className="col-span-3">
-          <CardHeader>
             <CardTitle>Alertas de Precios</CardTitle>
             <CardDescription>Variaciones significativas detectadas</CardDescription>
           </CardHeader>
@@ -100,8 +85,10 @@ export default async function Home() {
             </Suspense>
           </CardContent>
         </Card>
+      </div>
 
-        <Card className="col-span-4">
+      <div className="grid gap-6">
+        <Card>
           <CardHeader>
             <CardTitle>Materiales por Proveedor</CardTitle>
             <CardDescription>Análisis de materiales más utilizados</CardDescription>
