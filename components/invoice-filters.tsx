@@ -33,6 +33,12 @@ export function InvoiceFilters() {
   const [month, setMonth] = useState(searchParams.get("month") || "")
   const [quarter, setQuarter] = useState(searchParams.get("quarter") || "")
   const [year, setYear] = useState(searchParams.get("year") || "")
+  const [prevFilters, setPrevFilters] = useState({
+    search: searchTerm,
+    month,
+    quarter,
+    year
+  })
 
   const debouncedSearchTerm = useDebounce(searchTerm, 150) // Debounce search input by 150ms
 
@@ -41,7 +47,14 @@ export function InvoiceFilters() {
 
   // Function to update URL params, wrapped in useCallback for stability
   const updateUrlParams = useCallback(() => {
-    const params = new URLSearchParams(searchParams.toString()) // Start with existing params (like page)
+    const params = new URLSearchParams(searchParams.toString())
+
+    // Check if any filter has changed
+    const filtersChanged =
+      debouncedSearchTerm !== prevFilters.search ||
+      month !== prevFilters.month ||
+      quarter !== prevFilters.quarter ||
+      year !== prevFilters.year
 
     // Set or delete params based on state
     if (debouncedSearchTerm) {
@@ -69,11 +82,20 @@ export function InvoiceFilters() {
       params.delete("year")
     }
 
-    // Reset page to 1 when filters change
-    params.set("page", "1")
+    // Only reset page to 1 if filters have changed
+    if (filtersChanged) {
+      params.set("page", "1")
+      // Update prevFilters after changing them
+      setPrevFilters({
+        search: debouncedSearchTerm,
+        month,
+        quarter,
+        year
+      })
+    }
 
-    router.push(`/facturas?${params.toString()}`, { scroll: false }) // Use scroll: false to prevent jumping to top
-  }, [debouncedSearchTerm, month, quarter, year, router, searchParams])
+    router.push(`/facturas?${params.toString()}`, { scroll: false })
+  }, [debouncedSearchTerm, month, quarter, year, router, searchParams, prevFilters])
 
   // Effect to update URL when debounced search term or other filters change
   useEffect(() => {
