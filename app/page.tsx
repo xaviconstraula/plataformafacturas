@@ -3,12 +3,13 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Overview } from "@/components/overview"
 import { PriceAlerts } from "@/components/price-alerts"
 import { MaterialsBySupplier } from "@/components/materials-by-supplier"
-import { getDashboardStats, getOverviewData } from "@/lib/actions/dashboard"
+import { getDashboardStats, getOverviewData, getMaterialsBySupplierType } from "@/lib/actions/dashboard"
 
 export default async function Home() {
-  const [stats, overviewData] = await Promise.all([
+  const [stats, overviewData, materialsBySupplierData] = await Promise.all([
     getDashboardStats(),
-    getOverviewData()
+    getOverviewData(),
+    getMaterialsBySupplierType()
   ])
 
   return (
@@ -95,7 +96,7 @@ export default async function Home() {
           </CardHeader>
           <CardContent>
             <Suspense fallback={<div className="h-80 rounded-lg bg-muted animate-pulse" />}>
-              <MaterialsBySupplier />
+              <MaterialsBySupplier data={materialsBySupplierData} />
             </Suspense>
           </CardContent>
         </Card>

@@ -56,6 +56,28 @@ async function main() {
                 name: 'Montacargas Eléctrico',
                 description: 'Montacargas 1000kg capacidad',
             }
+        }),
+        // Hybrid Materials (available from both types of providers)
+        prisma.material.create({
+            data: {
+                code: 'HYB-001',
+                name: 'Andamios Metálicos',
+                description: 'Andamios modulares para construcción - Venta o Alquiler',
+            }
+        }),
+        prisma.material.create({
+            data: {
+                code: 'HYB-002',
+                name: 'Encofrados Metálicos',
+                description: 'Sistema de encofrado modular - Venta o Alquiler',
+            }
+        }),
+        prisma.material.create({
+            data: {
+                code: 'HYB-003',
+                name: 'Puntales Telescópicos',
+                description: 'Puntales ajustables de acero - Venta o Alquiler',
+            }
         })
     ])
 
@@ -114,24 +136,51 @@ async function main() {
         // Maquinaria (precio por día)
         'EQP-001': 150.00, // Excavadora Compacta
         'EQP-002': 85.00,  // Montacargas
+        // Materiales híbridos
+        'HYB-001': 75.00,  // Andamios Metálicos (precio por sección)
+        'HYB-002': 95.00,  // Encofrados Metálicos (precio por panel)
+        'HYB-003': 25.00,  // Puntales Telescópicos (precio por unidad)
     }
 
     // Create MaterialProvider relationships with initial prices
     for (const material of materials) {
         for (const provider of providers) {
-            const basePrice = basePrices[material.code as keyof typeof basePrices]
-            const isEquipment = material.code.startsWith('EQP-')
+            const basePrice = basePrices[material.code as keyof typeof basePrices];
+            if (!basePrice) { // Safety check in case a material code isn't in basePrices
+                console.warn(`Warning: Base price not found for material code ${material.code}. Skipping MaterialProvider creation for this material with provider ${provider.name}.`);
+                continue;
+            }
 
-            // Solo crear relaciones apropiadas según el tipo de proveedor
-            if ((isEquipment && provider.type === ProviderType.MACHINERY_RENTAL) ||
-                (!isEquipment && provider.type === ProviderType.MATERIAL_SUPPLIER)) {
+            const isEquipment = material.code.startsWith('EQP-');
+            const isOriginallyHybrid = material.code.startsWith('HYB-');
+            const isCementPortland = material.code === 'MAT-001'; // Specifically Cemento Portland
+
+            // Determine if the material is effectively shareable by all provider types
+            const isEffectivelyShareable = isOriginallyHybrid || isCementPortland;
+
+            let shouldCreateLink = false;
+
+            if (isEffectivelyShareable) {
+                shouldCreateLink = true; // Shareable materials (original hybrids or Cemento Portland) are linked to all providers
+            } else if (isEquipment && provider.type === ProviderType.MACHINERY_RENTAL) {
+                shouldCreateLink = true; // Equipment is specific to machinery rental providers
+            } else if (!isEquipment && !isOriginallyHybrid && provider.type === ProviderType.MATERIAL_SUPPLIER) {
+                // This covers other MAT-xxx materials (not Cemento Portland, not hybrid) for MATERIAL_SUPPLIERs
+                shouldCreateLink = true;
+            }
+
+            if (shouldCreateLink) {
+                // Apply price variation for originally hybrid materials or for Cemento Portland
+                const priceVariation = (isOriginallyHybrid || isCementPortland) ? (0.95 + Math.random() * 0.1) : 1; // ±5% variation
+                const finalPrice = Number((basePrice * priceVariation).toFixed(2));
+
                 await prisma.materialProvider.create({
                     data: {
                         materialId: material.id,
                         providerId: provider.id,
-                        lastPrice: Number(basePrice.toFixed(2))
+                        lastPrice: finalPrice
                     }
-                })
+                });
             }
         }
     }
@@ -139,19 +188,25 @@ async function main() {
     // Create Invoices and Invoice Items
     const TODAY = new Date('2025-05-12')
     const startDate = new Date(TODAY)
-    startDate.setMonth(startDate.getMonth() - 5) // Start from 6 months ago
+    startDate.setMonth(startDate.getMonth() - 7) // Start from 8 months ago instead of 6
 
     for (const provider of providers) {
-        for (let i = 0; i < 5; i++) {
-            const randomMonthOffset = Math.floor(Math.random() * 6)
+        // Create 4 invoices per provider instead of 3
+        for (let i = 0; i < 4; i++) {
+            // Spread invoices across 8 months instead of 6
+            const randomMonthOffset = Math.floor(Math.random() * 8)
             const createdAt = new Date(startDate)
             createdAt.setMonth(startDate.getMonth() + randomMonthOffset)
+
+            // Add some randomness to avoid all providers getting invoices in the same months
+            const randomDayOffset = Math.floor(Math.random() * 28) // Random day within month
+            createdAt.setDate(randomDayOffset + 1)
 
             const invoice = await prisma.invoice.create({
                 data: {
                     invoiceCode: `FAC-${provider.id.slice(-4)}-${String(i + 1).padStart(3, '0')}`,
                     providerId: provider.id,
-                    issueDate: randomDate(new Date('2024-12-01'), TODAY),
+                    issueDate: createdAt,
                     totalAmount: 0,
                     status: 'PROCESSED',
                     pdfUrl: `https://storage.example.com/invoices/invoice-${provider.id}-${i + 1}.pdf`,
@@ -164,10 +219,20 @@ async function main() {
             let totalAmount = 0
 
             // Filter materials based on provider type
-            const availableMaterials = materials.filter(m =>
-                (provider.type === ProviderType.MACHINERY_RENTAL && m.code.startsWith('EQP-')) ||
-                (provider.type === ProviderType.MATERIAL_SUPPLIER && m.code.startsWith('MAT-'))
-            )
+            const availableMaterials = materials.filter(m => {
+                const isHybrid = m.code.startsWith('HYB-');
+                const isCementPortland = m.code === 'MAT-001'; // Cemento Portland
+
+                if (provider.type === ProviderType.MACHINERY_RENTAL) {
+                    // Machinery rental can offer: Equipment, Hybrid materials, and Cemento Portland
+                    return m.code.startsWith('EQP-') || isHybrid || isCementPortland;
+                } else if (provider.type === ProviderType.MATERIAL_SUPPLIER) {
+                    // Material suppliers can offer: Standard materials (MAT-), Hybrid materials.
+                    // MAT- includes Cemento Portland by default as it starts with MAT-.
+                    return m.code.startsWith('MAT-') || isHybrid;
+                }
+                return false; // Should ideally not be reached
+            });
 
             for (let j = 0; j < itemCount; j++) {
                 const material = availableMaterials[j % availableMaterials.length]
@@ -197,7 +262,7 @@ async function main() {
             })
 
             // Create price alerts for significant increases (20% increase)
-            if (i === 4) {
+            if (i === 3) { // Updated from 2 to 3 since we now have 4 invoices
                 const material = availableMaterials[0]
                 const basePrice = basePrices[material.code as keyof typeof basePrices]
                 const newPrice = basePrice * 1.20

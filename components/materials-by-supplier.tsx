@@ -9,159 +9,176 @@ import {
   Tooltip,
   XAxis,
   YAxis,
+  Cell,
+  TooltipProps,
 } from "recharts"
-import { getMaterialsBySupplierType } from "@/lib/actions/dashboard"
-import { useEffect, useState } from "react"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { useMemo } from "react"
 
-const COLORS = ["#3b82f6", "#22c55e"] // Updated to match image colors
+const COLORS = {
+  Materiales: "#2EB19C",
+  Maquinaria: "#F97B5C"
+}
 
-// Assumes the backend action getMaterialsBySupplierType returns an array of objects
-// where 'supplier' field holds the supplier type string (e.g., "Materiales" or "Maquinaria").
 interface RawMaterialData {
-  name: string // Material name
+  name: string
   value: number
-  supplier: "Materiales" | "Maquinaria" // Supplier type - UPDATED
+  supplier: "Materiales" | "Maquinaria"
 }
 
 interface ChartDataEntry {
   materialName: string
-  MATERIAL_SUPPLIER?: number
-  MACHINERY_RENTAL?: number
+  value: number
+  supplier: "Materiales" | "Maquinaria"
 }
 
 const SUPPLIER_TYPE_MAP = {
-  MATERIAL_SUPPLIER: "Material Supplier",  // Simplified text
-  MACHINERY_RENTAL: "Machinery Rental",    // Simplified text
+  Materiales: "Proveedor de Materiales",
+  Maquinaria: "Alquiler de Maquinaria",
 }
 
-export function MaterialsBySupplier() {
-  const [data, setData] = useState<ChartDataEntry[]>([])
-  const [isLoading, setIsLoading] = useState(true)
+interface MaterialsBySupplierProps {
+  data: RawMaterialData[]
+}
 
-  useEffect(() => {
-    async function fetchDataAndTransform() {
-      setIsLoading(true)
-      try {
-        const rawData = await getMaterialsBySupplierType() as RawMaterialData[]
-        console.log("Raw data from getMaterialsBySupplierType:", rawData)
+export function MaterialsBySupplier({ data: rawData }: MaterialsBySupplierProps) {
+  const transformedData = useMemo(() => {
+    if (!rawData) return []
+    return rawData.map(item => ({
+      materialName: item.name,
+      value: item.value,
+      supplier: item.supplier
+    }))
+  }, [rawData])
 
-        const transformed = new Map<string, ChartDataEntry>()
-
-        rawData.forEach(item => {
-          const { name: materialName, value, supplier: supplierType } = item
-          console.log(`Processing item: ${materialName}, Supplier Type: '${supplierType}', Value: ${value}`)
-
-          if (!transformed.has(materialName)) {
-            transformed.set(materialName, { materialName })
-          }
-          const entry = transformed.get(materialName)!
-
-          if (supplierType === "Materiales") { // UPDATED condition
-            entry.MATERIAL_SUPPLIER = (entry.MATERIAL_SUPPLIER || 0) + value
-          } else if (supplierType === "Maquinaria") { // UPDATED condition
-            entry.MACHINERY_RENTAL = (entry.MACHINERY_RENTAL || 0) + value
-          } else {
-            console.warn(`Unknown supplier type for ${materialName}: '${supplierType}'`)
-          }
-        })
-
-        const finalChartData = Array.from(transformed.values());
-        console.log("Transformed chart data:", finalChartData);
-        setData(finalChartData)
-      } catch (error) {
-        console.error("Failed to fetch or transform material data:", error)
-      } finally {
-        setIsLoading(false)
-      }
-    }
-    fetchDataAndTransform()
+  // Create legend data
+  const legendData = useMemo(() => {
+    return Object.entries(SUPPLIER_TYPE_MAP).map(([key, value]) => ({
+      value: key,
+      type: value,
+      color: COLORS[key as keyof typeof COLORS]
+    }))
   }, [])
 
-  if (isLoading) {
+  if (!rawData) {
     return <div className="h-[350px] w-full flex items-center justify-center text-gray-500 font-medium">Loading chart data...</div>
   }
 
-  if (data.length === 0) {
+  if (transformedData.length === 0) {
     return <div className="h-[350px] w-full flex items-center justify-center text-gray-500 font-medium">No data available to display.</div>
   }
 
   return (
-    <div className="h-[350px] w-full p-4 bg-white rounded-lg">
-      <ResponsiveContainer width="100%" height="100%">
-        <BarChart
-          data={data}
-          margin={{
-            top: 20,
-            right: 30,
-            left: 20,
-            bottom: 30,
-          }}
-          barGap={4}
-        >
-          <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-          <XAxis
-            dataKey="materialName"
-            tick={{ fill: '#374151', fontSize: 12, fontWeight: 500 }}
-            tickLine={{ stroke: '#e5e7eb' }}
-            axisLine={{ stroke: '#e5e7eb' }}
-            interval={0}
-            angle={-45}
-            textAnchor="end"
-            height={60}
-          />
-          <YAxis
-            tick={{ fill: '#374151', fontSize: 12, fontWeight: 500 }}
-            tickLine={{ stroke: '#e5e7eb' }}
-            axisLine={{ stroke: '#e5e7eb' }}
-            tickFormatter={(value) => new Intl.NumberFormat('es-ES', {
-              notation: 'compact',
-              maximumFractionDigits: 1
-            }).format(value)}
-          />
-          <Tooltip
-            formatter={(value: number, name: keyof typeof SUPPLIER_TYPE_MAP) => [
-              `${new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'EUR' }).format(value)}`,
-              SUPPLIER_TYPE_MAP[name] || name,
-            ]}
-            labelFormatter={(label: string) => `${label}`}
-            contentStyle={{
-              backgroundColor: 'white',
-              border: '1px solid #e5e7eb',
-              borderRadius: '6px',
-              padding: '8px',
-              fontSize: '13px',
-              fontWeight: 500,
-              boxShadow: '0 2px 4px rgba(0,0,0,0.05)',
-            }}
-            labelStyle={{
-              fontWeight: 600,
-              marginBottom: '4px',
-            }}
-          />
-          <Legend
-            wrapperStyle={{
-              paddingTop: '20px',
-            }}
-            formatter={(value) => (
-              <span style={{ color: '#374151', fontSize: '13px', fontWeight: 500 }}>
-                {value}
-              </span>
-            )}
-          />
-          <Bar
-            dataKey="MATERIAL_SUPPLIER"
-            fill={COLORS[0]}
-            name={SUPPLIER_TYPE_MAP.MATERIAL_SUPPLIER}
-            radius={[4, 4, 0, 0]}
-          />
-          <Bar
-            dataKey="MACHINERY_RENTAL"
-            fill={COLORS[1]}
-            name={SUPPLIER_TYPE_MAP.MACHINERY_RENTAL}
-            radius={[4, 4, 0, 0]}
-          />
-        </BarChart>
-      </ResponsiveContainer>
-    </div>
+    <Card className="w-full">
+      <CardHeader>
+        <CardTitle className="text-xl font-semibold">Materiales por Tipo de Proveedor</CardTitle>
+        <p className="text-sm text-muted-foreground">
+          Distribución de materiales entre proveedores y alquileres de maquinaria
+        </p>
+      </CardHeader>
+      <CardContent>
+        <div className="flex flex-col space-y-4">
+          {/* Custom Legend */}
+          <div className="flex justify-end gap-6">
+            {legendData.map((item) => (
+              <div key={item.value} className="flex items-center gap-2">
+                <div
+                  className="w-3 h-3 rounded-full"
+                  style={{ backgroundColor: item.color }}
+                />
+                <span className="text-sm text-muted-foreground">
+                  {item.type}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          {/* Chart */}
+          <div className="h-[350px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart
+                data={transformedData}
+                margin={{
+                  top: 5,
+                  right: 30,
+                  left: 20,
+                  bottom: 60,
+                }}
+                barSize={28}
+              >
+                <CartesianGrid
+                  strokeDasharray="3 3"
+                  stroke="#e5e7eb"
+                  vertical={false}
+                />
+                <XAxis
+                  dataKey="materialName"
+                  tick={{
+                    fill: '#6B7280',
+                    fontSize: 12,
+                    width: 80
+                  }}
+                  tickLine={false}
+                  axisLine={{ stroke: '#e5e7eb' }}
+                  interval={0}
+                  height={60}
+                  angle={-45}
+                  textAnchor="end"
+                />
+                <YAxis
+                  tick={{
+                    fill: '#6B7280',
+                    fontSize: 12,
+                  }}
+                  tickLine={false}
+                  axisLine={false}
+                  tickFormatter={(value) => `${value} mil`}
+                  width={60}
+                />
+                <Tooltip
+                  formatter={(value: number) => {
+                    return [`${value} mil €`]
+                  }}
+                  labelFormatter={(label: string, payload: Array<{ payload?: ChartDataEntry }>) => {
+                    const entry = payload?.[0]?.payload
+                    if (entry) {
+                      return `${label} - ${SUPPLIER_TYPE_MAP[entry.supplier]}`
+                    }
+                    return label
+                  }}
+                  contentStyle={{
+                    backgroundColor: 'white',
+                    border: '1px solid #e5e7eb',
+                    borderRadius: '8px',
+                    padding: '12px',
+                    fontSize: '13px',
+                    boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)',
+                  }}
+                  labelStyle={{
+                    fontWeight: 600,
+                    marginBottom: '8px',
+                    color: '#111827',
+                  }}
+                />
+                <Bar
+                  dataKey="value"
+                  name="value"
+                  radius={[4, 4, 0, 0]}
+                  fill={COLORS.Materiales}
+                  isAnimationActive={false}
+                >
+                  {transformedData.map((entry, index) => (
+                    <Cell
+                      key={`cell-${index}`}
+                      fill={COLORS[entry.supplier]}
+                    />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
   )
 }
