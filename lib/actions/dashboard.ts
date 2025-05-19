@@ -37,33 +37,33 @@ export async function getOverviewData() {
 
         const invoices = await prisma.invoice.findMany({
             where: {
-                issueDate: {
+                createdAt: {
                     gte: sixMonthsAgo
                 }
             },
             select: {
-                issueDate: true,
+                createdAt: true,
                 totalAmount: true
             },
             orderBy: {
-                issueDate: 'asc'
+                createdAt: 'asc'
             }
         })
 
         // Group by month and calculate total
         const monthlyData = invoices.reduce((acc, invoice) => {
-            const month = invoice.issueDate.toLocaleString('default', { month: 'long' })
+            const month = invoice.createdAt.toLocaleString('default', { month: 'long' })
             if (!acc[month]) {
                 acc[month] = 0
             }
-            acc[month] += Number(invoice.totalAmount)
+            acc[month] += 1 // Increment count for each invoice
             return acc
         }, {} as Record<string, number>)
 
         // Convert to array format expected by the chart
         return Object.entries(monthlyData).map(([name, total]) => ({
             name,
-            total: Math.round(total / 1000) // Convert to thousands for better display
+            total // Remove division by 1000
         }))
     } catch (error) {
         console.error('Database Error:', error)
@@ -117,7 +117,7 @@ export async function getMaterialsBySupplierType(): Promise<MaterialBySupplierTy
             if (dominantType) {
                 // Calculate total value from invoice items
                 const totalValue = material.invoiceItems.reduce((sum, item) =>
-                    sum + Number(item.totalPrice), 0);
+                    sum + item.totalPrice.toNumber(), 0);
 
                 materialsByType[material.name] = {
                     totalValue: Math.round(totalValue / 1000), // Convert to thousands for display

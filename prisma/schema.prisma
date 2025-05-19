@@ -44,7 +44,7 @@ model Invoice {
   id          String        @id @default(cuid())
   invoiceCode String        @unique // Código único de factura
   providerId  String
-  provider    Provider      @relation(fields: [providerId], references: [id])
+  provider    Provider      @relation(fields: [providerId], references: [id], onDelete: Cascade)
   issueDate   DateTime
   totalAmount Decimal       @db.Decimal(10, 2)
   pdfUrl      String? // URL al archivo PDF almacenado
@@ -76,7 +76,7 @@ model Material {
 model InvoiceItem {
   id         String   @id @default(cuid())
   invoiceId  String
-  invoice    Invoice  @relation(fields: [invoiceId], references: [id])
+  invoice    Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
   materialId String
   material   Material @relation(fields: [materialId], references: [id])
   quantity   Decimal  @db.Decimal(10, 2)
@@ -93,9 +93,9 @@ model InvoiceItem {
 model MaterialProvider {
   id         String   @id @default(cuid())
   materialId String
-  material   Material @relation(fields: [materialId], references: [id])
+  material   Material @relation(fields: [materialId], references: [id], onDelete: Cascade)
   providerId String
-  provider   Provider @relation(fields: [providerId], references: [id])
+  provider   Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
   lastPrice  Decimal  @db.Decimal(10, 2)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
@@ -109,9 +109,9 @@ model MaterialProvider {
 model PriceAlert {
   id         String      @id @default(cuid())
   materialId String
-  material   Material    @relation(fields: [materialId], references: [id])
+  material   Material    @relation(fields: [materialId], references: [id], onDelete: Cascade)
   providerId String
-  provider   Provider    @relation(fields: [providerId], references: [id])
+  provider   Provider    @relation(fields: [providerId], references: [id], onDelete: Cascade)
   oldPrice   Decimal     @db.Decimal(10, 2)
   newPrice   Decimal     @db.Decimal(10, 2)
   percentage Decimal     @db.Decimal(10, 2)

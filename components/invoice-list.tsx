@@ -56,7 +56,6 @@ export function InvoiceList({ invoices, totalPages, currentPage, pageSize, total
               <TableHead>Material</TableHead>
               <TableHead>Cantidad</TableHead>
               <TableHead>Importe</TableHead>
-              <TableHead>Precio Unitario</TableHead>
               <TableHead>Fecha</TableHead>
               <TableHead className="w-[80px]">Acciones</TableHead>
             </TableRow>
@@ -65,7 +64,6 @@ export function InvoiceList({ invoices, totalPages, currentPage, pageSize, total
             {invoices.length > 0 ? (
               invoices.map((invoice) => {
                 const firstItem = invoice.items[0];
-                const unitPrice = firstItem && firstItem.quantity > 0 ? firstItem.totalPrice / firstItem.quantity : 0;
                 return (
                   <TableRow key={invoice.id}>
                     <TableCell className="font-medium">{invoice.invoiceCode}</TableCell>
@@ -73,7 +71,6 @@ export function InvoiceList({ invoices, totalPages, currentPage, pageSize, total
                     <TableCell>{firstItem?.material.name || 'N/A'}</TableCell>
                     <TableCell>{firstItem?.quantity || 0}</TableCell>
                     <TableCell>{formatCurrency(Number(firstItem?.totalPrice || 0))}</TableCell>
-                    <TableCell>{formatCurrency(unitPrice)}</TableCell>
                     <TableCell>{invoice.issueDate.toLocaleDateString("es-ES")}</TableCell>
                     <TableCell>
                       <Link href={`/facturas/${invoice.id}`}>
@@ -87,7 +84,7 @@ export function InvoiceList({ invoices, totalPages, currentPage, pageSize, total
               })
             ) : (
               <TableRow>
-                <TableCell colSpan={8} className="h-24 text-center">
+                <TableCell colSpan={7} className="h-24 text-center">
                   {totalCount === 0 && !searchParams.size ? 'No hay facturas creadas todavía.' : 'No se encontraron facturas con los filtros aplicados.'}
                 </TableCell>
               </TableRow>

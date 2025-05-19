@@ -10,7 +10,7 @@ export default async function MaterialsPage() {
     <div className="flex flex-col gap-6">
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">Materiales</h1>
-        <NewMaterialButton />
+        {/* <NewMaterialButton /> */}
       </div>
 
       <Suspense fallback={<div className="h-96 rounded-lg bg-muted animate-pulse" />}>

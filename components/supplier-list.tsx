@@ -21,7 +21,7 @@ interface SupplierListProps {
 
 export function SupplierList({ suppliers }: SupplierListProps) {
   const [page, setPage] = useState(1)
-  const itemsPerPage = 5
+  const itemsPerPage = 10
 
   const totalPages = Math.ceil(suppliers.length / itemsPerPage)
   const paginatedSuppliers = suppliers.slice((page - 1) * itemsPerPage, page * itemsPerPage)

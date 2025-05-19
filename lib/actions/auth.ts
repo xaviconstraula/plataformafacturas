@@ -89,31 +89,31 @@ export async function login(
         }
     }
 
-    const data = validationResult.data
+    const data = validationResult.data;
+    const envEmail = process.env.LOGIN_EMAIL;
+    const envPassword = process.env.LOGIN_PASSWORD;
+
+    if (!envEmail || !envPassword) {
+        console.error("EMAIL or PASSWORD environment variables are not set.")
+        return {
+            error: "Error de configuración del servidor. Por favor, contacta al administrador.",
+            data: { email: data.email },
+        }
+    }
 
     try {
-        const user = await prisma.user.findUnique({
-            where: { email: data.email },
-            select: { id: true, password: true },
-        })
+        const emailMatch = data.email === envEmail
+        const passwordMatch = data.password === envPassword
 
-        if (!user) {
+        if (!emailMatch || !passwordMatch) {
             return {
                 error: "Credenciales inválidas",
                 data: { email: data.email },
             }
         }
 
-        const validPassword = await bcrypt.compare(data.password, user.password)
-
-        if (!validPassword) {
-            return {
-                error: "Credenciales inválidas",
-                data: { email: data.email },
-            }
-        }
-
-        await createSession(user.id)
+        // Using email as a user identifier for the session, as there's no DB user ID
+        await createSession(data.email)
         redirect("/dashboard")
 
     } catch (error) {

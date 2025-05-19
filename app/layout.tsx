@@ -2,7 +2,8 @@ import type React from "react"
 import type { Metadata } from "next"
 import { Inter } from "next/font/google"
 import "./globals.css"
-import { Toaster } from "@/components/ui/toaster"
+import { Toaster as ShadcnToaster } from "@/components/ui/toaster"
+import { Toaster as SonnerToaster } from "sonner"
 import Sidebar from "@/components/sidebar"
 
 const inter = Inter({ subsets: ["latin"] })
@@ -24,7 +25,8 @@ export default function RootLayout({
           <Sidebar />
           <main className="flex-1 overflow-auto p-6">{children}</main>
         </div>
-        <Toaster />
+        <ShadcnToaster />
+        <SonnerToaster richColors closeButton />
       </body>
     </html>
   )

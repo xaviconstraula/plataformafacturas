@@ -104,7 +104,6 @@ export function MaterialsBySupplier({ data: rawData }: MaterialsBySupplierProps)
                   left: 20,
                   bottom: 60,
                 }}
-                barSize={28}
               >
                 <CartesianGrid
                   strokeDasharray="3 3"
@@ -166,6 +165,7 @@ export function MaterialsBySupplier({ data: rawData }: MaterialsBySupplierProps)
                   radius={[4, 4, 0, 0]}
                   fill={COLORS.Materiales}
                   isAnimationActive={false}
+                  maxBarSize={60}
                 >
                   {transformedData.map((entry, index) => (
                     <Cell

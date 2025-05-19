@@ -9,11 +9,11 @@ import { Button } from '@/components/ui/button'
 import { createInvoiceFromFiles, type CreateInvoiceResult } from '@/lib/actions/invoices'
 
 interface InvoiceDropzoneProps {
-    onFilesAccepted?: (files: File[]) => void // Made optional as direct upload is now handled
+    onProcessingComplete?: (results: CreateInvoiceResult[]) => void;
     className?: string
 }
 
-export function InvoiceDropzone({ onFilesAccepted, className }: InvoiceDropzoneProps) {
+export function InvoiceDropzone({ onProcessingComplete, className }: InvoiceDropzoneProps) {
     const [files, setFiles] = useState<File[]>([])
     const [isUploading, setIsUploading] = useState(false)
 
@@ -22,16 +22,18 @@ export function InvoiceDropzone({ onFilesAccepted, className }: InvoiceDropzoneP
             if (fileRejections.length > 0) {
                 fileRejections.forEach(({ file, errors }) => {
                     errors.forEach((err) => {
-                        toast.error(`Error al subir archivo con "${file.name}"`, {
-                            description: err.message,
-                        });
+                        // Error toasts will be handled by the parent component via onProcessingComplete
+                        // toast.error(`Error al subir archivo con "${file.name}"`, {
+                        //     description: err.message,
+                        // });
                     })
                 })
             }
 
-            // Filter out any files that are too large
             const validFiles = acceptedFiles.filter(file => {
                 if (file.size > 5 * 1024 * 1024) {
+                    // This initial validation toast can stay or be moved to parent
+                    // For now, keeping it here for immediate feedback on drop.
                     toast.error(`El archivo ${file.name} es demasiado grande`, {
                         description: "El tamaño máximo permitido es 5MB"
                     })
@@ -71,43 +73,47 @@ export function InvoiceDropzone({ onFilesAccepted, className }: InvoiceDropzoneP
             formData.append("files", file);
         });
 
+        let operationResults: CreateInvoiceResult[] = [];
         try {
             const { overallSuccess, results } = await createInvoiceFromFiles(formData);
+            operationResults = results;
 
-            results.forEach((result: CreateInvoiceResult) => {
-                if (result.success) {
-                    let description = result.message;
-                    if (result.alertsCreated && result.alertsCreated > 0) {
-                        description += ` ${result.alertsCreated} price alert(s) generated.`;
-                    }
-                    toast.success(`File: ${result.fileName}`, {
-                        description: description,
-                    });
-                } else {
-                    toast.error(`File: ${result.fileName}`, {
-                        description: result.message,
-                    });
-                }
-            });
+            // Individual toasts removed from here, will be handled by parent via onProcessingComplete
+            // results.forEach((result: CreateInvoiceResult) => {
+            //     if (result.success) {
+            //         let description = result.message;
+            //         if (result.alertsCreated && result.alertsCreated > 0) {
+            //             description += ` ${result.alertsCreated} price alert(s) generated.`;
+            //         }
+            //         toast.success(`File: ${result.fileName}`, {
+            //             description: description,
+            //         });
+            //     } else {
+            //         toast.error(`File: ${result.fileName}`, {
+            //             description: result.message,
+            //         });
+            //     }
+            // });
 
             if (overallSuccess) {
                 setFiles([]); // Clear files after successful processing of all
-                // Call the original onFilesAccepted if it exists and is needed for other UI updates
-                if (onFilesAccepted) {
-                    onFilesAccepted(files); // Though files are now processed, this could signal completion
-                }
-            } else {
-                // Optionally, remove only successfully processed files from the list
-                // For simplicity now, we keep files if there was any failure, or clear all on full success.
             }
+            // If not overallSuccess, files are kept for the user to see which ones might have failed.
+            // Parent component will show specific error messages.
 
         } catch (error) {
             console.error("Error creating invoices:", error);
-            toast.error("An unexpected error occurred", {
-                description: "Could not process the invoices. Please try again.",
+            // Generic fallback error, parent will also receive an empty or partial results array
+            toast.error("An unexpected error occurred during processing", {
+                description: "Could not process all invoices. Please try again.",
             });
+            // Construct a fallback result if needed, or ensure onProcessingComplete handles empty/error states
+            // For simplicity, we let onProcessingComplete handle potentially empty operationResults
         } finally {
             setIsUploading(false);
+            if (onProcessingComplete) {
+                onProcessingComplete(operationResults); // Call with results, even if an exception occurred (it might be empty)
+            }
         }
     }
 

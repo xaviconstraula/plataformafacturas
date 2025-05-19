@@ -21,7 +21,7 @@ interface MaterialListProps {
 
 export function MaterialList({ materials }: MaterialListProps) {
   const [page, setPage] = useState(1)
-  const itemsPerPage = 5
+  const itemsPerPage = 10
 
   const totalPages = Math.ceil(materials.length / itemsPerPage)
   const paginatedMaterials = materials.slice((page - 1) * itemsPerPage, page * itemsPerPage)
