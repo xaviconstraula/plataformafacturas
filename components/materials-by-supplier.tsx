@@ -131,12 +131,12 @@ export function MaterialsBySupplier({ data: rawData }: MaterialsBySupplierProps)
                   }}
                   tickLine={false}
                   axisLine={false}
-                  tickFormatter={(value) => `${value} mil`}
+                  tickFormatter={(value) => String(value)}
                   width={60}
                 />
                 <Tooltip
                   formatter={(value: number) => {
-                    return [`${value} mil €`]
+                    return [`${value} €`]
                   }}
                   labelFormatter={(label: string, payload: Array<{ payload?: ChartDataEntry }>) => {
                     const entry = payload?.[0]?.payload
@@ -163,7 +163,6 @@ export function MaterialsBySupplier({ data: rawData }: MaterialsBySupplierProps)
                   dataKey="value"
                   name="value"
                   radius={[4, 4, 0, 0]}
-                  fill={COLORS.Materiales}
                   isAnimationActive={false}
                   maxBarSize={60}
                 >

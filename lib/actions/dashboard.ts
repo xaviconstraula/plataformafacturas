@@ -120,7 +120,7 @@ export async function getMaterialsBySupplierType(): Promise<MaterialBySupplierTy
                     sum + item.totalPrice.toNumber(), 0);
 
                 materialsByType[material.name] = {
-                    totalValue: Math.round(totalValue / 1000), // Convert to thousands for display
+                    totalValue: totalValue, // Store the raw total value
                     providerType: dominantType
                 };
             }

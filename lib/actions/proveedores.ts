@@ -5,6 +5,8 @@ import { unstable_noStore as noStore } from 'next/cache'
 import { ProviderType } from '@/generated/prisma' // Assuming alias is correct
 import { revalidatePath } from 'next/cache'
 import { z } from 'zod'
+import { type PrismaClient } from "@prisma/client"
+import { type Provider } from "@/generated/prisma"
 
 export async function getSuppliers() {
     noStore() // Opt out of caching for this dynamic data
@@ -108,6 +110,67 @@ export async function createSupplier(
             message: 'Error de base de datos al crear el proveedor.',
             errors: {}, // Avoid exposing detailed db errors
         }
+    }
+}
+
+export async function deleteProviderAction(providerId: string) {
+    if (!providerId) {
+        return { success: false, message: "ID de proveedor no proporcionado." };
+    }
+
+    try {
+        await prisma.provider.delete({
+            where: { id: providerId },
+        });
+
+        revalidatePath("/proveedores");
+        return { success: true, message: "Proveedor eliminado correctamente." };
+    } catch (error) {
+        console.error("Error deleting provider:", error);
+        if (error instanceof Error) {
+            if ('code' in error && error.code === 'P2025') {
+                revalidatePath("/proveedores");
+                return { success: false, message: "El proveedor no existe o ya ha sido eliminado." };
+            }
+            if ('code' in error && error.code === 'P2003') {
+                return { success: false, message: "No se puede eliminar el proveedor porque tiene facturas asociadas." };
+            }
+        }
+        return { success: false, message: "Error al eliminar el proveedor." };
+    }
+}
+
+export async function editProviderAction(providerId: string, data: {
+    name: string;
+    email?: string | null;
+    phone?: string | null;
+    address?: string | null;
+}) {
+    if (!providerId) {
+        return { success: false, message: "ID de proveedor no proporcionado." };
+    }
+
+    try {
+        await prisma.provider.update({
+            where: { id: providerId },
+            data: {
+                name: data.name,
+                email: data.email,
+                phone: data.phone,
+                address: data.address,
+            },
+        });
+
+        revalidatePath("/proveedores");
+        return { success: true, message: "Proveedor actualizado correctamente." };
+    } catch (error) {
+        console.error("Error updating provider:", error);
+        if (error instanceof Error) {
+            if ('code' in error && error.code === 'P2025') {
+                return { success: false, message: "El proveedor no existe." };
+            }
+        }
+        return { success: false, message: "Error al actualizar el proveedor." };
     }
 }
 

@@ -5,6 +5,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Button } from "@/components/ui/button"
 import { ChevronLeftIcon, ChevronRightIcon, EyeIcon } from "lucide-react"
 import { formatCurrency } from "@/lib/utils"
+import { DeleteInvoiceButton } from "./delete-invoice-button"
 
 interface InvoiceListProps {
   invoices: {
@@ -57,7 +58,7 @@ export function InvoiceList({ invoices, totalPages, currentPage, pageSize, total
               <TableHead>Cantidad</TableHead>
               <TableHead>Importe</TableHead>
               <TableHead>Fecha</TableHead>
-              <TableHead className="w-[80px]">Acciones</TableHead>
+              <TableHead className="w-[120px] text-right">Acciones</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -72,12 +73,13 @@ export function InvoiceList({ invoices, totalPages, currentPage, pageSize, total
                     <TableCell>{firstItem?.quantity || 0}</TableCell>
                     <TableCell>{formatCurrency(Number(firstItem?.totalPrice || 0))}</TableCell>
                     <TableCell>{invoice.issueDate.toLocaleDateString("es-ES")}</TableCell>
-                    <TableCell>
-                      <Link href={`/facturas/${invoice.id}`}>
-                        <Button variant="ghost" size="icon">
+                    <TableCell className="text-right">
+                      <Link href={`/facturas/${invoice.id}`} passHref>
+                        <Button variant="ghost" size="icon" aria-label="Ver factura">
                           <EyeIcon className="h-4 w-4" />
                         </Button>
                       </Link>
+                      <DeleteInvoiceButton invoiceId={invoice.id} />
                     </TableCell>
                   </TableRow>
                 )

@@ -2,6 +2,7 @@
 
 import { prisma } from "@/lib/db"
 import { Prisma } from "@/generated/prisma"
+import { revalidatePath } from "next/cache"
 
 interface GetInvoicesParams {
     month?: string
@@ -109,6 +110,36 @@ export async function getInvoices(params: GetInvoicesParams) {
             throw new Error(`Failed to fetch invoices: ${error.message}`);
         }
         throw new Error('Failed to fetch invoices due to an unknown error');
+    }
+}
+
+export async function deleteInvoiceAction(invoiceId: string) {
+    if (!invoiceId) {
+        return { success: false, message: "ID de factura no proporcionado." };
+    }
+
+    try {
+        // Prisma automatically handles cascading deletes for related InvoiceItems
+        // if the relation is defined with `onDelete: Cascade` in the schema.
+        // If not, InvoiceItems need to be deleted manually first:
+        // await prisma.invoiceItem.deleteMany({ where: { invoiceId } });
+
+        await prisma.invoice.delete({
+            where: { id: invoiceId },
+        });
+
+        revalidatePath("/facturas");
+        return { success: true, message: "Factura eliminada correctamente." };
+    } catch (error) {
+        console.error("Error deleting invoice:", error);
+        // Check if it's a Prisma error for record not found (e.g., already deleted)
+        if (error instanceof Prisma.PrismaClientKnownRequestError) {
+            if (error.code === 'P2025') {
+                revalidatePath("/facturas"); // Still revalidate, as it might have been deleted by another request
+                return { success: false, message: "La factura no existe o ya ha sido eliminada." };
+            }
+        }
+        return { success: false, message: "Error al eliminar la factura." };
     }
 }
 

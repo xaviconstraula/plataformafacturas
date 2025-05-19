@@ -1,5 +1,5 @@
 import { Suspense } from "react"
-import { SupplierList } from "@/components/supplier-list"
+import { ProviderList } from "@/components/provider-list"
 import { getSuppliers } from "@/lib/actions/proveedores"
 import { NewSupplierButton } from "@/components/new-supplier-button"
 
@@ -14,7 +14,7 @@ export default async function SuppliersPage() {
       </div>
 
       <Suspense fallback={<div className="h-96 rounded-lg bg-muted animate-pulse" />}>
-        <SupplierList suppliers={suppliers} />
+        <ProviderList providers={suppliers} />
       </Suspense>
     </div>
   )
