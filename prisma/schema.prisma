@@ -91,18 +91,20 @@ model InvoiceItem {
 
 // Tabla de relación entre Materiales y Proveedores
 model MaterialProvider {
-  id         String   @id @default(cuid())
-  materialId String
-  material   Material @relation(fields: [materialId], references: [id], onDelete: Cascade)
-  providerId String
-  provider   Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
-  lastPrice  Decimal  @db.Decimal(10, 2)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id            String    @id @default(cuid())
+  materialId    String
+  material      Material  @relation(fields: [materialId], references: [id], onDelete: Cascade)
+  providerId    String
+  provider      Provider  @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  lastPrice     Decimal   @db.Decimal(10, 2)
+  lastPriceDate DateTime? // issueDate of the invoice that set this lastPrice
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
   @@unique([materialId, providerId])
   @@index([materialId])
   @@index([providerId])
+  @@index([lastPriceDate]) // Index for querying by date
 }
 
 // Modelo para Alertas de Precios

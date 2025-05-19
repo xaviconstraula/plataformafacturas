@@ -28,6 +28,23 @@ export interface CreateInvoiceResult {
     fileName?: string;
 }
 
+// Type for items after initial extraction and validation, before sorting
+interface ExtractedFileItem {
+    file: File;
+    extractedData: ExtractedPdfData | null;
+    error?: string; // Error during extraction or initial validation
+    fileName: string; // Store filename for results
+}
+
+// Type for the result of the transaction part of processing
+interface TransactionOperationResult {
+    success: boolean;
+    message: string;
+    invoiceId?: string;
+    alertsCreated?: number;
+    isExisting?: boolean; // To distinguish from new invoices
+}
+
 async function callPdfExtractAPI(file: File): Promise<ExtractedPdfData | null> {
     try {
         console.log(`Starting PDF extraction for file: ${file.name}`);
@@ -220,6 +237,7 @@ async function processInvoiceItemTx(
     tx: Prisma.TransactionClient,
     itemData: ExtractedPdfItemData,
     invoiceId: string,
+    invoiceIssueDate: Date,
     providerId: string,
     createdMaterial: Material
 ): Promise<{ invoiceItem: InvoiceItem; alert?: PriceAlert }> {
@@ -232,22 +250,72 @@ async function processInvoiceItemTx(
     }
 
     const quantityDecimal = new Prisma.Decimal(quantity.toFixed(2));
-    const unitPriceDecimal = new Prisma.Decimal(unitPrice.toFixed(2));
+    const currentUnitPriceDecimal = new Prisma.Decimal(unitPrice.toFixed(2));
     const totalPriceDecimal = new Prisma.Decimal(totalPrice.toFixed(2));
 
-    console.log(`[Invoice ${invoiceId}] Processing item: Material '${createdMaterial.name}' (ID: ${createdMaterial.id}), Provider ID: ${providerId}, Extracted Unit Price: ${itemData.unitPrice}, Normalized Unit Price: ${unitPriceDecimal}`);
+    console.log(`[Invoice ${invoiceId} @ ${invoiceIssueDate.toISOString()}] Processing item: Material '${createdMaterial.name}' (ID: ${createdMaterial.id}), Provider ID: ${providerId}, Extracted Unit Price: ${itemData.unitPrice}, Normalized Unit Price: ${currentUnitPriceDecimal}`);
 
     const invoiceItem = await tx.invoiceItem.create({
         data: {
             invoiceId,
             materialId: createdMaterial.id,
             quantity: quantityDecimal,
-            unitPrice: unitPriceDecimal,
+            unitPrice: currentUnitPriceDecimal,
             totalPrice: totalPriceDecimal,
         },
     });
 
     let alert: PriceAlert | undefined;
+
+    // Find the chronologically previous invoice item for this material and provider
+    const previousInvoiceItemRecord = await tx.invoiceItem.findFirst({
+        where: {
+            materialId: createdMaterial.id,
+            invoice: {
+                providerId: providerId,
+                issueDate: { lt: invoiceIssueDate },
+            },
+            NOT: {
+                id: invoiceItem.id
+            }
+        },
+        orderBy: { invoice: { issueDate: 'desc' } },
+        select: { unitPrice: true, invoice: { select: { issueDate: true } } }
+    });
+
+    if (previousInvoiceItemRecord) {
+        const previousPrice = previousInvoiceItemRecord.unitPrice;
+        console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Previous price from ${previousInvoiceItemRecord.invoice.issueDate.toISOString()}: ${previousPrice}. Current unit price from ${invoiceIssueDate.toISOString()}: ${currentUnitPriceDecimal}.`);
+
+        if (!currentUnitPriceDecimal.equals(previousPrice)) {
+            const priceDiff = currentUnitPriceDecimal.minus(previousPrice);
+            let percentageChangeDecimal: Prisma.Decimal;
+
+            if (!previousPrice.isZero()) {
+                percentageChangeDecimal = priceDiff.dividedBy(previousPrice).times(100);
+            } else {
+                percentageChangeDecimal = new Prisma.Decimal(currentUnitPriceDecimal.isPositive() ? 9999 : -9999);
+            }
+
+            alert = await tx.priceAlert.create({
+                data: {
+                    materialId: createdMaterial.id,
+                    providerId,
+                    oldPrice: previousPrice,
+                    newPrice: currentUnitPriceDecimal,
+                    percentage: percentageChangeDecimal,
+                    status: "PENDING",
+                },
+            });
+            console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Price alert created. Old: ${previousPrice}, New: ${currentUnitPriceDecimal}, Change: ${percentageChangeDecimal.toFixed(2)}%`);
+        } else {
+            console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Price (${currentUnitPriceDecimal}) is unchanged compared to previous invoice item dated ${previousInvoiceItemRecord.invoice.issueDate.toISOString()}.`);
+        }
+    } else {
+        console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] No chronologically prior invoice item found for material ${createdMaterial.id} / provider ${providerId} before ${invoiceIssueDate.toISOString()}. This is treated as the first price recording for alert purposes.`);
+    }
+
+    // Update MaterialProvider to reflect the price from the invoice with the LATEST issueDate
     const materialProvider = await tx.materialProvider.findUnique({
         where: {
             materialId_providerId: {
@@ -258,55 +326,30 @@ async function processInvoiceItemTx(
     });
 
     if (materialProvider) {
-        const lastPriceDecimal = materialProvider.lastPrice;
-        console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Existing MaterialProvider record found. Last recorded price: ${lastPriceDecimal}, Current unit price: ${unitPriceDecimal}.`);
-
-        if (unitPriceDecimal.greaterThan(lastPriceDecimal)) {
-            const priceDiff = unitPriceDecimal.minus(lastPriceDecimal);
-            console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Price increased. Old: ${lastPriceDecimal}, New: ${unitPriceDecimal}, Difference: ${priceDiff}. Proceeding to create alert.`);
-            let percentageIncreaseDecimal: Prisma.Decimal;
-
-            if (!lastPriceDecimal.isZero()) {
-                percentageIncreaseDecimal = priceDiff.dividedBy(lastPriceDecimal).times(100);
-            } else { // lastPriceDecimal is zero and unitPriceDecimal > 0
-                // Handle case where old price was 0, new price is positive
-                // Assign a very large number or a specific code for "infinite" percentage
-                percentageIncreaseDecimal = new Prisma.Decimal(9999); // Placeholder for a very large percentage
+        if (!materialProvider.lastPriceDate || invoiceIssueDate.getTime() > materialProvider.lastPriceDate.getTime()) {
+            if (!materialProvider.lastPrice.equals(currentUnitPriceDecimal) || (materialProvider.lastPriceDate && invoiceIssueDate.getTime() !== materialProvider.lastPriceDate.getTime()) || !materialProvider.lastPriceDate) {
+                console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Updating MaterialProvider. Old lastPriceDate: ${materialProvider.lastPriceDate?.toISOString()}, Old lastPrice: ${materialProvider.lastPrice}. New (from current invoice): Date ${invoiceIssueDate.toISOString()}, Price ${currentUnitPriceDecimal}.`);
+                await tx.materialProvider.update({
+                    where: { id: materialProvider.id },
+                    data: {
+                        lastPrice: currentUnitPriceDecimal,
+                        lastPriceDate: invoiceIssueDate,
+                    },
+                });
+            } else {
+                console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] MaterialProvider already reflects the latest price and date from this or a newer invoice. Price: ${currentUnitPriceDecimal} @ ${invoiceIssueDate.toISOString()}. Stored: ${materialProvider.lastPrice} @ ${materialProvider.lastPriceDate?.toISOString()}. No update to MaterialProvider needed.`);
             }
-
-            alert = await tx.priceAlert.create({
-                data: {
-                    materialId: createdMaterial.id,
-                    providerId,
-                    oldPrice: lastPriceDecimal,
-                    newPrice: unitPriceDecimal,
-                    percentage: percentageIncreaseDecimal,
-                    status: "PENDING",
-                },
-            });
-            console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Price alert created with ID: ${alert.id}.`);
         } else {
-            console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Price not increased (or decreased/same). Old: ${lastPriceDecimal}, New: ${unitPriceDecimal}. No alert created.`);
-        }
-
-        // Update lastPrice if it has changed, regardless of alert generation
-        if (!materialProvider.lastPrice.equals(unitPriceDecimal)) {
-            console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Updating MaterialProvider lastPrice from ${materialProvider.lastPrice} to ${unitPriceDecimal}.`);
-            await tx.materialProvider.update({
-                where: { id: materialProvider.id },
-                data: { lastPrice: unitPriceDecimal },
-            });
-        } else {
-            console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] MaterialProvider lastPrice (${unitPriceDecimal}) is unchanged. No update needed.`);
+            console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Current invoice (${invoiceIssueDate.toISOString()}) is older than or same as MaterialProvider's lastPriceDate (${materialProvider.lastPriceDate?.toISOString()}). MaterialProvider not updated by this invoice's data.`);
         }
     } else {
-        // First time seeing this material from this provider, record its price
-        console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] First time encountering this material from this provider (Provider ID: ${providerId}). Recording initial price: ${unitPriceDecimal}.`);
+        console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] First MaterialProvider record for material ${createdMaterial.id} / provider ${providerId}. Setting initial price ${currentUnitPriceDecimal} from invoice date ${invoiceIssueDate.toISOString()}.`);
         await tx.materialProvider.create({
             data: {
                 materialId: createdMaterial.id,
                 providerId,
-                lastPrice: unitPriceDecimal,
+                lastPrice: currentUnitPriceDecimal,
+                lastPriceDate: invoiceIssueDate,
             },
         });
     }
@@ -322,32 +365,75 @@ export async function createInvoiceFromFiles(
         return { overallSuccess: false, results: [{ success: false, message: "No files provided.", fileName: "N/A" }] };
     }
 
-    async function processSingleFile(file: File): Promise<CreateInvoiceResult> {
-        console.log(`Processing file: ${file.name}`);
+    const extractionResults: ExtractedFileItem[] = [];
+
+    // 1. Extract data from all files
+    for (const file of files) {
+        console.log(`Processing file for extraction: ${file.name}`);
         if (file.size === 0) {
             console.warn(`Skipping empty file: ${file.name}`);
-            return { success: false, message: "File is empty.", fileName: file.name };
+            extractionResults.push({ file, extractedData: null, error: "File is empty.", fileName: file.name });
+            continue;
         }
         if (file.type !== 'application/pdf') {
             console.warn(`Skipping non-PDF file: ${file.name}, type: ${file.type}`);
-            return { success: false, message: "File is not a PDF.", fileName: file.name };
+            extractionResults.push({ file, extractedData: null, error: "File is not a PDF.", fileName: file.name });
+            continue;
         }
 
         const extractedData = await callPdfExtractAPI(file);
 
         if (!extractedData) {
             console.error(`Failed to extract data for file: ${file.name}`);
-            return { success: false, message: "Failed to extract data from PDF.", fileName: file.name };
+            extractionResults.push({ file, extractedData: null, error: "Failed to extract data from PDF.", fileName: file.name });
+            continue;
         }
 
         if (!extractedData.invoiceCode || !extractedData.provider?.cif || !extractedData.issueDate || typeof extractedData.totalAmount !== 'number' || !extractedData.items?.length) {
             console.warn(`Missing crucial data for file: ${file.name}. Data: ${JSON.stringify(extractedData)}`);
-            return { success: false, message: "Missing or invalid crucial data after PDF extraction. Check invoice code, provider CIF, issue date, total amount, or items.", fileName: file.name };
+            extractionResults.push({ file, extractedData, error: "Missing or invalid crucial data after PDF extraction. Check invoice code, provider CIF, issue date, total amount, or items.", fileName: file.name });
+            continue;
         }
+        try {
+            // Validate date format early for sorting
+            new Date(extractedData.issueDate);
+            extractionResults.push({ file, extractedData, fileName: file.name });
+        } catch (dateError) {
+            console.warn(`Invalid issue date format for file: ${file.name}. Date: ${extractedData.issueDate}`);
+            extractionResults.push({ file, extractedData, error: `Invalid issue date format: ${extractedData.issueDate}.`, fileName: file.name });
+        }
+    }
+
+    // 2. Separate items with extraction errors from processable items
+    const finalResults: CreateInvoiceResult[] = [];
+    const processableItems: ExtractedFileItem[] = [];
+
+    for (const item of extractionResults) {
+        if (item.error) {
+            finalResults.push({ success: false, message: item.error, fileName: item.fileName });
+        } else if (item.extractedData) { // Ensure extractedData is not null
+            processableItems.push(item);
+        }
+    }
+
+    // 3. Sort processable items by issueDate (ascending)
+    // Ensure data and issueDate are valid before comparison, though errors should be caught.
+    processableItems.sort((a, b) => {
+        const dateA = a.extractedData?.issueDate ? new Date(a.extractedData.issueDate).getTime() : 0;
+        const dateB = b.extractedData?.issueDate ? new Date(b.extractedData.issueDate).getTime() : 0;
+        if (dateA === 0 || dateB === 0) return 0; // Should not happen for processable items
+        return dateA - dateB;
+    });
+
+    console.log("Processing order after sorting by issue date:", processableItems.map(p => ({ file: p.fileName, date: p.extractedData?.issueDate })));
+
+    // 4. Process sorted items sequentially
+    for (const { file, extractedData, fileName } of processableItems) {
+        if (!extractedData) continue; // Should have been filtered, but as a safeguard
 
         try {
-            console.log(`Starting database transaction for invoice from file: ${file.name}, invoice code: ${extractedData.invoiceCode}`);
-            const operationResult = await prisma.$transaction(async (tx) => {
+            console.log(`Starting database transaction for sorted invoice from file: ${fileName}, invoice code: ${extractedData.invoiceCode}, issue date: ${extractedData.issueDate}`);
+            const operationResult: TransactionOperationResult = await prisma.$transaction(async (tx) => {
                 const provider = await findOrCreateProviderTx(tx, extractedData.provider);
 
                 const existingInvoice = await tx.invoice.findFirst({
@@ -358,7 +444,7 @@ export async function createInvoiceFromFiles(
                 });
 
                 if (existingInvoice) {
-                    console.log(`Invoice ${extractedData.invoiceCode} from provider ${provider.name} already exists. Skipping creation for file: ${file.name}`);
+                    console.log(`Invoice ${extractedData.invoiceCode} from provider ${provider.name} (file: ${fileName}) already exists. Skipping creation.`);
                     return { success: true, message: `Invoice ${extractedData.invoiceCode} from provider ${provider.name} already exists.`, invoiceId: existingInvoice.id, alertsCreated: 0, isExisting: true };
                 }
 
@@ -373,57 +459,55 @@ export async function createInvoiceFromFiles(
                 });
 
                 let alertsCounter = 0;
+                const currentInvoiceIssueDate = new Date(extractedData.issueDate);
+
                 for (const itemData of extractedData.items) {
                     if (!itemData.materialName) {
-                        console.warn(`Skipping item due to missing material name in invoice ${invoice.invoiceCode} from file ${file.name}`);
+                        console.warn(`Skipping item due to missing material name in invoice ${invoice.invoiceCode} from file ${fileName}`);
                         continue;
                     }
-                    // Ensure materialDescription is passed
                     const material = await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialDescription);
-                    const { alert } = await processInvoiceItemTx(tx, itemData, invoice.id, provider.id, material);
+                    const { alert } = await processInvoiceItemTx(tx, itemData, invoice.id, currentInvoiceIssueDate, provider.id, material);
                     if (alert) {
                         alertsCounter++;
                     }
                 }
-                console.log(`Successfully created invoice ${invoice.invoiceCode} from file: ${file.name}. Alerts created: ${alertsCounter}`);
+                console.log(`Successfully created invoice ${invoice.invoiceCode} from file: ${fileName}. Alerts created: ${alertsCounter}`);
                 return { success: true, message: `Invoice ${invoice.invoiceCode} created successfully.`, invoiceId: invoice.id, alertsCreated: alertsCounter, isExisting: false };
             });
 
             if (operationResult.isExisting) {
-                return { success: true, message: operationResult.message, invoiceId: operationResult.invoiceId, fileName: file.name };
+                finalResults.push({ success: true, message: operationResult.message, invoiceId: operationResult.invoiceId, fileName });
+            } else {
+                finalResults.push({ success: operationResult.success, message: operationResult.message, invoiceId: operationResult.invoiceId, alertsCreated: operationResult.alertsCreated, fileName });
             }
-            return { success: operationResult.success, message: operationResult.message, invoiceId: operationResult.invoiceId, alertsCreated: operationResult.alertsCreated, fileName: file.name };
 
         } catch (error: unknown) {
-            console.error(`Error processing invoice from ${file.name}:`, error);
-            const baseMessage = `Failed to create invoice from ${file.name}`;
+            console.error(`Error processing sorted invoice from ${fileName}:`, error);
+            const baseMessage = `Failed to create invoice from ${fileName}`;
             let specificMessage = "An unexpected error occurred.";
 
             if (error instanceof Error) {
                 specificMessage = error.message;
             }
 
-            // Type guard for Prisma P2002 error
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const isPrismaP2002Error = (e: any): e is { code: string; meta?: { target?: string[] } } => {
-                return typeof e === 'object' && e !== null && 'code' in e && e.code === 'P2002';
+            const isPrismaP2002Error = (e: unknown): e is { code: string; meta?: { target?: string[] } } => {
+                return typeof e === 'object' && e !== null && 'code' in e && (e as { code: unknown }).code === 'P2002';
             };
 
             if (isPrismaP2002Error(error)) {
                 if (error.meta && error.meta.target && error.meta.target.includes('invoiceCode') && extractedData) {
-                    console.warn(`Duplicate invoice code '${extractedData.invoiceCode}' for file: ${file.name}`);
-                    return { success: false, message: `${baseMessage}: An invoice with code '${extractedData.invoiceCode}' already exists.`, fileName: file.name };
+                    console.warn(`Duplicate invoice code '${extractedData.invoiceCode}' for file: ${fileName}`);
+                    specificMessage = `An invoice with code '${extractedData.invoiceCode}' already exists.`;
                 }
             }
-            return { success: false, message: `${baseMessage}: ${specificMessage}`, fileName: file.name };
+            finalResults.push({ success: false, message: `${baseMessage}: ${specificMessage}`, fileName });
         }
     }
 
-    const results = await Promise.all(files.map(file => processSingleFile(file)));
+    const overallSuccess = finalResults.every(r => r.success);
+    const newlyCreatedInvoices = finalResults.filter(r => r.success && r.invoiceId && !r.message.includes("already exists"));
 
-    const overallSuccess = results.every(r => r.success);
-
-    const newlyCreatedInvoices = results.filter(r => r.success && r.invoiceId && !r.message.includes("already exists"));
     if (newlyCreatedInvoices.length > 0) {
         revalidatePath("/facturas");
         console.log("Revalidated /facturas path.");
@@ -433,5 +517,5 @@ export async function createInvoiceFromFiles(
         }
     }
 
-    return { overallSuccess, results };
+    return { overallSuccess, results: finalResults };
 } 

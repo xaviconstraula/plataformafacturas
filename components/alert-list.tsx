@@ -71,7 +71,11 @@ export function AlertList({ initialAlerts }: AlertListProps) {
                     ? "text-green-500"
                     : alert.status === "REJECTED"
                       ? "text-red-500"
-                      : "text-amber-500"
+                      : alert.status === "PENDING"
+                        ? alert.percentageChange > 0
+                          ? "text-amber-500"
+                          : "text-blue-500"
+                        : "text-gray-500"
                     }`}
                 />
                 <CardTitle>{alert.material.name}</CardTitle>
@@ -82,14 +86,21 @@ export function AlertList({ initialAlerts }: AlertListProps) {
                   ? "border-green-200 bg-green-100 text-green-700"
                   : alert.status === "REJECTED"
                     ? "border-red-200 bg-red-100 text-red-700"
-                    : "border-amber-200 bg-amber-100 text-amber-700"
+                    : alert.status === "PENDING"
+                      ? alert.percentageChange > 0
+                        ? "border-amber-200 bg-amber-100 text-amber-700"
+                        : "border-blue-200 bg-blue-100 text-blue-700"
+                      : "border-gray-200 bg-gray-100 text-gray-700"
                   }`}
               >
                 {alert.status === "APPROVED"
                   ? "Aprobado"
                   : alert.status === "REJECTED"
                     ? "Rechazado"
-                    : `+${formatPercentage(alert.percentageChange)}`}
+                    : alert.status === "PENDING"
+                      ? `${alert.percentageChange > 0 ? "+" : ""}${formatPercentage(alert.percentageChange)}`
+                      : formatPercentage(alert.percentageChange)
+                }
               </Badge>
             </div>
             <CardDescription>

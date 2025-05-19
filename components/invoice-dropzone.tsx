@@ -1,8 +1,8 @@
 'use client'
 
-import { useCallback, useState } from 'react'
+import { useCallback, useState, useEffect } from 'react'
 import { useDropzone, type FileRejection } from 'react-dropzone'
-import { UploadCloudIcon, XIcon, FileIcon } from 'lucide-react'
+import { UploadCloudIcon, XIcon, FileIcon, BotIcon, Loader2Icon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -16,6 +16,25 @@ interface InvoiceDropzoneProps {
 export function InvoiceDropzone({ onProcessingComplete, className }: InvoiceDropzoneProps) {
     const [files, setFiles] = useState<File[]>([])
     const [isUploading, setIsUploading] = useState(false)
+    const [loadingStep, setLoadingStep] = useState<'processing' | 'analyzing'>('processing');
+
+    useEffect(() => {
+        let timerId: ReturnType<typeof setTimeout> | undefined;
+        if (isUploading && loadingStep === 'processing') {
+            timerId = setTimeout(() => {
+                setLoadingStep('analyzing');
+            }, 3000); // 3 seconds delay
+        }
+        return () => {
+            if (timerId) clearTimeout(timerId);
+        };
+    }, [isUploading, loadingStep]);
+
+    useEffect(() => {
+        if (!isUploading) {
+            setLoadingStep('processing');
+        }
+    }, [isUploading]);
 
     const onDrop = useCallback(
         (acceptedFiles: File[], fileRejections: FileRejection[]) => {
@@ -187,9 +206,28 @@ export function InvoiceDropzone({ onProcessingComplete, className }: InvoiceDrop
                         disabled={isUploading || files.length === 0}
                     >
                         {isUploading ? (
-                            <div className="flex items-center gap-2">
-                                <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                                <span>Procesando...</span>
+                            <div className="flex items-center justify-center gap-2 relative h-5">
+                                {/* Processing Step */}
+                                <div
+                                    className={cn(
+                                        "absolute inset-0 flex items-center justify-center gap-2 transition-opacity duration-300 ease-in-out",
+                                        loadingStep === 'processing' ? 'opacity-100' : 'opacity-0 pointer-events-none'
+                                    )}
+                                >
+                                    <Loader2Icon className="h-4 w-4 animate-spin" />
+                                    <span>Procesando...</span>
+                                </div>
+
+                                {/* Analyzing Step */}
+                                <div
+                                    className={cn(
+                                        "absolute inset-0 flex items-center justify-center gap-2 transition-opacity duration-300 ease-in-out",
+                                        loadingStep === 'analyzing' ? 'opacity-100' : 'opacity-0 pointer-events-none'
+                                    )}
+                                >
+                                    <BotIcon className="h-4 w-4 animate-pulse" />
+                                    <span>Analizando...</span>
+                                </div>
                             </div>
                         ) : (
                             `Procesar ${files.length} Factura${files.length > 1 ? 's' : ''}`
