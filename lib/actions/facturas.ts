@@ -73,7 +73,7 @@ export async function getInvoices(params: GetInvoicesParams) {
                     }
                 },
                 orderBy: {
-                    issueDate: 'desc'
+                    createdAt: 'desc'
                 }
             })
         ])

@@ -100,7 +100,7 @@ export function InvoiceFilters() {
   // Effect to update URL when debounced search term or other filters change
   useEffect(() => {
     updateUrlParams()
-  }, [debouncedSearchTerm, month, quarter, year, updateUrlParams])
+  }, [debouncedSearchTerm, month, quarter, year])
 
   // Handlers for select changes
   const handleMonthChange = (value: string) => {

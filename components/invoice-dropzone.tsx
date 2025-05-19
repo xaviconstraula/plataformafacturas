@@ -6,9 +6,10 @@ import { UploadCloudIcon, XIcon, FileIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
+import { createInvoiceFromFiles, type CreateInvoiceResult } from '@/lib/actions/invoices'
 
 interface InvoiceDropzoneProps {
-    onFilesAccepted: (files: File[]) => void // Callback for when files are ready to be processed
+    onFilesAccepted?: (files: File[]) => void // Made optional as direct upload is now handled
     className?: string
 }
 
@@ -54,17 +55,59 @@ export function InvoiceDropzone({ onFilesAccepted, className }: InvoiceDropzoneP
 
     function removeFile(index: number) {
         setFiles((prevFiles) => prevFiles.filter((_, i) => i !== index))
-    } async function handleUpload() {
-        if (files.length > 0) {
-            setIsUploading(true)
-            try {
-                await onFilesAccepted(files)
-                setFiles([]) // Clear files after successful upload
-            } catch (error) {
-                console.error("Error uploading files:", error)
-            } finally {
-                setIsUploading(false)
+    }
+
+    async function handleSubmitInvoices() {
+        if (files.length === 0) {
+            toast.info("No files selected", {
+                description: "Please select one or more PDF files to process.",
+            });
+            return;
+        }
+
+        setIsUploading(true);
+        const formData = new FormData();
+        files.forEach((file) => {
+            formData.append("files", file);
+        });
+
+        try {
+            const { overallSuccess, results } = await createInvoiceFromFiles(formData);
+
+            results.forEach((result: CreateInvoiceResult) => {
+                if (result.success) {
+                    let description = result.message;
+                    if (result.alertsCreated && result.alertsCreated > 0) {
+                        description += ` ${result.alertsCreated} price alert(s) generated.`;
+                    }
+                    toast.success(`File: ${result.fileName}`, {
+                        description: description,
+                    });
+                } else {
+                    toast.error(`File: ${result.fileName}`, {
+                        description: result.message,
+                    });
+                }
+            });
+
+            if (overallSuccess) {
+                setFiles([]); // Clear files after successful processing of all
+                // Call the original onFilesAccepted if it exists and is needed for other UI updates
+                if (onFilesAccepted) {
+                    onFilesAccepted(files); // Though files are now processed, this could signal completion
+                }
+            } else {
+                // Optionally, remove only successfully processed files from the list
+                // For simplicity now, we keep files if there was any failure, or clear all on full success.
             }
+
+        } catch (error) {
+            console.error("Error creating invoices:", error);
+            toast.error("An unexpected error occurred", {
+                description: "Could not process the invoices. Please try again.",
+            });
+        } finally {
+            setIsUploading(false);
         }
     }
 
@@ -131,10 +174,11 @@ export function InvoiceDropzone({ onFilesAccepted, className }: InvoiceDropzoneP
                                 </Button>
                             </li>
                         ))}
-                    </ul>                    <Button
-                        onClick={handleUpload}
+                    </ul>
+                    <Button
+                        onClick={handleSubmitInvoices}
                         className="w-full"
-                        disabled={isUploading}
+                        disabled={isUploading || files.length === 0}
                     >
                         {isUploading ? (
                             <div className="flex items-center gap-2">
