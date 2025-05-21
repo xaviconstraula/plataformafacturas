@@ -21,10 +21,7 @@ import { Loader2 } from 'lucide-react'
 // Type mapping for display
 const providerTypeMap: Record<ProviderType, string> = {
     MATERIAL_SUPPLIER: 'Proveedor de Materiales',
-    SERVICE_PROVIDER: 'Proveedor de Servicios',
-    DISTRIBUTOR: 'Distribuidor',
-    MANUFACTURER: 'Fabricante',
-    OTHER: 'Otro',
+    MACHINERY_RENTAL: 'Proveedor de Maquinaria',
 }
 
 const providerTypes = Object.keys(providerTypeMap) as ProviderType[]
