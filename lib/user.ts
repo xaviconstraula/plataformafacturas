@@ -3,8 +3,6 @@ import { deleteSession, verifySession } from "./session"
 import { prisma } from "./db"
 import { redirect } from "next/navigation"
 
-
-
 export const getUser = cache(async () => {
     const session = await verifySession()
     if (!session) return null
@@ -15,41 +13,23 @@ export const getUser = cache(async () => {
             id: true,
             name: true,
             email: true,
-            cif: true,
-            company: true,
-            lastEmailCheck: true,
-
-            role: true,
-            billingSoftwareConfig: {
-                select: {
-                    software: true,
-                    holdedApiKey: true,
-                    a3SubscriptionKey: true,
-                    a3UserMail: true,
-                    a3UserPassword: true,
-                    a3AccessToken: true,
-                    a3RefreshToken: true,
-                    a3TokenExpiresAt: true,
-                    a3SelectedCompanyId: true,
-                    a3CompanyAccessToken: true,
-                    a3CompanyRefreshToken: true,
-                    a3CompanyTokenExpiresAt: true,
-                },
-            },
+            createdAt: true,
+            updatedAt: true,
         }
     })
 
     return user
-
 })
 
-
 export async function checkIfAdmin() {
+    const email = process.env.ADMIN_EMAIL
+    if (!email) throw new Error("ADMIN_EMAIL environment variable is not set")
+
     const user = await getUser()
-    if (!user || user.role !== "ADMIN") {
+    if (!user || user.email !== email) {
         redirect("/dashboard")
     }
-    return true;
+    return true
 }
 
 export async function logout() {
