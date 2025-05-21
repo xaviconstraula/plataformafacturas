@@ -1,11 +1,14 @@
 import Sidebar from "@/components/sidebar"
+import { getUser } from "@/lib/user";
 import type { ReactNode } from "react"
 
-export default function DashboardLayout({
+export default async function DashboardLayout({
     children,
 }: Readonly<{
     children: ReactNode
 }>) {
+
+    await getUser();
     return (
         <div className="flex min-h-screen h-screen">
             <Sidebar />
