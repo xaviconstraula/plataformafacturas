@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Shield } from "lucide-react"
 import { login } from "@/lib/actions/auth"
-import type { LoginFormState, AuthResponse } from "@/lib/definitions"
+import type { LoginFormState } from "@/lib/definitions"
 
 const initialState = { errors: {}, data: {} as LoginFormState }
 

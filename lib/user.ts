@@ -27,7 +27,7 @@ export async function checkIfAdmin() {
 
     const user = await getUser()
     if (!user || user.email !== email) {
-        redirect("/dashboard")
+        redirect("/")
     }
     return true
 }

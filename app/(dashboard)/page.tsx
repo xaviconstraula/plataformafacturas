@@ -6,6 +6,8 @@ import { MaterialsBySupplier } from "@/components/materials-by-supplier"
 import { getDashboardStats, getOverviewData, getMaterialsBySupplierType } from "@/lib/actions/dashboard"
 
 export default async function Home() {
+
+
   const [stats, overviewData, materialsBySupplierData] = await Promise.all([
     getDashboardStats(),
     getOverviewData(),

@@ -57,7 +57,7 @@ export async function signup(
         })
 
         await createSession(user.id)
-        redirect("/dashboard")
+        redirect("/")
 
     } catch (error) {
         console.error("Error during signup:", error)
@@ -114,9 +114,12 @@ export async function login(
 
         // Using email as a user identifier for the session, as there's no DB user ID
         await createSession(data.email)
-        redirect("/dashboard")
+        redirect("/")
 
     } catch (error) {
+        if (error instanceof Error && error.message.startsWith("NEXT_REDIRECT")) {
+            throw error;
+        }
         console.error("Error during login:", error)
         return {
             error: "Error al iniciar sesión",
