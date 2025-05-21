@@ -11,7 +11,7 @@ RUN npm ci --force
 COPY . . 
 
 # # Run Prisma commands
-RUN npx prisma generate
+RUN npx prisma db push
 
 # Build Next.js application
 RUN npm run build
