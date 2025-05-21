@@ -7,11 +7,13 @@ import { Button } from "@/components/ui/button"
 import { ChevronLeftIcon, ChevronRightIcon, EyeIcon, PencilIcon, TrashIcon } from "lucide-react"
 import { DeleteProviderDialog } from "./delete-provider-dialog"
 import { EditProviderDialog } from "./edit-provider-dialog"
+import { ProviderType } from "@/generated/prisma"
 
 interface ProviderListProps {
     providers: {
         id: string
         name: string
+        type: ProviderType
         email: string | null
         phone: string | null
         address: string | null
@@ -28,6 +30,10 @@ export function ProviderList({ providers }: ProviderListProps) {
     const totalPages = Math.ceil(providers.length / itemsPerPage)
     const paginatedProviders = providers.slice((page - 1) * itemsPerPage, page * itemsPerPage)
 
+    const getProviderTypeLabel = (type: ProviderType) => {
+        return type === 'MATERIAL_SUPPLIER' ? 'Proveedor de Materiales' : 'Alquiler de Maquinaria'
+    }
+
     return (
         <div className="space-y-4">
             <div className="rounded-md border">
@@ -35,6 +41,7 @@ export function ProviderList({ providers }: ProviderListProps) {
                     <TableHeader>
                         <TableRow>
                             <TableHead>Nombre</TableHead>
+                            <TableHead>Tipo</TableHead>
                             <TableHead>Email</TableHead>
                             <TableHead>Teléfono</TableHead>
                             <TableHead>Dirección</TableHead>
@@ -47,16 +54,17 @@ export function ProviderList({ providers }: ProviderListProps) {
                             paginatedProviders.map((provider) => (
                                 <TableRow key={provider.id}>
                                     <TableCell className="font-medium">{provider.name}</TableCell>
+                                    <TableCell>{getProviderTypeLabel(provider.type)}</TableCell>
                                     <TableCell>{provider.email || 'N/A'}</TableCell>
                                     <TableCell>{provider.phone || 'N/A'}</TableCell>
                                     <TableCell>{provider.address || 'N/A'}</TableCell>
                                     <TableCell>{provider._count.invoices}</TableCell>
                                     <TableCell className="space-x-1">
-
                                         <EditProviderDialog
                                             providerId={provider.id}
                                             initialData={{
                                                 name: provider.name,
+                                                type: provider.type,
                                                 email: provider.email,
                                                 phone: provider.phone,
                                                 address: provider.address,
@@ -84,7 +92,7 @@ export function ProviderList({ providers }: ProviderListProps) {
                             ))
                         ) : (
                             <TableRow>
-                                <TableCell colSpan={6} className="h-24 text-center">
+                                <TableCell colSpan={7} className="h-24 text-center">
                                     No se encontraron proveedores.
                                 </TableCell>
                             </TableRow>

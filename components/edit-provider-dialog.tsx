@@ -15,11 +15,20 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { editProviderAction } from '@/lib/actions/proveedores'
 import { toast } from 'sonner'
+import { ProviderType } from '@/generated/prisma'
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from "@/components/ui/select"
 
 interface EditProviderDialogProps {
     providerId: string
     initialData: {
         name: string
+        type: ProviderType
         email: string | null
         phone: string | null
         address: string | null
@@ -73,6 +82,21 @@ export function EditProviderDialog({ providerId, initialData, children }: EditPr
                                 onChange={(e) => setFormData({ ...formData, name: e.target.value })}
                                 required
                             />
+                        </div>
+                        <div className="grid gap-2">
+                            <Label htmlFor="type">Tipo de Proveedor</Label>
+                            <Select
+                                value={formData.type}
+                                onValueChange={(value: ProviderType) => setFormData({ ...formData, type: value })}
+                            >
+                                <SelectTrigger>
+                                    <SelectValue placeholder="Selecciona un tipo" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    <SelectItem value="MATERIAL_SUPPLIER">Proveedor de Materiales</SelectItem>
+                                    <SelectItem value="MACHINERY_RENTAL">Alquiler de Maquinaria</SelectItem>
+                                </SelectContent>
+                            </Select>
                         </div>
                         <div className="grid gap-2">
                             <Label htmlFor="email">Email</Label>

@@ -25,16 +25,7 @@ export function InvoiceDetails({ id }: InvoiceDetailsProps) {
           </Button>
         </Link>
 
-        <div className="flex gap-2">
-          <Button variant="outline" className="gap-2">
-            <PrinterIcon className="h-4 w-4" />
-            Imprimir
-          </Button>
-          <Button variant="outline" className="gap-2">
-            <DownloadIcon className="h-4 w-4" />
-            Descargar PDF
-          </Button>
-        </div>
+
       </div>
 
       <Card>

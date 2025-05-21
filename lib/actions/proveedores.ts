@@ -12,7 +12,13 @@ export async function getSuppliers() {
     noStore() // Opt out of caching for this dynamic data
     try {
         const suppliers = await prisma.provider.findMany({
-            include: {
+            select: {
+                id: true,
+                name: true,
+                type: true,
+                email: true,
+                phone: true,
+                address: true,
                 _count: {
                     select: {
                         invoices: true
@@ -142,6 +148,7 @@ export async function deleteProviderAction(providerId: string) {
 
 export async function editProviderAction(providerId: string, data: {
     name: string;
+    type: ProviderType;
     email?: string | null;
     phone?: string | null;
     address?: string | null;
@@ -155,6 +162,7 @@ export async function editProviderAction(providerId: string, data: {
             where: { id: providerId },
             data: {
                 name: data.name,
+                type: data.type,
                 email: data.email,
                 phone: data.phone,
                 address: data.address,

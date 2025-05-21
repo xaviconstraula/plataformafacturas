@@ -94,17 +94,11 @@ export default async function Home() {
       </div>
 
       <div className="grid gap-6">
-        <Card>
-          <CardHeader>
-            <CardTitle>Materiales por Proveedor</CardTitle>
-            <CardDescription>Análisis de materiales más utilizados</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Suspense fallback={<div className="h-80 rounded-lg bg-muted animate-pulse" />}>
-              <MaterialsBySupplier data={materialsBySupplierData} />
-            </Suspense>
-          </CardContent>
-        </Card>
+
+        <Suspense fallback={<div className="h-80 rounded-lg bg-muted animate-pulse" />}>
+          <MaterialsBySupplier data={materialsBySupplierData} />
+        </Suspense>
+
       </div>
     </div>
   )
