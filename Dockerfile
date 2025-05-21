@@ -10,8 +10,8 @@ RUN npm ci --force
 # Copy the entire application source code, including script.js
 COPY . . 
 
-# Run Prisma commands
-RUN npx prisma db push
+# # Run Prisma commands
+# RUN npx prisma db push
 
 # Build Next.js application
 RUN npm run build
