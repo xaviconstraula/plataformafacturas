@@ -78,7 +78,7 @@ model InvoiceItem {
   id         String   @id @default(cuid())
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
-  invoice    Invoice  @relation(fields: [invoiceId], references: [id])
+  invoice    Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
   invoiceId  String
   material   Material @relation(fields: [materialId], references: [id])
   materialId String
@@ -114,16 +114,16 @@ model PriceAlert {
   id            String   @id @default(cuid())
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
-  material      Material @relation(fields: [materialId], references: [id])
+  material      Material @relation(fields: [materialId], references: [id], onDelete: Cascade)
   materialId    String
-  provider      Provider @relation(fields: [providerId], references: [id])
+  provider      Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
   providerId    String
   oldPrice      Decimal  @db.Decimal(10, 2)
   newPrice      Decimal  @db.Decimal(10, 2)
   percentage    Decimal  @db.Decimal(10, 2)
   status        String   @default("PENDING") // PENDING, REVIEWED, DISMISSED
   effectiveDate DateTime // Date when the price change became effective
-  invoice       Invoice  @relation(fields: [invoiceId], references: [id])
+  invoice       Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
   invoiceId     String
 
   @@index([materialId])
