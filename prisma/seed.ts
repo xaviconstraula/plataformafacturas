@@ -248,7 +248,8 @@ async function main() {
                         materialId: material.id,
                         quantity,
                         unitPrice: basePrice,
-                        totalPrice
+                        totalPrice,
+                        itemDate: createdAt,
                     }
                 })
 
@@ -274,7 +275,8 @@ async function main() {
                         oldPrice: basePrice,
                         newPrice,
                         percentage: 20.00,
-                        status: 'PENDING'
+                        status: 'PENDING',
+                        effectiveDate: createdAt,
                     }
                 })
             }

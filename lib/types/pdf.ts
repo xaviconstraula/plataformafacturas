@@ -12,6 +12,7 @@ export interface ExtractedPdfItemData {
     quantity: number;
     unitPrice: number;
     totalPrice: number;
+    itemDate?: string; // Optional ISO date string for items with different dates
 }
 
 export interface ExtractedPdfData {

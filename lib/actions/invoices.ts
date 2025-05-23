@@ -54,13 +54,32 @@ async function callPdfExtractAPI(file: File): Promise<ExtractedPdfData[]> {
         const arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
 
         // Convert PDF to PNG - now processing all pages
-        const pages = await pdfToPng(arrayBuffer, {
-            disableFontFace: false, // Enable better font rendering
-            useSystemFonts: true,   // Allow system font fallback
-            viewportScale: 2.0,     // Higher quality for better OCR
-            verbosityLevel: 0,      // Only show errors
-            strictPagesToProcess: false, // Allow all pages
-        });
+        let pages;
+        try {
+            pages = await pdfToPng(arrayBuffer, {
+                disableFontFace: true, // TRYING THIS: Ignore embedded fonts
+                useSystemFonts: true,   // Allow system font fallback
+                viewportScale: 2.0,     // Higher quality for better OCR
+                verbosityLevel: 0,      // Only show errors
+                strictPagesToProcess: false, // Allow all pages
+            });
+        } catch (conversionError: unknown) {
+            console.error(`Error during pdfToPng conversion for ${file.name}:`, conversionError);
+            // Return a special structure or throw a custom error that can be caught by the caller
+            // to indicate this specific failure. For now, returning an empty array
+            // but marking it with a property or specific error type would be better.
+            // For the purpose of this edit, we'll have the caller (createInvoiceFromFiles)
+            // check for an empty array AND the absence of pages to infer this.
+            // A more robust solution would be a custom error or a result object.
+            // This is a simplified way to signal the error back to the ExtractedFileItem
+            // The calling function `createInvoiceFromFiles` will need to be aware of this.
+            // We will have `createInvoiceFromFiles` create an ExtractedFileItem with a specific error.
+            // To make this function directly signal the error, we can throw it.
+            if (typeof conversionError === 'object' && conversionError !== null && 'code' in conversionError && (conversionError as { code: unknown }).code === 'InvalidArg' && 'message' in conversionError && typeof (conversionError as { message: unknown }).message === 'string' && (conversionError as { message: string }).message.includes('Convert String to CString failed')) {
+                throw new Error(`PDF_CONVERSION_FAILED: ${file.name} could not be converted due to internal font/text encoding issues. Details: ${(conversionError as { message: string }).message}`);
+            }
+            throw conversionError; // Re-throw other errors
+        }
 
         if (!pages || pages.length === 0) {
             console.error(`Failed to convert PDF to images for ${file.name}`);
@@ -95,12 +114,16 @@ async function callPdfExtractAPI(file: File): Promise<ExtractedPdfData[]> {
                 '   - Unique invoice code\n' +
                 '   - Issue date (must be a valid date)\n' +
                 '   - Total amount (must be a decimal number with 2 decimal places)\n' +
-                '3. Line Items (for each item):\n' +
-                '   - Material name/short identifier\n' +
+                '3. Line Items (IMPORTANT: Extract ALL items that appear on the invoice):\n' +
+                '   For each distinct item and date combination:\n' +
+                '   - Material name/short identifier (extract exactly as shown on invoice)\n' +
                 '   - Material description (generate a brief description of the item)\n' +
                 '   - Quantity (must be a decimal number with 2 decimal places)\n' +
                 '   - Unit price (must be a decimal number with 2 decimal places)\n' +
-                '   - Total price per item (must be quantity * unit price)\n\n' +
+                '   - Total price per item (must be quantity * unit price)\n' +
+                '   - Item date if different from invoice date (in ISO format)\n' +
+                '   Note: If the same material appears multiple times with different dates or prices,\n' +
+                '   create separate line items for each occurrence.\n\n' +
                 'Database Schema Requirements:\n' +
                 '- Provider must have a tax ID (`cif`) extracted. This is a critical field. Prioritize Spanish CIF/NIF/DNI if available; otherwise, use any other official provider tax identifier found.\n' +
                 '- Include provider email and phone if these are present on the invoice.\n' +
@@ -126,7 +149,8 @@ async function callPdfExtractAPI(file: File): Promise<ExtractedPdfData[]> {
                 '      "materialDescription": "string? - optional item/material detailed description",\n' +
                 '      "quantity": "number - quantity with 2 decimal places",\n' +
                 '      "unitPrice": "number - price per unit with 2 decimal places",\n' +
-                '      "totalPrice": "number - quantity * unitPrice with 2 decimal places"\n' +
+                '      "totalPrice": "number - quantity * unitPrice with 2 decimal places",\n' +
+                '      "itemDate": "string? - optional ISO date format if different from invoice date"\n' +
                 '    }\n' +
                 '  ]\n' +
                 '}';
@@ -184,6 +208,10 @@ async function callPdfExtractAPI(file: File): Promise<ExtractedPdfData[]> {
 
     } catch (error) {
         console.error(`Error extracting data from PDF ${file.name}:`, error);
+        // If the error is one we've specifically thrown from the conversion step
+        if (error instanceof Error && error.message.startsWith('PDF_CONVERSION_FAILED:')) {
+            throw error; // Re-throw to be caught by createInvoiceFromFiles
+        }
         return [];
     }
 }
@@ -264,7 +292,7 @@ async function processInvoiceItemTx(
     providerId: string,
     createdMaterial: Material
 ): Promise<{ invoiceItem: InvoiceItem; alert?: PriceAlert }> {
-    const { quantity, unitPrice, totalPrice } = itemData;
+    const { quantity, unitPrice, totalPrice, itemDate } = itemData;
 
     if (typeof quantity !== 'number' || isNaN(quantity) ||
         typeof unitPrice !== 'number' || isNaN(unitPrice) ||
@@ -276,7 +304,10 @@ async function processInvoiceItemTx(
     const currentUnitPriceDecimal = new Prisma.Decimal(unitPrice.toFixed(2));
     const totalPriceDecimal = new Prisma.Decimal(totalPrice.toFixed(2));
 
-    console.log(`[Invoice ${invoiceId} @ ${invoiceIssueDate.toISOString()}] Processing item: Material '${createdMaterial.name}' (ID: ${createdMaterial.id}), Provider ID: ${providerId}, Extracted Unit Price: ${itemData.unitPrice}, Normalized Unit Price: ${currentUnitPriceDecimal}`);
+    // Use itemDate if provided, otherwise use invoice issue date
+    const effectiveDate = itemDate ? new Date(itemDate) : invoiceIssueDate;
+
+    console.log(`[Invoice ${invoiceId} @ ${invoiceIssueDate.toISOString()}] Processing item: Material '${createdMaterial.name}' (ID: ${createdMaterial.id}), Provider ID: ${providerId}, Extracted Unit Price: ${itemData.unitPrice}, Normalized Unit Price: ${currentUnitPriceDecimal}, Item Date: ${effectiveDate.toISOString()}`);
 
     const invoiceItem = await tx.invoiceItem.create({
         data: {
@@ -285,6 +316,7 @@ async function processInvoiceItemTx(
             quantity: quantityDecimal,
             unitPrice: currentUnitPriceDecimal,
             totalPrice: totalPriceDecimal,
+            itemDate: effectiveDate, // Store the effective date for the item
         },
     });
 
@@ -296,19 +328,19 @@ async function processInvoiceItemTx(
             materialId: createdMaterial.id,
             invoice: {
                 providerId: providerId,
-                issueDate: { lt: invoiceIssueDate },
             },
+            itemDate: { lt: effectiveDate }, // Use itemDate for comparison
             NOT: {
                 id: invoiceItem.id
             }
         },
-        orderBy: { invoice: { issueDate: 'desc' } },
-        select: { unitPrice: true, invoice: { select: { issueDate: true } } }
+        orderBy: { itemDate: 'desc' }, // Order by itemDate instead of invoice.issueDate
+        select: { unitPrice: true, itemDate: true }
     });
 
     if (previousInvoiceItemRecord) {
         const previousPrice = previousInvoiceItemRecord.unitPrice;
-        console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Previous price from ${previousInvoiceItemRecord.invoice.issueDate.toISOString()}: ${previousPrice}. Current unit price from ${invoiceIssueDate.toISOString()}: ${currentUnitPriceDecimal}.`);
+        console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Previous price from ${previousInvoiceItemRecord.itemDate.toISOString()}: ${previousPrice}. Current unit price from ${effectiveDate.toISOString()}: ${currentUnitPriceDecimal}.`);
 
         if (!currentUnitPriceDecimal.equals(previousPrice)) {
             const priceDiff = currentUnitPriceDecimal.minus(previousPrice);
@@ -328,17 +360,18 @@ async function processInvoiceItemTx(
                     newPrice: currentUnitPriceDecimal,
                     percentage: percentageChangeDecimal,
                     status: "PENDING",
+                    effectiveDate, // Add the effective date to the alert
                 },
             });
-            console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Price alert created. Old: ${previousPrice}, New: ${currentUnitPriceDecimal}, Change: ${percentageChangeDecimal.toFixed(2)}%`);
+            console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Price alert created. Old: ${previousPrice}, New: ${currentUnitPriceDecimal}, Change: ${percentageChangeDecimal.toFixed(2)}%, Effective Date: ${effectiveDate.toISOString()}`);
         } else {
-            console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Price (${currentUnitPriceDecimal}) is unchanged compared to previous invoice item dated ${previousInvoiceItemRecord.invoice.issueDate.toISOString()}.`);
+            console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Price (${currentUnitPriceDecimal}) is unchanged compared to previous invoice item dated ${previousInvoiceItemRecord.itemDate.toISOString()}.`);
         }
     } else {
-        console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] No chronologically prior invoice item found for material ${createdMaterial.id} / provider ${providerId} before ${invoiceIssueDate.toISOString()}. This is treated as the first price recording for alert purposes.`);
+        console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] No chronologically prior invoice item found for material ${createdMaterial.id} / provider ${providerId} before ${effectiveDate.toISOString()}. This is treated as the first price recording for alert purposes.`);
     }
 
-    // Update MaterialProvider to reflect the price from the invoice with the LATEST issueDate
+    // Update MaterialProvider to reflect the price from the item with the LATEST date
     const materialProvider = await tx.materialProvider.findUnique({
         where: {
             materialId_providerId: {
@@ -349,30 +382,30 @@ async function processInvoiceItemTx(
     });
 
     if (materialProvider) {
-        if (!materialProvider.lastPriceDate || invoiceIssueDate.getTime() > materialProvider.lastPriceDate.getTime()) {
-            if (!materialProvider.lastPrice.equals(currentUnitPriceDecimal) || (materialProvider.lastPriceDate && invoiceIssueDate.getTime() !== materialProvider.lastPriceDate.getTime()) || !materialProvider.lastPriceDate) {
-                console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Updating MaterialProvider. Old lastPriceDate: ${materialProvider.lastPriceDate?.toISOString()}, Old lastPrice: ${materialProvider.lastPrice}. New (from current invoice): Date ${invoiceIssueDate.toISOString()}, Price ${currentUnitPriceDecimal}.`);
+        if (!materialProvider.lastPriceDate || effectiveDate.getTime() > materialProvider.lastPriceDate.getTime()) {
+            if (!materialProvider.lastPrice.equals(currentUnitPriceDecimal) || (materialProvider.lastPriceDate && effectiveDate.getTime() !== materialProvider.lastPriceDate.getTime()) || !materialProvider.lastPriceDate) {
+                console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Updating MaterialProvider. Old lastPriceDate: ${materialProvider.lastPriceDate?.toISOString()}, Old lastPrice: ${materialProvider.lastPrice}. New: Date ${effectiveDate.toISOString()}, Price ${currentUnitPriceDecimal}.`);
                 await tx.materialProvider.update({
                     where: { id: materialProvider.id },
                     data: {
                         lastPrice: currentUnitPriceDecimal,
-                        lastPriceDate: invoiceIssueDate,
+                        lastPriceDate: effectiveDate,
                     },
                 });
             } else {
-                console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] MaterialProvider already reflects the latest price and date from this or a newer invoice. Price: ${currentUnitPriceDecimal} @ ${invoiceIssueDate.toISOString()}. Stored: ${materialProvider.lastPrice} @ ${materialProvider.lastPriceDate?.toISOString()}. No update to MaterialProvider needed.`);
+                console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] MaterialProvider already reflects the latest price and date from this or a newer item. Price: ${currentUnitPriceDecimal} @ ${effectiveDate.toISOString()}. Stored: ${materialProvider.lastPrice} @ ${materialProvider.lastPriceDate?.toISOString()}. No update to MaterialProvider needed.`);
             }
         } else {
-            console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Current invoice (${invoiceIssueDate.toISOString()}) is older than or same as MaterialProvider's lastPriceDate (${materialProvider.lastPriceDate?.toISOString()}). MaterialProvider not updated by this invoice's data.`);
+            console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Current item date (${effectiveDate.toISOString()}) is older than or same as MaterialProvider's lastPriceDate (${materialProvider.lastPriceDate?.toISOString()}). MaterialProvider not updated by this item's data.`);
         }
     } else {
-        console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] First MaterialProvider record for material ${createdMaterial.id} / provider ${providerId}. Setting initial price ${currentUnitPriceDecimal} from invoice date ${invoiceIssueDate.toISOString()}.`);
+        console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] First MaterialProvider record for material ${createdMaterial.id} / provider ${providerId}. Setting initial price ${currentUnitPriceDecimal} from item date ${effectiveDate.toISOString()}.`);
         await tx.materialProvider.create({
             data: {
                 materialId: createdMaterial.id,
                 providerId,
                 lastPrice: currentUnitPriceDecimal,
-                lastPriceDate: invoiceIssueDate,
+                lastPriceDate: effectiveDate,
             },
         });
     }
@@ -404,47 +437,63 @@ export async function createInvoiceFromFiles(
             continue;
         }
 
-        const extractedDataArray = await callPdfExtractAPI(file);
+        try {
+            const extractedDataArray = await callPdfExtractAPI(file);
 
-        if (!extractedDataArray || extractedDataArray.length === 0) {
-            console.error(`Failed to extract data for file: ${file.name}`);
-            extractionResults.push({ file, extractedData: null, error: "Failed to extract data from PDF.", fileName: file.name });
-            continue;
+            if (!extractedDataArray || extractedDataArray.length === 0) {
+                // This case might still occur if callPdfExtractAPI returns [] for reasons other than conversion failure
+                // (e.g., no content after conversion, or OpenAI returns nothing).
+                console.error(`Failed to extract any invoice data for file: ${file.name} (post-conversion).`);
+                extractionResults.push({ file, extractedData: null, error: "Failed to extract any invoice data from PDF after conversion.", fileName: file.name });
+                continue;
+            }
+
+            // Process each invoice from the PDF
+            extractedDataArray.forEach((data, pageIndex) => {
+                if (!data.invoiceCode || !data.provider?.cif || !data.issueDate || typeof data.totalAmount !== 'number' || !data.items?.length) {
+                    console.warn(`Missing crucial data for file: ${file.name}, page ${pageIndex + 1}. Data: ${JSON.stringify(data)}`);
+                    extractionResults.push({
+                        file,
+                        extractedData: data,
+                        error: "Missing or invalid crucial data after PDF extraction. Check invoice code, provider CIF, issue date, total amount, or items.",
+                        fileName: file.name,
+                        pageNumber: pageIndex + 1
+                    });
+                    return;
+                }
+                try {
+                    // Validate date format early for sorting
+                    new Date(data.issueDate);
+                    extractionResults.push({
+                        file,
+                        extractedData: data,
+                        fileName: file.name,
+                        pageNumber: pageIndex + 1
+                    });
+                } catch (dateError) {
+                    console.warn(`Invalid issue date format for file: ${file.name}, page ${pageIndex + 1}. Date: ${data.issueDate}`);
+                    extractionResults.push({
+                        file,
+                        extractedData: data,
+                        error: `Invalid issue date format: ${data.issueDate}.`,
+                        fileName: file.name,
+                        pageNumber: pageIndex + 1
+                    });
+                }
+            });
+        } catch (extractionOrConversionError: unknown) {
+            console.error(`Error during extraction or conversion for file ${file.name}:`, extractionOrConversionError);
+            let errorMessage = "Failed to process PDF.";
+            if (extractionOrConversionError instanceof Error) {
+                if (extractionOrConversionError.message.startsWith('PDF_CONVERSION_FAILED:')) {
+                    // Use the specific message from the thrown error
+                    errorMessage = extractionOrConversionError.message.substring('PDF_CONVERSION_FAILED: '.length);
+                } else {
+                    errorMessage = extractionOrConversionError.message;
+                }
+            }
+            extractionResults.push({ file, extractedData: null, error: errorMessage, fileName: file.name });
         }
-
-        // Process each invoice from the PDF
-        extractedDataArray.forEach((data, pageIndex) => {
-            if (!data.invoiceCode || !data.provider?.cif || !data.issueDate || typeof data.totalAmount !== 'number' || !data.items?.length) {
-                console.warn(`Missing crucial data for file: ${file.name}, page ${pageIndex + 1}. Data: ${JSON.stringify(data)}`);
-                extractionResults.push({
-                    file,
-                    extractedData: data,
-                    error: "Missing or invalid crucial data after PDF extraction. Check invoice code, provider CIF, issue date, total amount, or items.",
-                    fileName: file.name,
-                    pageNumber: pageIndex + 1
-                });
-                return;
-            }
-            try {
-                // Validate date format early for sorting
-                new Date(data.issueDate);
-                extractionResults.push({
-                    file,
-                    extractedData: data,
-                    fileName: file.name,
-                    pageNumber: pageIndex + 1
-                });
-            } catch (dateError) {
-                console.warn(`Invalid issue date format for file: ${file.name}, page ${pageIndex + 1}. Date: ${data.issueDate}`);
-                extractionResults.push({
-                    file,
-                    extractedData: data,
-                    error: `Invalid issue date format: ${data.issueDate}.`,
-                    fileName: file.name,
-                    pageNumber: pageIndex + 1
-                });
-            }
-        });
     }
 
     // 2. Separate items with extraction errors from processable items

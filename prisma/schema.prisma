@@ -75,15 +75,16 @@ model Material {
 // Modelo para Items de Factura
 model InvoiceItem {
   id         String   @id @default(cuid())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  invoice    Invoice  @relation(fields: [invoiceId], references: [id])
   invoiceId  String
-  invoice    Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
-  materialId String
   material   Material @relation(fields: [materialId], references: [id])
+  materialId String
   quantity   Decimal  @db.Decimal(10, 2)
   unitPrice  Decimal  @db.Decimal(10, 2)
   totalPrice Decimal  @db.Decimal(10, 2)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  itemDate   DateTime // Date specific to this item, may differ from invoice date
 
   @@index([invoiceId])
   @@index([materialId])
@@ -109,21 +110,21 @@ model MaterialProvider {
 
 // Modelo para Alertas de Precios
 model PriceAlert {
-  id         String      @id @default(cuid())
-  materialId String
-  material   Material    @relation(fields: [materialId], references: [id], onDelete: Cascade)
-  providerId String
-  provider   Provider    @relation(fields: [providerId], references: [id], onDelete: Cascade)
-  oldPrice   Decimal     @db.Decimal(10, 2)
-  newPrice   Decimal     @db.Decimal(10, 2)
-  percentage Decimal     @db.Decimal(10, 2)
-  status     AlertStatus @default(PENDING)
-  createdAt  DateTime    @default(now())
-  updatedAt  DateTime    @updatedAt
+  id            String   @id @default(cuid())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  material      Material @relation(fields: [materialId], references: [id])
+  materialId    String
+  provider      Provider @relation(fields: [providerId], references: [id])
+  providerId    String
+  oldPrice      Decimal  @db.Decimal(10, 2)
+  newPrice      Decimal  @db.Decimal(10, 2)
+  percentage    Decimal  @db.Decimal(10, 2)
+  status        String   @default("PENDING") // PENDING, REVIEWED, DISMISSED
+  effectiveDate DateTime // Date when the price change became effective
 
   @@index([materialId])
   @@index([providerId])
-  @@index([status])
 }
 
 // Modelo para Usuarios

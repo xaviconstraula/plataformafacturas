@@ -143,5 +143,56 @@ export async function deleteInvoiceAction(invoiceId: string) {
     }
 }
 
+export async function getInvoiceDetails(id: string) {
+    try {
+        const invoice = await prisma.invoice.findUnique({
+            where: { id },
+            include: {
+                provider: true,
+                items: {
+                    include: {
+                        material: true
+                    }
+                }
+            }
+        });
+
+        if (!invoice) {
+            throw new Error('Invoice not found');
+        }
+
+        return {
+            id: invoice.id,
+            code: invoice.invoiceCode,
+            issueDate: invoice.issueDate,
+            totalAmount: invoice.totalAmount.toNumber(),
+            status: invoice.status,
+            provider: {
+                id: invoice.provider.id,
+                name: invoice.provider.name,
+                cif: invoice.provider.cif,
+                email: invoice.provider.email,
+                phone: invoice.provider.phone,
+                address: invoice.provider.address
+            },
+            items: invoice.items.map(item => ({
+                id: item.id,
+                quantity: item.quantity.toNumber(),
+                unitPrice: item.unitPrice.toNumber(),
+                totalPrice: item.totalPrice.toNumber(),
+                material: {
+                    id: item.material.id,
+                    name: item.material.name,
+                    code: item.material.code,
+                    description: item.material.description
+                }
+            }))
+        };
+    } catch (error) {
+        console.error('Error fetching invoice details:', error);
+        throw new Error('Failed to fetch invoice details');
+    }
+}
+
 
 
