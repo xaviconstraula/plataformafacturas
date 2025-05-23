@@ -14,7 +14,7 @@ interface GetInvoicesParams {
     pageSize?: number
 }
 
-const DEFAULT_PAGE_SIZE = 8
+const DEFAULT_PAGE_SIZE = 15
 
 export async function getInvoices(params: GetInvoicesParams) {
     try {

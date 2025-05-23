@@ -277,6 +277,7 @@ async function main() {
                         percentage: 20.00,
                         status: 'PENDING',
                         effectiveDate: createdAt,
+                        invoiceId: invoice.id,
                     }
                 })
             }

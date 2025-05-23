@@ -17,11 +17,18 @@ export async function getPriceAlerts(): Promise<PriceAlert[]> {
                     name: true,
                 },
             },
+            invoice: {
+                select: {
+                    id: true,
+                    issueDate: true,
+                },
+            },
             oldPrice: true,
             newPrice: true,
             percentage: true,
             status: true,
             createdAt: true,
+            effectiveDate: true,
         },
         orderBy: {
             createdAt: 'desc',
@@ -36,7 +43,9 @@ export async function getPriceAlerts(): Promise<PriceAlert[]> {
         currentPrice: Number(alert.newPrice),
         percentageChange: Number(alert.percentage),
         status: alert.status as PriceAlert['status'],
-        createdAt: alert.createdAt.toISOString(),
+        createdAt: alert.createdAt instanceof Date ? alert.createdAt.toISOString() : new Date(alert.createdAt).toISOString(),
+        effectiveDate: alert.effectiveDate instanceof Date ? alert.effectiveDate.toISOString() : new Date(alert.effectiveDate).toISOString(),
+        issueDate: alert.invoice.issueDate instanceof Date ? alert.invoice.issueDate.toISOString() : new Date(alert.invoice.issueDate).toISOString(),
     }))
 }
 
@@ -73,7 +82,8 @@ export async function updateAlertStatus(alertId: string, status: "APPROVED" | "R
         previousPrice: alert.oldPrice.toNumber(),
         currentPrice: alert.newPrice.toNumber(),
         percentageChange: alert.percentage.toNumber(),
-        createdAt: alert.createdAt.toISOString(),
+        createdAt: alert.createdAt instanceof Date ? alert.createdAt.toISOString() : new Date(alert.createdAt).toISOString(),
+        effectiveDate: alert.effectiveDate instanceof Date ? alert.effectiveDate.toISOString() : new Date(alert.effectiveDate).toISOString(),
         status: alert.status
     }
 } 

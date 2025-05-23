@@ -44,7 +44,6 @@ export function ProviderList({ providers }: ProviderListProps) {
                             <TableHead>Tipo</TableHead>
                             <TableHead>Email</TableHead>
                             <TableHead>Teléfono</TableHead>
-                            <TableHead>Dirección</TableHead>
                             <TableHead>Facturas</TableHead>
                             <TableHead className="w-[120px]">Acciones</TableHead>
                         </TableRow>
@@ -57,7 +56,6 @@ export function ProviderList({ providers }: ProviderListProps) {
                                     <TableCell>{getProviderTypeLabel(provider.type)}</TableCell>
                                     <TableCell>{provider.email || 'N/A'}</TableCell>
                                     <TableCell>{provider.phone || 'N/A'}</TableCell>
-                                    <TableCell>{provider.address || 'N/A'}</TableCell>
                                     <TableCell>{provider._count.invoices}</TableCell>
                                     <TableCell className="space-x-1">
                                         <EditProviderDialog

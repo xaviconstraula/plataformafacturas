@@ -10,5 +10,7 @@ export interface PriceAlert {
     currentPrice: number
     percentageChange: number
     createdAt: string
+    effectiveDate: string
+    issueDate: string
     status: AlertStatus
 } 

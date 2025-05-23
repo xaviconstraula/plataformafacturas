@@ -52,6 +52,7 @@ model Invoice {
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
   items       InvoiceItem[]
+  alerts      PriceAlert[]
 
   @@index([providerId])
   @@index([issueDate])
@@ -122,9 +123,12 @@ model PriceAlert {
   percentage    Decimal  @db.Decimal(10, 2)
   status        String   @default("PENDING") // PENDING, REVIEWED, DISMISSED
   effectiveDate DateTime // Date when the price change became effective
+  invoice       Invoice  @relation(fields: [invoiceId], references: [id])
+  invoiceId     String
 
   @@index([materialId])
   @@index([providerId])
+  @@index([invoiceId])
 }
 
 // Modelo para Usuarios

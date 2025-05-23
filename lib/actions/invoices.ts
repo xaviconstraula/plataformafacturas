@@ -110,10 +110,9 @@ CRITICAL NOTE FOR NUMBER RECOGNITION:
   * The number "0" vs "6" - Look for the complete oval of "0" vs the curved shape of "6"
 - For material codes and quantities, verify each digit multiple times
 - If a number is unclear or ambiguous, look for context clues such as:
-  * Matching totals (quantity × unit price should equal total price)
+  * Matching totals (quantity x unit price should equal total price)
   * Consistent formatting with other similar numbers in the document
   * Related entries or subtotals that could validate the number
-- If still uncertain about a digit, indicate uncertainty in the materialDescription field
 
 1. Provider Information (invoice issuer):
    - Company name
@@ -129,17 +128,11 @@ CRITICAL NOTE FOR NUMBER RECOGNITION:
    - Unique invoice code
    - Issue date (must be a valid date)
    - Total amount (must be a decimal number with 2 decimal places)
-3. Line Items (IMPORTANT: Extract EVERY line item listed across all provided pages. Each distinct line entry on the invoice should be a separate item in your response, even if the material name or description appears to be the same as a previous line. Pay close attention to quantities, prices, and any subtle variations that differentiate them):
+3. Line Items (IMPORTANT: Extract EVERY line item listed across all provided pages. Each distinct line entry on the invoice should be a separate item in your response, even if the material name appears to be the same as a previous line. Pay close attention to quantities, prices, and any subtle variations that differentiate them):
    For each line item extracted:
    - Material name/identifier: IMPORTANT RULES FOR MATERIAL NAME EXTRACTION:
-     * If both a descriptive name AND a code are present, use the descriptive name as materialName and store the code in materialDescription
-     * If only a code is present (e.g., "21PA0010771"), look for any associated description in the line item or nearby. Use the description as materialName if found, and store the code in materialDescription
-     * If only a code is present and no description is found, use the code as materialName but prefix it with "CODE: " (e.g., "CODE: 21PA0010771")
-     * Always preserve the exact formatting of codes and numbers
-   - Material description: Include any additional details about the material, including:
-     * Any material codes when the main name is descriptive
-     * Any descriptive text about specifications, dimensions, or characteristics
-     * If the material name is a code, try to find and include any descriptive text here
+     * If both a descriptive name AND a code are present, use the descriptive name as materialName
+     * If only a code is present (e.g., "21PA0010771"), use the code as materialName but prefix it with "CODE: " (e.g., "CODE: 21PA0010771")
    - Quantity (must be a decimal number with 2 decimal places, extracted exactly)
    - Unit price (must be a decimal number with 2 decimal places, extracted exactly)
    - Total price per item (must be quantity * unit price, extracted exactly. If not present, calculate it carefully.)
@@ -153,7 +146,7 @@ Database Schema Requirements:
 - Provider must have a tax ID (\`cif\`) extracted if visible. This is a critical field. Prioritize Spanish CIF/NIF/DNI if available; otherwise, use any other official provider tax identifier found. If no Tax ID is found on the invoice, the \`cif\` field in the JSON should be null.
 - Include provider email and phone if these are present on the invoice, otherwise use null.
 - Invoice must have a unique invoice code and valid issue date.
-- Each line item represents an InvoiceItem linked to a Material. Include materialName and materialDescription.
+- Each line item represents an InvoiceItem linked to a Material.
 - All monetary values must be Decimal(10,2).
 - All quantities must be Decimal(10,2).
 
@@ -171,8 +164,7 @@ Format the response as valid JSON exactly like this:
   "totalAmount": "number - total invoice amount with 2 decimal places",
   "items": [
     {
-      "materialName": "string - item/material short name",
-      "materialDescription": "string | null - optional item/material detailed description, null if not directly available",
+      "materialName": "string - the exact material name as it appears in the invoice",
       "quantity": "number - quantity with 2 decimal places",
       "unitPrice": "number - price per unit with 2 decimal places",
       "totalPrice": "number - quantity * unitPrice with 2 decimal places",
@@ -183,7 +175,8 @@ Format the response as valid JSON exactly like this:
 
         console.log(`Calling OpenAI API for file: ${file.name} with ${imageUrls.length} page images.`);
         const response = await openai.chat.completions.create({
-            model: "gpt-4.1", // Updated model
+            model: "gpt-4.1-mini", //USE 4.1-mini ALWAYS
+            temperature: 0.1,
             messages: [
                 {
                     role: "user",
@@ -193,7 +186,6 @@ Format the response as valid JSON exactly like this:
                     ]
                 }
             ],
-            max_tokens: 4096,
             response_format: { type: "json_object" },
         });
 
@@ -264,7 +256,7 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
     return provider;
 }
 
-async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName: string, materialDescription?: string, materialCode?: string): Promise<Material> {
+async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName: string, materialCode?: string): Promise<Material> {
     const normalizedName = materialName.trim();
     let material: Material | null = null;
 
@@ -285,18 +277,8 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
             data: {
                 code: materialCode || normalizedName.toLowerCase().replace(/\s+/g, '-').substring(0, 50),
                 name: normalizedName,
-                description: materialDescription, // Save description on creation
             },
         });
-    } else {
-        // Update description if it's provided and the existing material doesn't have one,
-        // or if you want to always update it (be cautious with overwriting valuable data).
-        if (materialDescription && (!material.description || material.description !== materialDescription)) {
-            material = await tx.material.update({
-                where: { id: material.id },
-                data: { description: materialDescription },
-            });
-        }
     }
     return material;
 }
@@ -377,7 +359,8 @@ async function processInvoiceItemTx(
                     newPrice: currentUnitPriceDecimal,
                     percentage: percentageChangeDecimal,
                     status: "PENDING",
-                    effectiveDate, // Add the effective date to the alert
+                    effectiveDate,
+                    invoiceId,
                 },
             });
             console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Price alert created. Old: ${previousPrice}, New: ${currentUnitPriceDecimal}, Change: ${percentageChangeDecimal.toFixed(2)}%, Effective Date: ${effectiveDate.toISOString()}`);
@@ -438,67 +421,55 @@ export async function createInvoiceFromFiles(
         return { overallSuccess: false, results: [{ success: false, message: "No files provided.", fileName: "N/A" }] };
     }
 
-    const extractionResults: ExtractedFileItem[] = [];
-
-    // 1. Extract data from all files
-    for (const file of files) {
+    // 1. Extract data from all files in parallel
+    const extractionPromises = files.map(async (file): Promise<ExtractedFileItem> => {
         console.log(`Processing file for extraction: ${file.name}`);
         if (file.size === 0) {
             console.warn(`Skipping empty file: ${file.name}`);
-            extractionResults.push({ file, extractedData: null, error: "File is empty.", fileName: file.name });
-            continue;
+            return { file, extractedData: null, error: "File is empty.", fileName: file.name };
         }
         if (file.type !== 'application/pdf') {
             console.warn(`Skipping non-PDF file: ${file.name}, type: ${file.type}`);
-            extractionResults.push({ file, extractedData: null, error: "File is not a PDF.", fileName: file.name });
-            continue;
+            return { file, extractedData: null, error: "File is not a PDF.", fileName: file.name };
         }
 
         try {
-            // callPdfExtractAPI now returns a single ExtractedPdfData object or null
             const extractedInvoiceData = await callPdfExtractAPI(file);
 
             if (!extractedInvoiceData) {
                 console.error(`Failed to extract any usable invoice data for file: ${file.name}.`);
-                extractionResults.push({ file, extractedData: null, error: "Failed to extract usable invoice data from PDF.", fileName: file.name });
-                continue;
+                return { file, extractedData: null, error: "Failed to extract usable invoice data from PDF.", fileName: file.name };
             }
 
-            // Validate crucial data for the entire invoice
             if (!extractedInvoiceData.invoiceCode || !extractedInvoiceData.provider?.cif || !extractedInvoiceData.issueDate || typeof extractedInvoiceData.totalAmount !== 'number') {
                 console.warn(`Missing crucial invoice-level data for file: ${file.name}. Data: ${JSON.stringify(extractedInvoiceData)}`);
-                extractionResults.push({
+                return {
                     file,
                     extractedData: extractedInvoiceData,
                     error: "Missing or invalid crucial invoice-level data after PDF extraction. Check invoice code, provider CIF, issue date, or total amount.",
                     fileName: file.name,
-                });
-                continue;
+                };
             }
             if (!extractedInvoiceData.items || extractedInvoiceData.items.length === 0) {
                 console.warn(`No line items extracted for file: ${file.name}. Proceeding with invoice-level data if valid.`);
-                // This might be acceptable depending on business logic (invoice with no items listed but a total exists)
-                // For now, we allow it to proceed to the sorting stage.
             }
 
             try {
-                // Validate date format early for sorting
-                new Date(extractedInvoiceData.issueDate); // This throws if date is invalid
-                extractionResults.push({
+                new Date(extractedInvoiceData.issueDate); // Validate date format
+                return {
                     file,
                     extractedData: extractedInvoiceData,
                     fileName: file.name,
-                });
+                };
             } catch (dateError) {
                 console.warn(`Invalid issue date format for file: ${file.name}. Date: ${extractedInvoiceData.issueDate}`);
-                extractionResults.push({
+                return {
                     file,
                     extractedData: extractedInvoiceData,
                     error: `Invalid issue date format: ${extractedInvoiceData.issueDate}.`,
                     fileName: file.name,
-                });
+                };
             }
-
         } catch (extractionOrConversionError: unknown) {
             console.error(`Error during extraction or conversion for file ${file.name}:`, extractionOrConversionError);
             let errorMessage = "Failed to process PDF.";
@@ -509,9 +480,11 @@ export async function createInvoiceFromFiles(
                     errorMessage = extractionOrConversionError.message;
                 }
             }
-            extractionResults.push({ file, extractedData: null, error: errorMessage, fileName: file.name });
+            return { file, extractedData: null, error: errorMessage, fileName: file.name };
         }
-    }
+    });
+
+    const extractionResults = await Promise.all(extractionPromises);
 
     // 2. Separate items with extraction errors from processable items
     const finalResults: CreateInvoiceResult[] = [];
@@ -590,6 +563,21 @@ export async function createInvoiceFromFiles(
                         console.warn(`Skipping item due to missing material name in invoice ${invoice.invoiceCode} from file ${fileName}`);
                         continue;
                     }
+
+                    // Add validation for required numeric fields
+                    if (typeof itemData.unitPrice !== 'number' || isNaN(itemData.unitPrice)) {
+                        console.warn(`Skipping item due to invalid unit price in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}, Unit Price: ${itemData.unitPrice}`);
+                        continue;
+                    }
+                    if (typeof itemData.quantity !== 'number' || isNaN(itemData.quantity)) {
+                        console.warn(`Skipping item due to invalid quantity in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}, Quantity: ${itemData.quantity}`);
+                        continue;
+                    }
+                    if (typeof itemData.totalPrice !== 'number' || isNaN(itemData.totalPrice)) {
+                        console.warn(`Skipping item due to invalid total price in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}, Total Price: ${itemData.totalPrice}`);
+                        continue;
+                    }
+
                     const material = await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialDescription);
                     const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
                     const currentItemUnitPrice = new Prisma.Decimal(itemData.unitPrice.toFixed(2));
@@ -620,8 +608,7 @@ export async function createInvoiceFromFiles(
                                     percentage: percentageChangeDecimal,
                                     status: "PENDING",
                                     effectiveDate: effectiveItemDate,
-                                    // Optionally, link to the previous invoice item ID in this invoice if schema allows
-                                    // previousInvoiceItemId: lastSeenPriceRecordInThisInvoice.invoiceItemId 
+                                    invoiceId: invoice.id,
                                 },
                             });
                             alertsCounter++;

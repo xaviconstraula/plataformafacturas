@@ -104,7 +104,7 @@ export function AlertList({ initialAlerts }: AlertListProps) {
               </Badge>
             </div>
             <CardDescription>
-              Proveedor: {alert.provider.name} | Detectado el {new Date(alert.createdAt).toLocaleDateString("es-ES")}
+              Proveedor: {alert.provider.name} | Factura del {new Date(alert.issueDate).toLocaleDateString("es-ES")} | Detectado el {new Date(alert.createdAt).toLocaleDateString("es-ES")}
             </CardDescription>
           </CardHeader>
           <CardContent>

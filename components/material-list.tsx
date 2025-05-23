@@ -12,7 +12,6 @@ interface MaterialListProps {
     id: string
     code: string
     name: string
-    description: string | null
     _count: {
       invoiceItems: number
     }
@@ -21,7 +20,7 @@ interface MaterialListProps {
 
 export function MaterialList({ materials }: MaterialListProps) {
   const [page, setPage] = useState(1)
-  const itemsPerPage = 10
+  const itemsPerPage = 20
 
   const totalPages = Math.ceil(materials.length / itemsPerPage)
   const paginatedMaterials = materials.slice((page - 1) * itemsPerPage, page * itemsPerPage)
@@ -33,7 +32,6 @@ export function MaterialList({ materials }: MaterialListProps) {
           <TableHeader>
             <TableRow>
               <TableHead>Nombre</TableHead>
-              <TableHead>Descripción</TableHead>
               <TableHead>Facturas</TableHead>
               <TableHead className="w-[100px]">Acciones</TableHead>
             </TableRow>
@@ -43,7 +41,6 @@ export function MaterialList({ materials }: MaterialListProps) {
               paginatedMaterials.map((material) => (
                 <TableRow key={material.id}>
                   <TableCell>{material.name}</TableCell>
-                  <TableCell>{material.description || 'N/A'}</TableCell>
                   <TableCell>{material._count.invoiceItems}</TableCell>
                   <TableCell className="space-x-1">
                     <EditMaterialDialog materialId={material.id}>
@@ -61,7 +58,7 @@ export function MaterialList({ materials }: MaterialListProps) {
               ))
             ) : (
               <TableRow>
-                <TableCell colSpan={4} className="h-24 text-center">
+                <TableCell colSpan={3} className="h-24 text-center">
                   No se encontraron materiales.
                 </TableCell>
               </TableRow>
