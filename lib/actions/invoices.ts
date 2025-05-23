@@ -34,6 +34,7 @@ interface ExtractedFileItem {
     extractedData: ExtractedPdfData | null;
     error?: string; // Error during extraction or initial validation
     fileName: string; // Store filename for results
+    pageNumber?: number; // Optional page number
 }
 
 // Type for the result of the transaction part of processing
@@ -45,123 +46,145 @@ interface TransactionOperationResult {
     isExisting?: boolean; // To distinguish from new invoices
 }
 
-async function callPdfExtractAPI(file: File): Promise<ExtractedPdfData | null> {
+async function callPdfExtractAPI(file: File): Promise<ExtractedPdfData[]> {
     try {
         console.log(`Starting PDF extraction for file: ${file.name}`);
         // Convert the File to ArrayBuffer
         const buffer = Buffer.from(await file.arrayBuffer());
         const arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
 
-        // Convert PDF to PNG
-        const [page] = await pdfToPng(arrayBuffer, {
+        // Convert PDF to PNG - now processing all pages
+        const pages = await pdfToPng(arrayBuffer, {
             disableFontFace: false, // Enable better font rendering
             useSystemFonts: true,   // Allow system font fallback
             viewportScale: 2.0,     // Higher quality for better OCR
             verbosityLevel: 0,      // Only show errors
-            pagesToProcess: [1],    // Only first page
-            strictPagesToProcess: true, // Fail if page is invalid
+            strictPagesToProcess: false, // Allow all pages
         });
 
-        if (!page?.content) {
-            console.error(`Failed to convert PDF to image for ${file.name}`);
-            return null;
+        if (!pages || pages.length === 0) {
+            console.error(`Failed to convert PDF to images for ${file.name}`);
+            return [];
         }
-        console.log(`Successfully converted PDF to image for ${file.name}`);
+        console.log(`Successfully converted PDF to ${pages.length} images for ${file.name}`);
 
-        // Convert the PNG buffer to base64
-        const base64Image = `data:image/png;base64,${page.content.toString("base64")}`;
+        const extractedInvoices: ExtractedPdfData[] = [];
 
-        const prompt = 'Analyze this invoice image and extract the following information in a structured way:\n' +
-            '1. Provider Information (invoice issuer):\n' +
-            '   - Company name\n' +
-            '   - Provider Tax ID: Extract any official tax identification number found (e.g., VAT ID, Company Registration Number, etc.).\n' +
-            '     If a Spanish CIF/NIF/DNI is present, ensure it matches these formats:\n' +
-            '       * CIF: Letter + 8 digits (e.g., B12345678)\n' +
-            '       * NIF: 8 digits + letter (e.g., 12345678A)\n' +
-            '       * DNI: 8 digits + letter (e.g., 12345678Z)\n' +
-            '     If no Spanish-formatted ID is found, provide the most relevant tax identifier present on the invoice for the `cif` field.\n' +
-            '   - Provider email: Extract the provider\'s primary email address if available.\n' +
-            '   - Provider phone: Extract the provider\'s primary phone number if available.\n' +
-            '2. Invoice Details:\n' +
-            '   - Unique invoice code\n' +
-            '   - Issue date (must be a valid date)\n' +
-            '   - Total amount (must be a decimal number with 2 decimal places)\n' +
-            '3. Line Items (for each item):\n' +
-            '   - Material name/short identifier\n' +
-            '   - Material description (generate a brief description of the item)\n' +
-            '   - Quantity (must be a decimal number with 2 decimal places)\n' +
-            '   - Unit price (must be a decimal number with 2 decimal places)\n' +
-            '   - Total price per item (must be quantity * unit price)\n\n' +
-            'Database Schema Requirements:\n' +
-            '- Provider must have a tax ID (`cif`) extracted. This is a critical field. Prioritize Spanish CIF/NIF/DNI if available; otherwise, use any other official provider tax identifier found.\n' +
-            '- Include provider email and phone if these are present on the invoice.\n' +
-            '- Invoice must have a unique invoice code and valid issue date\n' +
-            '- Each line item represents an InvoiceItem linked to a Material. Include materialName and materialDescription.\n' +
-            '- All monetary values must be Decimal(10,2)\n' +
-            '- All quantities must be Decimal(10,2)\n\n' +
-            'Format the response as valid JSON exactly like this:\n' +
-            '{\n' +
-            '  "invoiceCode": "string - unique invoice identifier",\n' +
-            '  "provider": {\n' +
-            '    "name": "string - company name",\n' +
-            '    "cif": "string - provider tax ID (any official format, Spanish CIF/NIF/DNI preferred if available)",\n' +
-            '    "email": "string? - optional provider email extracted from invoice",\n' +
-            '    "phone": "string? - optional provider phone extracted from invoice",\n' +
-            '    "address": "string? - optional address"\n' +
-            '  },\n' +
-            '  "issueDate": "string - ISO date format",\n' +
-            '  "totalAmount": "number - total invoice amount with 2 decimal places",\n' +
-            '  "items": [\n' +
-            '    {\n' +
-            '      "materialName": "string - item/material short name",\n' +
-            '      "materialDescription": "string? - optional item/material detailed description",\n' +
-            '      "quantity": "number - quantity with 2 decimal places",\n' +
-            '      "unitPrice": "number - price per unit with 2 decimal places",\n' +
-            '      "totalPrice": "number - quantity * unitPrice with 2 decimal places"\n' +
-            '    }\n' +
-            '  ]\n' +
-            '}';
+        // Process each page
+        for (const page of pages) {
+            if (!page?.content) {
+                console.warn(`Skipping page in ${file.name} due to missing content`);
+                continue;
+            }
 
-        console.log(`Calling OpenAI API for file: ${file.name}`);
-        const response = await openai.chat.completions.create({
-            model: "gpt-4.1-mini",
-            messages: [
-                {
-                    role: "user",
-                    content: [
-                        { type: "text", text: prompt },
-                        {
-                            type: "image_url",
-                            image_url: {
-                                url: base64Image,
-                                detail: "high"
+            // Convert the PNG buffer to base64
+            const base64Image = `data:image/png;base64,${page.content.toString("base64")}`;
+
+            const prompt = 'Analyze this invoice image and extract the following information in a structured way:\n' +
+                '1. Provider Information (invoice issuer):\n' +
+                '   - Company name\n' +
+                '   - Provider Tax ID: Extract any official tax identification number found (e.g., VAT ID, Company Registration Number, etc.).\n' +
+                '     If a Spanish CIF/NIF/DNI is present, ensure it matches these formats:\n' +
+                '       * CIF: Letter + 8 digits (e.g., B12345678)\n' +
+                '       * NIF: 8 digits + letter (e.g., 12345678A)\n' +
+                '       * DNI: 8 digits + letter (e.g., 12345678Z)\n' +
+                '     If no Spanish-formatted ID is found, provide the most relevant tax identifier present on the invoice for the `cif` field.\n' +
+                '   - Provider email: Extract the provider\'s primary email address if available.\n' +
+                '   - Provider phone: Extract the provider\'s primary phone number if available.\n' +
+                '2. Invoice Details:\n' +
+                '   - Unique invoice code\n' +
+                '   - Issue date (must be a valid date)\n' +
+                '   - Total amount (must be a decimal number with 2 decimal places)\n' +
+                '3. Line Items (for each item):\n' +
+                '   - Material name/short identifier\n' +
+                '   - Material description (generate a brief description of the item)\n' +
+                '   - Quantity (must be a decimal number with 2 decimal places)\n' +
+                '   - Unit price (must be a decimal number with 2 decimal places)\n' +
+                '   - Total price per item (must be quantity * unit price)\n\n' +
+                'Database Schema Requirements:\n' +
+                '- Provider must have a tax ID (`cif`) extracted. This is a critical field. Prioritize Spanish CIF/NIF/DNI if available; otherwise, use any other official provider tax identifier found.\n' +
+                '- Include provider email and phone if these are present on the invoice.\n' +
+                '- Invoice must have a unique invoice code and valid issue date\n' +
+                '- Each line item represents an InvoiceItem linked to a Material. Include materialName and materialDescription.\n' +
+                '- All monetary values must be Decimal(10,2)\n' +
+                '- All quantities must be Decimal(10,2)\n\n' +
+                'Format the response as valid JSON exactly like this:\n' +
+                '{\n' +
+                '  "invoiceCode": "string - unique invoice identifier",\n' +
+                '  "provider": {\n' +
+                '    "name": "string - company name",\n' +
+                '    "cif": "string - provider tax ID (any official format, Spanish CIF/NIF/DNI preferred if available)",\n' +
+                '    "email": "string? - optional provider email extracted from invoice",\n' +
+                '    "phone": "string? - optional provider phone extracted from invoice",\n' +
+                '    "address": "string? - optional address"\n' +
+                '  },\n' +
+                '  "issueDate": "string - ISO date format",\n' +
+                '  "totalAmount": "number - total invoice amount with 2 decimal places",\n' +
+                '  "items": [\n' +
+                '    {\n' +
+                '      "materialName": "string - item/material short name",\n' +
+                '      "materialDescription": "string? - optional item/material detailed description",\n' +
+                '      "quantity": "number - quantity with 2 decimal places",\n' +
+                '      "unitPrice": "number - price per unit with 2 decimal places",\n' +
+                '      "totalPrice": "number - quantity * unitPrice with 2 decimal places"\n' +
+                '    }\n' +
+                '  ]\n' +
+                '}';
+
+            console.log(`Calling OpenAI API for file: ${file.name}, page ${pages.indexOf(page) + 1}`);
+            const response = await openai.chat.completions.create({
+                model: "gpt-4.1-mini",
+                messages: [
+                    {
+                        role: "user",
+                        content: [
+                            { type: "text", text: prompt },
+                            {
+                                type: "image_url",
+                                image_url: {
+                                    url: base64Image,
+                                    detail: "high"
+                                }
                             }
-                        }
-                    ]
+                        ]
+                    }
+                ],
+                max_tokens: 4096,
+                response_format: { type: "json_object" },
+            });
+
+            const content = response.choices[0].message.content;
+            if (!content) {
+                console.error(`No content in OpenAI response for ${file.name}, page ${pages.indexOf(page) + 1}`);
+                continue;
+            }
+
+            try {
+                // Parse the JSON response
+                const parsedContent = JSON.parse(content) as ExtractedPdfData;
+                console.log(`Successfully parsed OpenAI JSON response for ${file.name}, page ${pages.indexOf(page) + 1}`);
+
+                // Validate required fields
+                if (parsedContent.invoiceCode &&
+                    parsedContent.provider?.cif &&
+                    parsedContent.issueDate &&
+                    typeof parsedContent.totalAmount === 'number' &&
+                    parsedContent.items?.length) {
+                    extractedInvoices.push(parsedContent);
+                } else {
+                    console.warn(`Skipping page ${pages.indexOf(page) + 1} in ${file.name} due to missing required fields`);
                 }
-            ],
-            max_tokens: 4096, // Adjust if necessary
-            response_format: { type: "json_object" }, // Enforce JSON output
-        });
-
-        const content = response.choices[0].message.content;
-        if (!content) {
-            console.error(`No content in OpenAI response for ${file.name}`);
-            return null;
+            } catch (parseError) {
+                console.error(`Error parsing OpenAI response for ${file.name}, page ${pages.indexOf(page) + 1}:`, parseError);
+                continue;
+            }
         }
-        console.log(`OpenAI API response content for ${file.name}:`, content);
-        console.log(`Successfully received OpenAI API response for ${file.name}`);
 
-        // Parse the JSON response
-        const parsedContent = JSON.parse(content) as ExtractedPdfData;
-        console.log(`Successfully parsed OpenAI JSON response for ${file.name}`);
-        return parsedContent;
+        return extractedInvoices;
 
     } catch (error) {
         console.error(`Error extracting data from PDF ${file.name}:`, error);
-        // Optionally, include more details from the error object if it's an OpenAI specific error
-        // e.g., if (error instanceof OpenAI.APIError) { ... }
-        return null;
+        return [];
     }
 }
 
@@ -381,27 +404,47 @@ export async function createInvoiceFromFiles(
             continue;
         }
 
-        const extractedData = await callPdfExtractAPI(file);
+        const extractedDataArray = await callPdfExtractAPI(file);
 
-        if (!extractedData) {
+        if (!extractedDataArray || extractedDataArray.length === 0) {
             console.error(`Failed to extract data for file: ${file.name}`);
             extractionResults.push({ file, extractedData: null, error: "Failed to extract data from PDF.", fileName: file.name });
             continue;
         }
 
-        if (!extractedData.invoiceCode || !extractedData.provider?.cif || !extractedData.issueDate || typeof extractedData.totalAmount !== 'number' || !extractedData.items?.length) {
-            console.warn(`Missing crucial data for file: ${file.name}. Data: ${JSON.stringify(extractedData)}`);
-            extractionResults.push({ file, extractedData, error: "Missing or invalid crucial data after PDF extraction. Check invoice code, provider CIF, issue date, total amount, or items.", fileName: file.name });
-            continue;
-        }
-        try {
-            // Validate date format early for sorting
-            new Date(extractedData.issueDate);
-            extractionResults.push({ file, extractedData, fileName: file.name });
-        } catch (dateError) {
-            console.warn(`Invalid issue date format for file: ${file.name}. Date: ${extractedData.issueDate}`);
-            extractionResults.push({ file, extractedData, error: `Invalid issue date format: ${extractedData.issueDate}.`, fileName: file.name });
-        }
+        // Process each invoice from the PDF
+        extractedDataArray.forEach((data, pageIndex) => {
+            if (!data.invoiceCode || !data.provider?.cif || !data.issueDate || typeof data.totalAmount !== 'number' || !data.items?.length) {
+                console.warn(`Missing crucial data for file: ${file.name}, page ${pageIndex + 1}. Data: ${JSON.stringify(data)}`);
+                extractionResults.push({
+                    file,
+                    extractedData: data,
+                    error: "Missing or invalid crucial data after PDF extraction. Check invoice code, provider CIF, issue date, total amount, or items.",
+                    fileName: file.name,
+                    pageNumber: pageIndex + 1
+                });
+                return;
+            }
+            try {
+                // Validate date format early for sorting
+                new Date(data.issueDate);
+                extractionResults.push({
+                    file,
+                    extractedData: data,
+                    fileName: file.name,
+                    pageNumber: pageIndex + 1
+                });
+            } catch (dateError) {
+                console.warn(`Invalid issue date format for file: ${file.name}, page ${pageIndex + 1}. Date: ${data.issueDate}`);
+                extractionResults.push({
+                    file,
+                    extractedData: data,
+                    error: `Invalid issue date format: ${data.issueDate}.`,
+                    fileName: file.name,
+                    pageNumber: pageIndex + 1
+                });
+            }
+        });
     }
 
     // 2. Separate items with extraction errors from processable items
@@ -410,29 +453,37 @@ export async function createInvoiceFromFiles(
 
     for (const item of extractionResults) {
         if (item.error) {
-            finalResults.push({ success: false, message: item.error, fileName: item.fileName });
-        } else if (item.extractedData) { // Ensure extractedData is not null
+            finalResults.push({
+                success: false,
+                message: item.error,
+                fileName: `${item.fileName}${item.pageNumber ? ` (Page ${item.pageNumber})` : ''}`
+            });
+        } else if (item.extractedData) {
             processableItems.push(item);
         }
     }
 
     // 3. Sort processable items by issueDate (ascending)
-    // Ensure data and issueDate are valid before comparison, though errors should be caught.
     processableItems.sort((a, b) => {
         const dateA = a.extractedData?.issueDate ? new Date(a.extractedData.issueDate).getTime() : 0;
         const dateB = b.extractedData?.issueDate ? new Date(b.extractedData.issueDate).getTime() : 0;
-        if (dateA === 0 || dateB === 0) return 0; // Should not happen for processable items
+        if (dateA === 0 || dateB === 0) return 0;
         return dateA - dateB;
     });
 
-    console.log("Processing order after sorting by issue date:", processableItems.map(p => ({ file: p.fileName, date: p.extractedData?.issueDate })));
+    console.log("Processing order after sorting by issue date:", processableItems.map(p => ({
+        file: p.fileName,
+        page: p.pageNumber,
+        date: p.extractedData?.issueDate
+    })));
 
     // 4. Process sorted items sequentially
-    for (const { file, extractedData, fileName } of processableItems) {
-        if (!extractedData) continue; // Should have been filtered, but as a safeguard
+    for (const item of processableItems) {
+        const { file, extractedData, fileName, pageNumber } = item;
+        if (!extractedData) continue;
 
         try {
-            console.log(`Starting database transaction for sorted invoice from file: ${fileName}, invoice code: ${extractedData.invoiceCode}, issue date: ${extractedData.issueDate}`);
+            console.log(`Starting database transaction for sorted invoice from file: ${fileName}${pageNumber ? `, page ${pageNumber}` : ''}, invoice code: ${extractedData.invoiceCode}, issue date: ${extractedData.issueDate}`);
             const operationResult: TransactionOperationResult = await prisma.$transaction(async (tx) => {
                 const provider = await findOrCreateProviderTx(tx, extractedData.provider);
 
@@ -444,8 +495,14 @@ export async function createInvoiceFromFiles(
                 });
 
                 if (existingInvoice) {
-                    console.log(`Invoice ${extractedData.invoiceCode} from provider ${provider.name} (file: ${fileName}) already exists. Skipping creation.`);
-                    return { success: true, message: `Invoice ${extractedData.invoiceCode} from provider ${provider.name} already exists.`, invoiceId: existingInvoice.id, alertsCreated: 0, isExisting: true };
+                    console.log(`Invoice ${extractedData.invoiceCode} from provider ${provider.name} (file: ${fileName}${pageNumber ? `, page ${pageNumber}` : ''}) already exists. Skipping creation.`);
+                    return {
+                        success: true,
+                        message: `Invoice ${extractedData.invoiceCode} from provider ${provider.name} already exists.`,
+                        invoiceId: existingInvoice.id,
+                        alertsCreated: 0,
+                        isExisting: true
+                    };
                 }
 
                 const invoice = await tx.invoice.create({
@@ -463,7 +520,7 @@ export async function createInvoiceFromFiles(
 
                 for (const itemData of extractedData.items) {
                     if (!itemData.materialName) {
-                        console.warn(`Skipping item due to missing material name in invoice ${invoice.invoiceCode} from file ${fileName}`);
+                        console.warn(`Skipping item due to missing material name in invoice ${invoice.invoiceCode} from file ${fileName}${pageNumber ? `, page ${pageNumber}` : ''}`);
                         continue;
                     }
                     const material = await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialDescription);
@@ -472,19 +529,35 @@ export async function createInvoiceFromFiles(
                         alertsCounter++;
                     }
                 }
-                console.log(`Successfully created invoice ${invoice.invoiceCode} from file: ${fileName}. Alerts created: ${alertsCounter}`);
-                return { success: true, message: `Invoice ${invoice.invoiceCode} created successfully.`, invoiceId: invoice.id, alertsCreated: alertsCounter, isExisting: false };
+                console.log(`Successfully created invoice ${invoice.invoiceCode} from file: ${fileName}${pageNumber ? `, page ${pageNumber}` : ''}. Alerts created: ${alertsCounter}`);
+                return {
+                    success: true,
+                    message: `Invoice ${invoice.invoiceCode} created successfully.`,
+                    invoiceId: invoice.id,
+                    alertsCreated: alertsCounter,
+                    isExisting: false
+                };
             });
 
             if (operationResult.isExisting) {
-                finalResults.push({ success: true, message: operationResult.message, invoiceId: operationResult.invoiceId, fileName });
+                finalResults.push({
+                    success: true,
+                    message: operationResult.message,
+                    invoiceId: operationResult.invoiceId,
+                    fileName: `${fileName}${pageNumber ? ` (Page ${pageNumber})` : ''}`
+                });
             } else {
-                finalResults.push({ success: operationResult.success, message: operationResult.message, invoiceId: operationResult.invoiceId, alertsCreated: operationResult.alertsCreated, fileName });
+                finalResults.push({
+                    success: operationResult.success,
+                    message: operationResult.message,
+                    invoiceId: operationResult.invoiceId,
+                    alertsCreated: operationResult.alertsCreated,
+                    fileName: `${fileName}${pageNumber ? ` (Page ${pageNumber})` : ''}`
+                });
             }
-
-        } catch (error: unknown) {
-            console.error(`Error processing sorted invoice from ${fileName}:`, error);
-            const baseMessage = `Failed to create invoice from ${fileName}`;
+        } catch (error) {
+            console.error(`Error processing sorted invoice from ${fileName}${pageNumber ? `, page ${pageNumber}` : ''}:`, error);
+            const baseMessage = `Failed to create invoice from ${fileName}${pageNumber ? ` (Page ${pageNumber})` : ''}`;
             let specificMessage = "An unexpected error occurred.";
 
             if (error instanceof Error) {
@@ -497,11 +570,11 @@ export async function createInvoiceFromFiles(
 
             if (isPrismaP2002Error(error)) {
                 if (error.meta && error.meta.target && error.meta.target.includes('invoiceCode') && extractedData) {
-                    console.warn(`Duplicate invoice code '${extractedData.invoiceCode}' for file: ${fileName}`);
+                    console.warn(`Duplicate invoice code '${extractedData.invoiceCode}' for file: ${fileName}${pageNumber ? `, page ${pageNumber}` : ''}`);
                     specificMessage = `An invoice with code '${extractedData.invoiceCode}' already exists.`;
                 }
             }
-            finalResults.push({ success: false, message: `${baseMessage}: ${specificMessage}`, fileName });
+            finalResults.push({ success: false, message: `${baseMessage}: ${specificMessage}`, fileName: `${fileName}${pageNumber ? ` (Page ${pageNumber})` : ''}` });
         }
     }
 

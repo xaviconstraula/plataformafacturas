@@ -14,8 +14,6 @@ export default async function Home() {
     getMaterialsBySupplierType()
   ])
 
-  console.log("OVERVIEW DATA", overviewData)
-
 
   return (
     <div className="flex flex-col gap-6">
