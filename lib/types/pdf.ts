@@ -13,6 +13,7 @@ export interface ExtractedPdfItemData {
     unitPrice: number;
     totalPrice: number;
     itemDate?: string; // Optional ISO date string for items with different dates
+    isMaterial: boolean; // New field to indicate if the item is a material
 }
 
 export interface ExtractedPdfData {

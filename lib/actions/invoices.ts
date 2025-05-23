@@ -133,6 +133,7 @@ CRITICAL NOTE FOR NUMBER RECOGNITION:
    - Material name/identifier: IMPORTANT RULES FOR MATERIAL NAME EXTRACTION:
      * If both a descriptive name AND a code are present, use the descriptive name as materialName
      * If only a code is present (e.g., "21PA0010771"), use the code as materialName but prefix it with "CODE: " (e.g., "CODE: 21PA0010771")
+   - isMaterial: boolean - Set to true if the item is a physical material or product. Set to false if it's a service, tax, fee, or other non-material charge (e.g., "Ecotasa", "Transporte", "Handling Fee").
    - Quantity (must be a decimal number with 2 decimal places, extracted exactly)
    - Unit price (must be a decimal number with 2 decimal places, extracted exactly)
    - Total price per item (must be quantity * unit price, extracted exactly. If not present, calculate it carefully.)
@@ -165,6 +166,7 @@ Format the response as valid JSON exactly like this:
   "items": [
     {
       "materialName": "string - the exact material name as it appears in the invoice",
+      "isMaterial": "boolean - true if it's a material, false otherwise (e.g., for fees, taxes like Ecotasa, transport)",
       "quantity": "number - quantity with 2 decimal places",
       "unitPrice": "number - price per unit with 2 decimal places",
       "totalPrice": "number - quantity * unitPrice with 2 decimal places",
@@ -289,7 +291,8 @@ async function processInvoiceItemTx(
     invoiceId: string,
     invoiceIssueDate: Date,
     providerId: string,
-    createdMaterial: Material
+    createdMaterial: Material,
+    isMaterialItem: boolean
 ): Promise<{ invoiceItem: InvoiceItem; alert?: PriceAlert }> {
     const { quantity, unitPrice, totalPrice, itemDate } = itemData;
 
@@ -321,93 +324,98 @@ async function processInvoiceItemTx(
 
     let alert: PriceAlert | undefined;
 
-    // Find the chronologically previous invoice item for this material and provider
-    const previousInvoiceItemRecord = await tx.invoiceItem.findFirst({
-        where: {
-            materialId: createdMaterial.id,
-            invoice: {
-                providerId: providerId,
+    // Only perform price alert checks and MaterialProvider updates if it's a material
+    if (isMaterialItem) {
+        // Find the chronologically previous invoice item for this material and provider
+        const previousInvoiceItemRecord = await tx.invoiceItem.findFirst({
+            where: {
+                materialId: createdMaterial.id,
+                invoice: {
+                    providerId: providerId,
+                },
+                itemDate: { lt: effectiveDate }, // Use itemDate for comparison
+                NOT: {
+                    id: invoiceItem.id
+                }
             },
-            itemDate: { lt: effectiveDate }, // Use itemDate for comparison
-            NOT: {
-                id: invoiceItem.id
-            }
-        },
-        orderBy: { itemDate: 'desc' }, // Order by itemDate instead of invoice.issueDate
-        select: { unitPrice: true, itemDate: true }
-    });
+            orderBy: { itemDate: 'desc' }, // Order by itemDate instead of invoice.issueDate
+            select: { unitPrice: true, itemDate: true }
+        });
 
-    if (previousInvoiceItemRecord) {
-        const previousPrice = previousInvoiceItemRecord.unitPrice;
-        console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Previous price from ${previousInvoiceItemRecord.itemDate.toISOString()}: ${previousPrice}. Current unit price from ${effectiveDate.toISOString()}: ${currentUnitPriceDecimal}.`);
+        if (previousInvoiceItemRecord) {
+            const previousPrice = previousInvoiceItemRecord.unitPrice;
+            console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Previous price from ${previousInvoiceItemRecord.itemDate.toISOString()}: ${previousPrice}. Current unit price from ${effectiveDate.toISOString()}: ${currentUnitPriceDecimal}.`);
 
-        if (!currentUnitPriceDecimal.equals(previousPrice)) {
-            const priceDiff = currentUnitPriceDecimal.minus(previousPrice);
-            let percentageChangeDecimal: Prisma.Decimal;
+            if (!currentUnitPriceDecimal.equals(previousPrice)) {
+                const priceDiff = currentUnitPriceDecimal.minus(previousPrice);
+                let percentageChangeDecimal: Prisma.Decimal;
 
-            if (!previousPrice.isZero()) {
-                percentageChangeDecimal = priceDiff.dividedBy(previousPrice).times(100);
+                if (!previousPrice.isZero()) {
+                    percentageChangeDecimal = priceDiff.dividedBy(previousPrice).times(100);
+                } else {
+                    percentageChangeDecimal = new Prisma.Decimal(currentUnitPriceDecimal.isPositive() ? 9999 : -9999);
+                }
+
+                alert = await tx.priceAlert.create({
+                    data: {
+                        materialId: createdMaterial.id,
+                        providerId,
+                        oldPrice: previousPrice,
+                        newPrice: currentUnitPriceDecimal,
+                        percentage: percentageChangeDecimal,
+                        status: "PENDING",
+                        effectiveDate,
+                        invoiceId,
+                    },
+                });
+                console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Price alert created. Old: ${previousPrice}, New: ${currentUnitPriceDecimal}, Change: ${percentageChangeDecimal.toFixed(2)}%, Effective Date: ${effectiveDate.toISOString()}`);
             } else {
-                percentageChangeDecimal = new Prisma.Decimal(currentUnitPriceDecimal.isPositive() ? 9999 : -9999);
+                console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Price (${currentUnitPriceDecimal}) is unchanged compared to previous invoice item dated ${previousInvoiceItemRecord.itemDate.toISOString()}.`);
             }
+        } else {
+            console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] No chronologically prior invoice item found for material ${createdMaterial.id} / provider ${providerId} before ${effectiveDate.toISOString()}. This is treated as the first price recording for alert purposes.`);
+        }
 
-            alert = await tx.priceAlert.create({
+        // Update MaterialProvider to reflect the price from the item with the LATEST date
+        const materialProvider = await tx.materialProvider.findUnique({
+            where: {
+                materialId_providerId: {
+                    materialId: createdMaterial.id,
+                    providerId,
+                },
+            },
+        });
+
+        if (materialProvider) {
+            if (!materialProvider.lastPriceDate || effectiveDate.getTime() > materialProvider.lastPriceDate.getTime()) {
+                if (!materialProvider.lastPrice.equals(currentUnitPriceDecimal) || (materialProvider.lastPriceDate && effectiveDate.getTime() !== materialProvider.lastPriceDate.getTime()) || !materialProvider.lastPriceDate) {
+                    console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Updating MaterialProvider. Old lastPriceDate: ${materialProvider.lastPriceDate?.toISOString()}, Old lastPrice: ${materialProvider.lastPrice}. New: Date ${effectiveDate.toISOString()}, Price ${currentUnitPriceDecimal}.`);
+                    await tx.materialProvider.update({
+                        where: { id: materialProvider.id },
+                        data: {
+                            lastPrice: currentUnitPriceDecimal,
+                            lastPriceDate: effectiveDate,
+                        },
+                    });
+                } else {
+                    console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] MaterialProvider already reflects the latest price and date from this or a newer item. Price: ${currentUnitPriceDecimal} @ ${effectiveDate.toISOString()}. Stored: ${materialProvider.lastPrice} @ ${materialProvider.lastPriceDate?.toISOString()}. No update to MaterialProvider needed.`);
+                }
+            } else {
+                console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Current item date (${effectiveDate.toISOString()}) is older than or same as MaterialProvider's lastPriceDate (${materialProvider.lastPriceDate?.toISOString()}). MaterialProvider not updated by this item's data.`);
+            }
+        } else {
+            console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] First MaterialProvider record for material ${createdMaterial.id} / provider ${providerId}. Setting initial price ${currentUnitPriceDecimal} from item date ${effectiveDate.toISOString()}.`);
+            await tx.materialProvider.create({
                 data: {
                     materialId: createdMaterial.id,
                     providerId,
-                    oldPrice: previousPrice,
-                    newPrice: currentUnitPriceDecimal,
-                    percentage: percentageChangeDecimal,
-                    status: "PENDING",
-                    effectiveDate,
-                    invoiceId,
+                    lastPrice: currentUnitPriceDecimal,
+                    lastPriceDate: effectiveDate,
                 },
             });
-            console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Price alert created. Old: ${previousPrice}, New: ${currentUnitPriceDecimal}, Change: ${percentageChangeDecimal.toFixed(2)}%, Effective Date: ${effectiveDate.toISOString()}`);
-        } else {
-            console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Price (${currentUnitPriceDecimal}) is unchanged compared to previous invoice item dated ${previousInvoiceItemRecord.itemDate.toISOString()}.`);
         }
     } else {
-        console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] No chronologically prior invoice item found for material ${createdMaterial.id} / provider ${providerId} before ${effectiveDate.toISOString()}. This is treated as the first price recording for alert purposes.`);
-    }
-
-    // Update MaterialProvider to reflect the price from the item with the LATEST date
-    const materialProvider = await tx.materialProvider.findUnique({
-        where: {
-            materialId_providerId: {
-                materialId: createdMaterial.id,
-                providerId,
-            },
-        },
-    });
-
-    if (materialProvider) {
-        if (!materialProvider.lastPriceDate || effectiveDate.getTime() > materialProvider.lastPriceDate.getTime()) {
-            if (!materialProvider.lastPrice.equals(currentUnitPriceDecimal) || (materialProvider.lastPriceDate && effectiveDate.getTime() !== materialProvider.lastPriceDate.getTime()) || !materialProvider.lastPriceDate) {
-                console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Updating MaterialProvider. Old lastPriceDate: ${materialProvider.lastPriceDate?.toISOString()}, Old lastPrice: ${materialProvider.lastPrice}. New: Date ${effectiveDate.toISOString()}, Price ${currentUnitPriceDecimal}.`);
-                await tx.materialProvider.update({
-                    where: { id: materialProvider.id },
-                    data: {
-                        lastPrice: currentUnitPriceDecimal,
-                        lastPriceDate: effectiveDate,
-                    },
-                });
-            } else {
-                console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] MaterialProvider already reflects the latest price and date from this or a newer item. Price: ${currentUnitPriceDecimal} @ ${effectiveDate.toISOString()}. Stored: ${materialProvider.lastPrice} @ ${materialProvider.lastPriceDate?.toISOString()}. No update to MaterialProvider needed.`);
-            }
-        } else {
-            console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Current item date (${effectiveDate.toISOString()}) is older than or same as MaterialProvider's lastPriceDate (${materialProvider.lastPriceDate?.toISOString()}). MaterialProvider not updated by this item's data.`);
-        }
-    } else {
-        console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] First MaterialProvider record for material ${createdMaterial.id} / provider ${providerId}. Setting initial price ${currentUnitPriceDecimal} from item date ${effectiveDate.toISOString()}.`);
-        await tx.materialProvider.create({
-            data: {
-                materialId: createdMaterial.id,
-                providerId,
-                lastPrice: currentUnitPriceDecimal,
-                lastPriceDate: effectiveDate,
-            },
-        });
+        console.log(`[Invoice ${invoiceId}][Item: ${createdMaterial.name}] Item is not a material. Skipping price alert and MaterialProvider updates.`);
     }
 
     return { invoiceItem, alert };
@@ -577,17 +585,52 @@ export async function createInvoiceFromFiles(
                         console.warn(`Skipping item due to invalid total price in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}, Total Price: ${itemData.totalPrice}`);
                         continue;
                     }
+                    // Default isMaterial to true if not provided by AI, though it should be.
+                    // This maintains previous behavior for old data or if AI misses it.
+                    const isMaterialItem = typeof itemData.isMaterial === 'boolean' ? itemData.isMaterial : true;
 
+                    // If the item is NOT a material, we still create the InvoiceItem for accounting
+                    // but skip material creation, price alert logic, and MaterialProvider updates.
+                    if (!isMaterialItem) {
+                        console.log(`[Invoice ${invoice.invoiceCode}][Item: ${itemData.materialName}] Marked as non-material. Creating InvoiceItem only.`);
+                        const quantityDecimal = new Prisma.Decimal(itemData.quantity.toFixed(2));
+                        const currentUnitPriceDecimal = new Prisma.Decimal(itemData.unitPrice.toFixed(2));
+                        const totalPriceDecimal = new Prisma.Decimal(itemData.totalPrice.toFixed(2));
+                        const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
+
+                        await tx.invoiceItem.create({
+                            data: {
+                                invoiceId: invoice.id,
+                                // For non-materials, we might not have a materialId or link it to a generic "non-material" entry.
+                                // For now, let's make materialId nullable in the schema or handle this appropriately.
+                                // TEMPORARY: Skip materialId for non-materials. This will require schema change or a placeholder material.
+                                // For this iteration, let's assume a placeholder material or adapt the logic later.
+                                // For now, to avoid breaking, we'll create a "dummy" material entry for it or skip it.
+                                // Let's log and decide. For now, if not a material, we just create the invoice item without linking to material-specific logic.
+                                // This part needs careful consideration of how to represent non-materials in InvoiceItem.
+                                // A simple solution is to still call findOrCreateMaterialTx, but it will create "Ecotasa" as a material.
+                                // The prompt asks AI to use name like "Ecotasa". We can create them as materials but they won't be used for alerts or MaterialProvider.
+
+                                materialId: (await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialDescription)).id, // Create "Ecotasa", "Transporte" as materials for now.
+                                quantity: quantityDecimal,
+                                unitPrice: currentUnitPriceDecimal,
+                                totalPrice: totalPriceDecimal,
+                                itemDate: effectiveItemDate,
+                            },
+                        });
+                        console.log(`[Invoice ${invoice.invoiceCode}] Non-material item "${itemData.materialName}" added to invoice items. No price alert/MaterialProvider update.`);
+                        continue; // Skip further material-specific processing for this item
+                    }
+
+                    // The rest of the loop is for isMaterialItem === true
                     const material = await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialDescription);
                     const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
                     const currentItemUnitPrice = new Prisma.Decimal(itemData.unitPrice.toFixed(2));
 
-                    // 1. Check for intra-invoice price changes
+                    // 1. Check for intra-invoice price changes (only for materials)
                     const lastSeenPriceRecordInThisInvoice = intraInvoiceMaterialPriceHistory.get(material.id);
 
                     if (lastSeenPriceRecordInThisInvoice) {
-                        // Compare if current item is not effectively older and price has changed
-                        // Only trigger if the current item's date is same or newer, and price is different
                         if (effectiveItemDate.getTime() >= lastSeenPriceRecordInThisInvoice.date.getTime() &&
                             !currentItemUnitPrice.equals(lastSeenPriceRecordInThisInvoice.price)) {
 
@@ -596,7 +639,7 @@ export async function createInvoiceFromFiles(
                             if (!lastSeenPriceRecordInThisInvoice.price.isZero()) {
                                 percentageChangeDecimal = priceDiff.dividedBy(lastSeenPriceRecordInThisInvoice.price).times(100);
                             } else {
-                                percentageChangeDecimal = new Prisma.Decimal(currentItemUnitPrice.isPositive() ? 9999 : -9999); // Represent large change if old price was zero
+                                percentageChangeDecimal = new Prisma.Decimal(currentItemUnitPrice.isPositive() ? 9999 : -9999);
                             }
 
                             await tx.priceAlert.create({
@@ -617,29 +660,28 @@ export async function createInvoiceFromFiles(
                     }
 
                     // 2. Process the item (creates InvoiceItem and handles INTER-invoice alerts)
-                    // processInvoiceItemTx compares against items from *other* invoices or items with *strictly earlier dates*
                     const { invoiceItem, alert: interInvoiceAlert } = await processInvoiceItemTx(
                         tx,
                         itemData,
                         invoice.id,
-                        currentInvoiceIssueDate, // Pass original invoice issue date for context if needed by processInvoiceItemTx
+                        currentInvoiceIssueDate,
                         provider.id,
-                        material
+                        material,
+                        isMaterialItem // Pass the flag
                     );
 
                     if (interInvoiceAlert) {
-                        alertsCounter++; // Count inter-invoice alert
+                        alertsCounter++;
                     }
 
-                    // 3. Update/set price history for this material WITHIN THIS INVOICE using the created invoiceItem's details
-                    // This ensures subsequent items in *this same invoice* compare against the latest processed item.
-                    // Only update if the current item is newer or has the same date but potentially a different price (already handled by intra-invoice check).
-                    // We always update to reflect the price of the item just processed for the next iteration within this invoice.
-                    intraInvoiceMaterialPriceHistory.set(material.id, {
-                        price: invoiceItem.unitPrice, // Use the actual price stored in the DB for the item
-                        date: invoiceItem.itemDate,   // Use the actual date stored for the item
-                        invoiceItemId: invoiceItem.id
-                    });
+                    // 3. Update/set price history for this material WITHIN THIS INVOICE (only for materials)
+                    if (isMaterialItem) { // This check is somewhat redundant due to the outer if, but explicit
+                        intraInvoiceMaterialPriceHistory.set(material.id, {
+                            price: invoiceItem.unitPrice,
+                            date: invoiceItem.itemDate,
+                            invoiceItemId: invoiceItem.id
+                        });
+                    }
                 }
                 console.log(`Successfully created invoice ${invoice.invoiceCode} from file: ${fileName}. Total alerts for this invoice: ${alertsCounter}`);
                 return {

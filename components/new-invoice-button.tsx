@@ -69,8 +69,8 @@ export function NewInvoiceButton() {
         <Dialog open={isOpen} onOpenChange={setIsOpen}>
             <DialogTrigger asChild>
                 <Button>
-                    <PlusIcon className="mr-2 h-4 w-4" />
-                    Nueva Factura
+                    <PlusIcon className="h-4 w-4" />
+                    Añadir Facturas
                 </Button>
             </DialogTrigger>
             <DialogContent className="sm:max-w-[425px]">
