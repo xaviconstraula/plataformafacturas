@@ -44,11 +44,15 @@ interface MaterialsBySupplierProps {
 export function MaterialsBySupplier({ data: rawData }: MaterialsBySupplierProps) {
   const transformedData = useMemo(() => {
     if (!rawData) return []
-    return rawData.map(item => ({
-      materialName: item.name,
-      value: item.value,
-      supplier: item.supplier
-    }))
+
+    // Sort data by value in descending order
+    return rawData
+      .map(item => ({
+        materialName: item.name,
+        value: item.value,
+        supplier: item.supplier
+      }))
+      .sort((a, b) => b.value - a.value)
   }, [rawData])
 
   // Create legend data
@@ -67,6 +71,11 @@ export function MaterialsBySupplier({ data: rawData }: MaterialsBySupplierProps)
   if (transformedData.length === 0) {
     return <div className="h-[350px] w-full flex items-center justify-center text-gray-500 font-medium">No data available to display.</div>
   }
+
+  // Calculate dynamic height based on number of items
+  const itemHeight = 40 // Height per bar in pixels
+  const minHeight = 350 // Minimum chart height
+  const chartHeight = Math.max(minHeight, transformedData.length * itemHeight)
 
   return (
     <Card className="w-full">
@@ -94,45 +103,44 @@ export function MaterialsBySupplier({ data: rawData }: MaterialsBySupplierProps)
           </div>
 
           {/* Chart */}
-          <div className="h-[350px] w-full">
+          <div style={{ height: `${chartHeight}px`, width: '100%' }}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart
                 data={transformedData}
+                layout="vertical"
                 margin={{
                   top: 5,
                   right: 30,
-                  left: 20,
-                  bottom: 60,
+                  left: 200, // Increased left margin for material names
+                  bottom: 5,
                 }}
               >
                 <CartesianGrid
                   strokeDasharray="3 3"
                   stroke="#e5e7eb"
-                  vertical={false}
+                  horizontal={false}
                 />
                 <XAxis
-                  dataKey="materialName"
+                  type="number"
                   tick={{
                     fill: '#6B7280',
                     fontSize: 12,
-                    width: 80
                   }}
                   tickLine={false}
                   axisLine={{ stroke: '#e5e7eb' }}
-                  interval={0}
-                  height={60}
-                  angle={-45}
-                  textAnchor="end"
+                  tickFormatter={(value) => `${value}€`}
                 />
                 <YAxis
+                  type="category"
+                  dataKey="materialName"
                   tick={{
                     fill: '#6B7280',
                     fontSize: 12,
                   }}
                   tickLine={false}
                   axisLine={false}
-                  tickFormatter={(value) => String(value)}
-                  width={60}
+                  width={180} // Fixed width for material names
+                  interval={0}
                 />
                 <Tooltip
                   formatter={(value: number) => {
@@ -162,9 +170,9 @@ export function MaterialsBySupplier({ data: rawData }: MaterialsBySupplierProps)
                 <Bar
                   dataKey="value"
                   name="value"
-                  radius={[4, 4, 0, 0]}
+                  radius={[0, 4, 4, 0]}
                   isAnimationActive={false}
-                  maxBarSize={60}
+                  barSize={30}
                 >
                   {transformedData.map((entry, index) => (
                     <Cell

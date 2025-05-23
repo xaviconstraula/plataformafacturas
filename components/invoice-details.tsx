@@ -9,7 +9,6 @@ interface InvoiceItem {
   id: string
   quantity: number
   unitPrice: number
-  totalPrice: number
   material: {
     id: string
     name: string
@@ -20,9 +19,7 @@ interface InvoiceItem {
 
 interface InvoiceData {
   id: string
-  code: string
   issueDate: Date
-  totalAmount: number
   status: string
   provider: {
     id: string
@@ -40,10 +37,6 @@ interface InvoiceDetailsProps {
 }
 
 export function InvoiceDetails({ invoice }: InvoiceDetailsProps) {
-  const subtotal = invoice.items.reduce((acc, item) => acc + item.totalPrice, 0)
-  const iva = subtotal * 0.21
-  const total = subtotal + iva
-
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -58,7 +51,7 @@ export function InvoiceDetails({ invoice }: InvoiceDetailsProps) {
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">
           <div>
-            <CardTitle className="text-2xl">Factura #{invoice.code}</CardTitle>
+            <CardTitle className="text-2xl">Detalles de Factura</CardTitle>
             <CardDescription>Fecha: {invoice.issueDate.toLocaleDateString("es-ES")}</CardDescription>
           </div>
           <FileTextIcon className="h-8 w-8 text-muted-foreground" />
@@ -80,10 +73,6 @@ export function InvoiceDetails({ invoice }: InvoiceDetailsProps) {
             <div>
               <h3 className="mb-2 text-sm font-medium text-muted-foreground">Detalles de Factura</h3>
               <div className="rounded-lg border p-3 space-y-2">
-                <div className="flex justify-between">
-                  <span className="text-sm text-muted-foreground">Código:</span>
-                  <span className="font-medium">{invoice.code}</span>
-                </div>
                 <div className="flex justify-between">
                   <span className="text-sm text-muted-foreground">Fecha:</span>
                   <span>{invoice.issueDate.toLocaleDateString("es-ES")}</span>
@@ -109,7 +98,6 @@ export function InvoiceDetails({ invoice }: InvoiceDetailsProps) {
                     <th className="p-3 text-left text-sm font-medium">Material</th>
                     <th className="p-3 text-right text-sm font-medium">Cantidad</th>
                     <th className="p-3 text-right text-sm font-medium">Precio Unitario</th>
-                    <th className="p-3 text-right text-sm font-medium">Total</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -118,34 +106,13 @@ export function InvoiceDetails({ invoice }: InvoiceDetailsProps) {
                       <td className="p-3">
                         <div>
                           <p className="font-medium">{item.material.name}</p>
-                          {item.material.description && (
-                            <p className="text-sm text-muted-foreground">{item.material.description}</p>
-                          )}
                         </div>
                       </td>
                       <td className="p-3 text-right">{item.quantity}</td>
                       <td className="p-3 text-right">{formatCurrency(item.unitPrice)}</td>
-                      <td className="p-3 text-right font-medium">{formatCurrency(item.totalPrice)}</td>
                     </tr>
                   ))}
                 </tbody>
-                <tfoot>
-                  <tr className="border-t">
-                    <td colSpan={2} className="p-3"></td>
-                    <td className="p-3 text-right font-medium">Subtotal</td>
-                    <td className="p-3 text-right font-medium">{formatCurrency(subtotal)}</td>
-                  </tr>
-                  <tr>
-                    <td colSpan={2} className="p-3"></td>
-                    <td className="p-3 text-right font-medium">IVA (21%)</td>
-                    <td className="p-3 text-right font-medium">{formatCurrency(iva)}</td>
-                  </tr>
-                  <tr className="bg-muted/50">
-                    <td colSpan={2} className="p-3"></td>
-                    <td className="p-3 text-right font-medium">Total</td>
-                    <td className="p-3 text-right font-medium">{formatCurrency(total)}</td>
-                  </tr>
-                </tfoot>
               </table>
             </div>
           </div>

@@ -10,13 +10,11 @@ import { DeleteInvoiceButton } from "./delete-invoice-button"
 interface InvoiceListProps {
   invoices: {
     id: string
-    invoiceCode: string
     provider: {
       name: string
     }
     items: {
-      quantity: number
-      totalPrice: number
+      unitPrice: number
       material: {
         name: string
       }
@@ -52,11 +50,7 @@ export function InvoiceList({ invoices, totalPages, currentPage, pageSize, total
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Código</TableHead>
               <TableHead>Proveedor</TableHead>
-              <TableHead>Material</TableHead>
-              <TableHead>Cantidad</TableHead>
-              <TableHead>Importe</TableHead>
               <TableHead>Fecha</TableHead>
               <TableHead className="w-[120px] text-right">Acciones</TableHead>
             </TableRow>
@@ -64,14 +58,9 @@ export function InvoiceList({ invoices, totalPages, currentPage, pageSize, total
           <TableBody>
             {invoices.length > 0 ? (
               invoices.map((invoice) => {
-                const firstItem = invoice.items[0];
                 return (
                   <TableRow key={invoice.id}>
-                    <TableCell className="font-medium">{invoice.invoiceCode}</TableCell>
                     <TableCell>{invoice.provider.name}</TableCell>
-                    <TableCell>{firstItem?.material.name || 'N/A'}</TableCell>
-                    <TableCell>{firstItem?.quantity || 0}</TableCell>
-                    <TableCell>{formatCurrency(Number(firstItem?.totalPrice || 0))}</TableCell>
                     <TableCell>{invoice.issueDate.toLocaleDateString("es-ES")}</TableCell>
                     <TableCell className="text-right">
                       <Link href={`/facturas/${invoice.id}`} passHref>
@@ -86,7 +75,7 @@ export function InvoiceList({ invoices, totalPages, currentPage, pageSize, total
               })
             ) : (
               <TableRow>
-                <TableCell colSpan={7} className="h-24 text-center">
+                <TableCell colSpan={3} className="h-24 text-center">
                   {totalCount === 0 && !searchParams.size ? 'No hay facturas creadas todavía.' : 'No se encontraron facturas con los filtros aplicados.'}
                 </TableCell>
               </TableRow>

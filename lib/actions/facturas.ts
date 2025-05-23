@@ -88,8 +88,7 @@ export async function getInvoices(params: GetInvoicesParams) {
                 name: invoice.provider.name
             },
             items: invoice.items.map(item => ({
-                quantity: item.quantity.toNumber(),
-                totalPrice: item.totalPrice.toNumber(),
+                unitPrice: item.unitPrice.toNumber(),
                 material: {
                     name: item.material.name
                 }
@@ -163,9 +162,7 @@ export async function getInvoiceDetails(id: string) {
 
         return {
             id: invoice.id,
-            code: invoice.invoiceCode,
             issueDate: invoice.issueDate,
-            totalAmount: invoice.totalAmount.toNumber(),
             status: invoice.status,
             provider: {
                 id: invoice.provider.id,
@@ -179,7 +176,6 @@ export async function getInvoiceDetails(id: string) {
                 id: item.id,
                 quantity: item.quantity.toNumber(),
                 unitPrice: item.unitPrice.toNumber(),
-                totalPrice: item.totalPrice.toNumber(),
                 material: {
                     id: item.material.id,
                     name: item.material.name,
