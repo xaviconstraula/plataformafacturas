@@ -2,9 +2,11 @@ import { Suspense } from "react"
 import { AlertList } from "@/components/alert-list"
 import { getPriceAlerts } from "@/lib/actions/alertas"
 import { Pagination } from "@/components/ui/pagination"
+import { AlertStatusFilter } from "@/components/alert-status-filter"
 
 interface SearchParams {
   page?: string
+  status?: string
 }
 
 interface PageProps {
@@ -14,7 +16,8 @@ interface PageProps {
 export default async function AlertsPage({ searchParams }: PageProps) {
   const params = await searchParams
   const page = params.page ? parseInt(params.page) : 1
-  const { alerts, total } = await getPriceAlerts(page, 20)
+  const status = params.status || "PENDING"
+  const { alerts, total } = await getPriceAlerts(page, 20, status)
   const totalPages = Math.ceil(total / 20)
 
   return (
@@ -23,6 +26,10 @@ export default async function AlertsPage({ searchParams }: PageProps) {
       <p className="text-muted-foreground">
         Variaciones significativas en los precios de materiales detectadas automáticamente.
       </p>
+
+      <div className="flex justify-end">
+        <AlertStatusFilter />
+      </div>
 
       <Suspense fallback={<div className="h-96 rounded-lg bg-muted animate-pulse" />}>
         <AlertList initialAlerts={alerts} />

@@ -19,28 +19,43 @@ export interface PaginatedPriceAlerts {
     total: number;
 }
 
-export async function getPriceAlerts(page: number = 1, take: number = 20): Promise<PaginatedPriceAlerts> {
+export async function getPriceAlerts(
+    page: number = 1,
+    take: number = 20,
+    status: string = "PENDING"
+): Promise<PaginatedPriceAlerts> {
     // Ensure page and take are valid numbers
     const validPage = Math.max(1, page)
     const validTake = Math.max(1, Math.min(50, take)) // Limit maximum items per page to 50
     const skip = (validPage - 1) * validTake
 
+    // Build where clause based on status
+    const where = status === "ALL" ? {} : { status }
+
+    // For ALL status, we want PENDING first, then others
+    // For specific status, just sort by date
+    const orderBy = status === "ALL"
+        ? [
+            { status: "asc" as const }, // PENDING comes before others alphabetically
+            { createdAt: "desc" as const }
+        ]
+        : [{ createdAt: "desc" as const }]
+
     const [alerts, total] = await Promise.all([
         prisma.priceAlert.findMany({
+            where,
             include: {
                 material: true,
                 provider: true,
             },
-            orderBy: {
-                createdAt: 'desc',
-            },
+            orderBy,
             skip,
             take: validTake,
         }),
-        prisma.priceAlert.count(),
+        prisma.priceAlert.count({ where }),
     ]);
 
-    // Convert Decimal fields to numbers
+    // Convert Decimal fields to numbers and include relations
     const serializedAlerts = alerts.map(alert => ({
         ...alert,
         oldPrice: Number(alert.oldPrice),
@@ -48,10 +63,10 @@ export async function getPriceAlerts(page: number = 1, take: number = 20): Promi
         percentage: Number(alert.percentage),
         material: alert.material,
         provider: alert.provider,
-    }));
+    })) as unknown as PriceAlertWithDetails[];
 
     return {
-        alerts: serializedAlerts as unknown as PriceAlertWithDetails[],
+        alerts: serializedAlerts,
         total,
     };
 }
