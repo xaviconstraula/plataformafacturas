@@ -45,7 +45,52 @@ interface TransactionOperationResult {
     isExisting?: boolean; // To distinguish from new invoices
 }
 
-async function callPdfExtractAPI(file: File): Promise<ExtractedPdfData | null> {
+// New interfaces for rate limit handling
+interface OpenAIRateLimitHeaders {
+    limitRequests?: number;
+    remainingRequests?: number;
+    resetRequestsTimeMs?: number;
+    limitTokens?: number;
+    remainingTokens?: number;
+    resetTokensTimeMs?: number;
+}
+
+interface CallPdfExtractAPIResponse {
+    extractedData: ExtractedPdfData | null;
+    error?: string;
+    rateLimitHeaders?: OpenAIRateLimitHeaders;
+}
+
+// Helper function to parse OpenAI's rate limit reset time string (e.g., "60s", "200ms")
+function parseOpenAIResetTime(timeStr: string | null | undefined): number {
+    if (!timeStr) return 60000; // Default to 1 minute if unknown
+
+    let totalMilliseconds = 0;
+
+    const msMatch = timeStr.match(/(\d+)ms/);
+    if (msMatch) {
+        totalMilliseconds += parseInt(msMatch[1], 10);
+    }
+
+    const sMatch = timeStr.match(/(\d+)s/);
+    if (sMatch) {
+        totalMilliseconds += parseInt(sMatch[1], 10) * 1000;
+    }
+
+    const mMatch = timeStr.match(/(\d+)m/);
+    if (mMatch) {
+        totalMilliseconds += parseInt(mMatch[1], 10) * 60 * 1000;
+    }
+
+    // If only a number is provided, assume it's seconds (less common for this header but a fallback)
+    if (totalMilliseconds === 0 && /^\d+$/.test(timeStr)) {
+        return parseInt(timeStr, 10) * 1000;
+    }
+
+    return totalMilliseconds > 0 ? totalMilliseconds : 60000; // Fallback to 60s if parsing fails or yields 0
+}
+
+async function callPdfExtractAPI(file: File): Promise<CallPdfExtractAPIResponse> {
     try {
         console.log(`Starting PDF extraction for file: ${file.name}`);
         const buffer = Buffer.from(await file.arrayBuffer());
@@ -70,7 +115,7 @@ async function callPdfExtractAPI(file: File): Promise<ExtractedPdfData | null> {
 
         if (!pages || pages.length === 0) {
             console.error(`Failed to convert PDF to images for ${file.name}`);
-            return null;
+            return { extractedData: null, error: "Failed to convert PDF to images.", rateLimitHeaders: undefined };
         }
 
         // Log the dimensions of the first page to help with debugging
@@ -94,7 +139,7 @@ async function callPdfExtractAPI(file: File): Promise<ExtractedPdfData | null> {
 
         if (imageUrls.length === 0) {
             console.error(`No valid page images could be prepared for OpenAI for file: ${file.name}`);
-            return null;
+            return { extractedData: null, error: "No valid page images could be prepared for OpenAI.", rateLimitHeaders: undefined };
         }
 
         const promptText = `Analyze these invoice images, which collectively represent a single invoice, with extreme care and extract the following information in a structured way.
@@ -176,7 +221,8 @@ Format the response as valid JSON exactly like this:
 }`;
 
         console.log(`Calling OpenAI API for file: ${file.name} with ${imageUrls.length} page images.`);
-        const response = await openai.chat.completions.create({
+
+        const apiCallResponse = await openai.chat.completions.create({
             model: "gpt-4.1-mini", //USE 4.1-mini ALWAYS
             temperature: 0.1,
             messages: [
@@ -189,41 +235,54 @@ Format the response as valid JSON exactly like this:
                 }
             ],
             response_format: { type: "json_object" },
-        });
+        }).withResponse();
 
-        const content = response.choices[0].message.content;
+        const content = apiCallResponse.data.choices[0].message.content;
+        const responseHeaders = apiCallResponse.response.headers;
+
+        const rateLimitHeaders: OpenAIRateLimitHeaders = {
+            limitRequests: responseHeaders.get('x-ratelimit-limit-requests') ? parseInt(responseHeaders.get('x-ratelimit-limit-requests')!, 10) : undefined,
+            remainingRequests: responseHeaders.get('x-ratelimit-remaining-requests') ? parseInt(responseHeaders.get('x-ratelimit-remaining-requests')!, 10) : undefined,
+            resetRequestsTimeMs: parseOpenAIResetTime(responseHeaders.get('x-ratelimit-reset-requests')),
+            limitTokens: responseHeaders.get('x-ratelimit-limit-tokens') ? parseInt(responseHeaders.get('x-ratelimit-limit-tokens')!, 10) : undefined,
+            remainingTokens: responseHeaders.get('x-ratelimit-remaining-tokens') ? parseInt(responseHeaders.get('x-ratelimit-remaining-tokens')!, 10) : undefined,
+            resetTokensTimeMs: parseOpenAIResetTime(responseHeaders.get('x-ratelimit-reset-tokens')),
+        };
+
         if (!content) {
             console.error(`No content in OpenAI response for ${file.name}`);
-            return null;
+            return { extractedData: null, error: "No content from OpenAI.", rateLimitHeaders };
         }
 
         try {
             const extractedData = JSON.parse(content) as ExtractedPdfData;
             console.log(`Successfully parsed OpenAI JSON response for multi-page file: ${file.name}. Items extracted: ${extractedData.items?.length || 0}`);
 
-            // Basic validation for crucial invoice-level fields from the consolidated response
             if (!extractedData.invoiceCode || !extractedData.provider?.cif || !extractedData.issueDate || typeof extractedData.totalAmount !== 'number') {
                 console.warn(`Consolidated response for ${file.name} missing crucial invoice-level data. Data: ${JSON.stringify(extractedData)}`);
-                // Potentially throw an error or return null if critical data is missing after consolidation by AI
-                // For now, will be caught by later validation stages if this function returns it.
             }
             if (!extractedData.items || extractedData.items.length === 0) {
                 console.warn(`File ${file.name} yielded invoice-level data but no line items were extracted by AI from any page.`);
             }
 
-            return extractedData;
+            return { extractedData, rateLimitHeaders };
 
         } catch (parseError) {
             console.error(`Error parsing consolidated OpenAI response for ${file.name}:`, parseError);
-            return null;
+            return { extractedData: null, error: "Error parsing OpenAI response.", rateLimitHeaders };
         }
 
     } catch (error) {
         console.error(`Error extracting data from PDF ${file.name}:`, error);
+        const errorMessage = error instanceof Error ? error.message : "Unknown error during PDF extraction.";
         if (error instanceof Error && error.message.startsWith('PDF_CONVERSION_FAILED:')) {
-            throw error;
+            return { extractedData: null, error: error.message, rateLimitHeaders: undefined }; // No headers if conversion failed before API call
         }
-        return null; // Return null for other types of top-level errors in this function
+        // Attempt to get headers if error is from OpenAI API call itself (e.g. 429, 500)
+        // For now, this example returns undefined headers for general catch block
+        // A more sophisticated approach would involve checking if `error` is an APIError from OpenAI client
+        // and then trying to access `error.response.headers`
+        return { extractedData: null, error: errorMessage, rateLimitHeaders: undefined };
     }
 }
 
@@ -429,70 +488,126 @@ export async function createInvoiceFromFiles(
         return { overallSuccess: false, results: [{ success: false, message: "No files provided.", fileName: "N/A" }] };
     }
 
-    // 1. Extract data from all files in parallel
-    const extractionPromises = files.map(async (file): Promise<ExtractedFileItem> => {
-        console.log(`Processing file for extraction: ${file.name}`);
-        if (file.size === 0) {
-            console.warn(`Skipping empty file: ${file.name}`);
-            return { file, extractedData: null, error: "File is empty.", fileName: file.name };
-        }
-        if (file.type !== 'application/pdf') {
-            console.warn(`Skipping non-PDF file: ${file.name}, type: ${file.type}`);
-            return { file, extractedData: null, error: "File is not a PDF.", fileName: file.name };
-        }
+    const CONCURRENCY_LIMIT = 12;
+    const allFileProcessingResults: Array<ExtractedFileItem & { rateLimitHeaders?: OpenAIRateLimitHeaders }> = [];
+    let lastKnownRateLimits: OpenAIRateLimitHeaders | undefined = undefined;
 
-        try {
-            const extractedInvoiceData = await callPdfExtractAPI(file);
 
-            if (!extractedInvoiceData) {
-                console.error(`Failed to extract any usable invoice data for file: ${file.name}.`);
-                return { file, extractedData: null, error: "Failed to extract usable invoice data from PDF.", fileName: file.name };
+    console.log(`Starting extraction for ${files.length} files with a concurrency limit of ${CONCURRENCY_LIMIT}.`);
+
+    for (let i = 0; i < files.length; i += CONCURRENCY_LIMIT) {
+        const fileChunk = files.slice(i, i + CONCURRENCY_LIMIT);
+        const batchNumber = Math.floor(i / CONCURRENCY_LIMIT) + 1;
+        const totalBatches = Math.ceil(files.length / CONCURRENCY_LIMIT);
+
+        console.log(`Processing batch ${batchNumber} of ${totalBatches} (files ${i + 1} to ${i + fileChunk.length} of ${files.length}) for extraction.`);
+
+        // Check rate limits before sending the batch
+        if (lastKnownRateLimits?.remainingRequests !== undefined && lastKnownRateLimits.remainingRequests < fileChunk.length) {
+            const waitTimeMs = lastKnownRateLimits.resetRequestsTimeMs || 60000; // Default wait 60s
+            console.warn(`[RateLimit] Low remaining requests (${lastKnownRateLimits.remainingRequests}). Waiting ${waitTimeMs / 1000}s for rate limit to reset.`);
+            await new Promise(resolve => setTimeout(resolve, waitTimeMs));
+            // Optimistically assume requests reset after waiting
+            if (lastKnownRateLimits.limitRequests !== undefined) {
+                lastKnownRateLimits.remainingRequests = lastKnownRateLimits.limitRequests;
+            } else {
+                // If we don't know the limit, can't assume it fully reset.
+                // Could set to a higher number or clear it so next batch doesn't immediately hit this.
+                // For now, let's assume it's good enough for the next batch.
+                lastKnownRateLimits.remainingRequests = fileChunk.length * 2; // Optimistic guess
             }
+        }
 
-            if (!extractedInvoiceData.invoiceCode || !extractedInvoiceData.provider?.cif || !extractedInvoiceData.issueDate || typeof extractedInvoiceData.totalAmount !== 'number') {
-                console.warn(`Missing crucial invoice-level data for file: ${file.name}. Data: ${JSON.stringify(extractedInvoiceData)}`);
-                return {
-                    file,
-                    extractedData: extractedInvoiceData,
-                    error: "Missing or invalid crucial invoice-level data after PDF extraction. Check invoice code, provider CIF, issue date, or total amount.",
-                    fileName: file.name,
-                };
+
+        const chunkExtractionPromises = fileChunk.map(async (file): Promise<ExtractedFileItem & { rateLimitHeaders?: OpenAIRateLimitHeaders }> => {
+            console.log(`[Batch ${batchNumber}] Processing file for extraction: ${file.name}`);
+            if (file.size === 0) {
+                console.warn(`[Batch ${batchNumber}] Skipping empty file: ${file.name}`);
+                return { file, extractedData: null, error: "File is empty.", fileName: file.name };
             }
-            if (!extractedInvoiceData.items || extractedInvoiceData.items.length === 0) {
-                console.warn(`No line items extracted for file: ${file.name}. Proceeding with invoice-level data if valid.`);
+            if (file.type !== 'application/pdf') {
+                console.warn(`[Batch ${batchNumber}] Skipping non-PDF file: ${file.name}, type: ${file.type}`);
+                return { file, extractedData: null, error: "File is not a PDF.", fileName: file.name };
             }
 
             try {
-                new Date(extractedInvoiceData.issueDate); // Validate date format
-                return {
-                    file,
-                    extractedData: extractedInvoiceData,
-                    fileName: file.name,
-                };
-            } catch (dateError) {
-                console.warn(`Invalid issue date format for file: ${file.name}. Date: ${extractedInvoiceData.issueDate}`);
-                return {
-                    file,
-                    extractedData: extractedInvoiceData,
-                    error: `Invalid issue date format: ${extractedInvoiceData.issueDate}.`,
-                    fileName: file.name,
-                };
+                // Call the modified function that returns headers
+                const { extractedData, error: extractionError, rateLimitHeaders } = await callPdfExtractAPI(file);
+
+                if (extractionError) { // Error from callPdfExtractAPI (could be OpenAI error, parse error, etc.)
+                    return { file, extractedData, error: extractionError, fileName: file.name, rateLimitHeaders };
+                }
+
+                // These validations are for the content of extractedData
+                if (!extractedData) { // Should be covered by extractionError now, but good to keep
+                    console.error(`[Batch ${batchNumber}] Failed to extract any usable invoice data for file: ${file.name}.`);
+                    return { file, extractedData: null, error: "Failed to extract usable invoice data from PDF.", fileName: file.name, rateLimitHeaders };
+                }
+                if (!extractedData.invoiceCode || !extractedData.provider?.cif || !extractedData.issueDate || typeof extractedData.totalAmount !== 'number') {
+                    console.warn(`[Batch ${batchNumber}] Missing crucial invoice-level data for file: ${file.name}. Data: ${JSON.stringify(extractedData)}`);
+                    return {
+                        file,
+                        extractedData: extractedData,
+                        error: "Missing or invalid crucial invoice-level data after PDF extraction.",
+                        fileName: file.name,
+                        rateLimitHeaders
+                    };
+                }
+                if (!extractedData.items || extractedData.items.length === 0) {
+                    console.warn(`[Batch ${batchNumber}] No line items extracted for file: ${file.name}. Proceeding with invoice-level data if valid.`);
+                }
+
+                try {
+                    new Date(extractedData.issueDate);
+                    return {
+                        file,
+                        extractedData: extractedData,
+                        fileName: file.name,
+                        rateLimitHeaders
+                    };
+                } catch (dateError) {
+                    console.warn(`[Batch ${batchNumber}] Invalid issue date format for file: ${file.name}. Date: ${extractedData.issueDate}`);
+                    return {
+                        file,
+                        extractedData: extractedData,
+                        error: `Invalid issue date format: ${extractedData.issueDate}.`,
+                        fileName: file.name,
+                        rateLimitHeaders
+                    };
+                }
+            } catch (topLevelError: unknown) { // Catch errors from the map function logic itself, though callPdfExtractAPI should catch its own.
+                console.error(`[Batch ${batchNumber}] Unexpected error during file processing for ${file.name}:`, topLevelError);
+                const errorMessage = topLevelError instanceof Error ? topLevelError.message : "Unknown error during file item processing.";
+                return { file, extractedData: null, error: errorMessage, fileName: file.name, rateLimitHeaders: undefined };
             }
-        } catch (extractionOrConversionError: unknown) {
-            console.error(`Error during extraction or conversion for file ${file.name}:`, extractionOrConversionError);
-            let errorMessage = "Failed to process PDF.";
-            if (extractionOrConversionError instanceof Error) {
-                if (extractionOrConversionError.message.startsWith('PDF_CONVERSION_FAILED:')) {
-                    errorMessage = extractionOrConversionError.message.substring('PDF_CONVERSION_FAILED: '.length);
-                } else {
-                    errorMessage = extractionOrConversionError.message;
+        });
+
+        const chunkResults = await Promise.all(chunkExtractionPromises);
+        allFileProcessingResults.push(...chunkResults);
+
+        // Update lastKnownRateLimits from the results in this chunk
+        // Prioritize headers that indicate fewer remaining requests to be conservative
+        for (const result of chunkResults) {
+            if (result.rateLimitHeaders) {
+                if (!lastKnownRateLimits ||
+                    (result.rateLimitHeaders.remainingRequests !== undefined &&
+                        (lastKnownRateLimits.remainingRequests === undefined || result.rateLimitHeaders.remainingRequests < lastKnownRateLimits.remainingRequests))) {
+                    lastKnownRateLimits = result.rateLimitHeaders;
                 }
             }
-            return { file, extractedData: null, error: errorMessage, fileName: file.name };
         }
-    });
+        if (lastKnownRateLimits) {
+            console.log(`[RateLimit] After Batch ${batchNumber}: Remaining Requests: ${lastKnownRateLimits.remainingRequests ?? 'N/A'}, Reset In: ${(lastKnownRateLimits.resetRequestsTimeMs ?? 0) / 1000}s. Remaining Tokens: ${lastKnownRateLimits.remainingTokens ?? 'N/A'}, Reset In: ${(lastKnownRateLimits.resetTokensTimeMs ?? 0) / 1000}s.`);
+        }
+    }
 
-    const extractionResults = await Promise.all(extractionPromises);
+    const extractionResults: ExtractedFileItem[] = allFileProcessingResults.map(item => ({
+        file: item.file,
+        extractedData: item.extractedData,
+        error: item.error,
+        fileName: item.fileName,
+    }));
+
 
     // 2. Separate items with extraction errors from processable items
     const finalResults: CreateInvoiceResult[] = [];

@@ -1,9 +1,21 @@
 import { Suspense } from "react"
 import { AlertList } from "@/components/alert-list"
-import { getPriceAlerts } from "@/lib/actions/alerts"
+import { getPriceAlerts } from "@/lib/actions/alertas"
+import { Pagination } from "@/components/ui/pagination"
 
-export default async function AlertsPage() {
-  const alerts = await getPriceAlerts()
+interface SearchParams {
+  page?: string
+}
+
+interface PageProps {
+  searchParams: Promise<SearchParams>
+}
+
+export default async function AlertsPage({ searchParams }: PageProps) {
+  const params = await searchParams
+  const page = params.page ? parseInt(params.page) : 1
+  const { alerts, total } = await getPriceAlerts(page, 20)
+  const totalPages = Math.ceil(total / 20)
 
   return (
     <div className="flex flex-col gap-6">
@@ -14,6 +26,9 @@ export default async function AlertsPage() {
 
       <Suspense fallback={<div className="h-96 rounded-lg bg-muted animate-pulse" />}>
         <AlertList initialAlerts={alerts} />
+        <div className="mt-4">
+          <Pagination totalPages={totalPages} />
+        </div>
       </Suspense>
     </div>
   )

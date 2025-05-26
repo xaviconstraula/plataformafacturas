@@ -10,16 +10,18 @@ import {
     DialogTitle,
     DialogTrigger,
 } from '@/components/ui/dialog'
-import { PlusIcon } from 'lucide-react'
+import { PlusIcon, Loader2 } from 'lucide-react'
 import { InvoiceDropzone } from '@/components/invoice-dropzone'
 import { toast } from 'sonner'
 import type { CreateInvoiceResult } from '@/lib/actions/invoices'
 
 export function NewInvoiceButton() {
     const [isOpen, setIsOpen] = useState(false)
+    const [isProcessing, setIsProcessing] = useState(false)
 
     // This function will be called by InvoiceDropzone when its internal processing is done.
     function handleInvoiceProcessingCompletion(results?: CreateInvoiceResult[]) {
+        setIsProcessing(false)
         setIsOpen(false)
         // Display toasts based on results
         if (results) {
@@ -65,29 +67,42 @@ export function NewInvoiceButton() {
         }
     }
 
+    // Called when processing starts in InvoiceDropzone
+    function handleInvoiceProcessingStart() {
+        setIsProcessing(true)
+    }
+
     return (
         <Dialog open={isOpen} onOpenChange={setIsOpen}>
             <DialogTrigger asChild>
-                <Button>
-                    <PlusIcon className="h-4 w-4" />
-                    Añadir Facturas
+                <Button disabled={isProcessing}>
+                    {isProcessing ? (
+                        <>
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Procesando
+                        </>
+                    ) : (
+                        <>
+                            <PlusIcon className="h-4 w-4" /> Añadir Facturas
+                        </>
+                    )}
                 </Button>
             </DialogTrigger>
-            <DialogContent className="sm:max-w-[425px]">
+            <DialogContent className="sm:max-w-2xl max-w-2xl">
                 <DialogHeader>
                     <DialogTitle>Subir Nuevas Facturas</DialogTitle>
                     <DialogDescription>
                         Arrastra y suelta tus archivos PDF de factura aquí o haz clic para
                         seleccionarlos. Las facturas duplicadas (mismo código y proveedor) se omitirán automáticamente.
+                        <br />
+                        <br />
+                        <strong>Esta operación puede tardar varios minutos.</strong>
                     </DialogDescription>
                 </DialogHeader>
                 <div className="py-4">
-                    {/* 
-                      InvoiceDropzone now handles the file processing and server action call.
-                      The onProcessingComplete prop is used here to signal completion and pass results from InvoiceDropzone
-                      so that the dialog can be closed and toasts can be shown.
-                    */}
-                    <InvoiceDropzone onProcessingComplete={handleInvoiceProcessingCompletion} />
+                    <InvoiceDropzone
+                        onProcessingStart={handleInvoiceProcessingStart}
+                        onProcessingComplete={handleInvoiceProcessingCompletion}
+                    />
                 </div>
             </DialogContent>
         </Dialog>

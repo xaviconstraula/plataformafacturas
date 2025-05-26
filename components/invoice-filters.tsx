@@ -43,7 +43,7 @@ export function InvoiceFilters() {
   const debouncedSearchTerm = useDebounce(searchTerm, 150) // Debounce search input by 150ms
 
   const currentYear = new Date().getFullYear()
-  const years = [currentYear, currentYear - 1, currentYear - 2]
+  const years = Array.from({ length: 6 }, (_, i) => currentYear - i)
 
   // Function to update URL params, wrapped in useCallback for stability
   const updateUrlParams = useCallback(() => {

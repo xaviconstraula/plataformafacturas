@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -8,15 +8,19 @@ import { AlertTriangleIcon, CheckIcon, XIcon } from "lucide-react"
 import { formatCurrency, formatPercentage } from "@/lib/utils"
 import { toast } from "sonner"
 import { updateAlertStatus } from "@/lib/actions/alerts"
-import { type PriceAlert } from "@/lib/types/prisma"
+import { type PriceAlertWithDetails } from "@/lib/actions/alertas"
 
 interface AlertListProps {
-  initialAlerts: PriceAlert[]
+  initialAlerts: PriceAlertWithDetails[]
 }
 
 export function AlertList({ initialAlerts }: AlertListProps) {
-  const [alerts, setAlerts] = useState<PriceAlert[]>(initialAlerts)
+  const [alerts, setAlerts] = useState<PriceAlertWithDetails[]>(initialAlerts)
   const [isUpdating, setIsUpdating] = useState<string | null>(null)
+
+  useEffect(() => {
+    setAlerts(initialAlerts)
+  }, [initialAlerts])
 
   const handleApprove = async (id: string) => {
     try {
@@ -72,7 +76,7 @@ export function AlertList({ initialAlerts }: AlertListProps) {
                     : alert.status === "REJECTED"
                       ? "text-red-500"
                       : alert.status === "PENDING"
-                        ? alert.percentageChange > 0
+                        ? alert.percentage > 0
                           ? "text-amber-500"
                           : "text-blue-500"
                         : "text-gray-500"
@@ -87,7 +91,7 @@ export function AlertList({ initialAlerts }: AlertListProps) {
                   : alert.status === "REJECTED"
                     ? "border-red-200 bg-red-100 text-red-700"
                     : alert.status === "PENDING"
-                      ? alert.percentageChange > 0
+                      ? alert.percentage > 0
                         ? "border-amber-200 bg-amber-100 text-amber-700"
                         : "border-blue-200 bg-blue-100 text-blue-700"
                       : "border-gray-200 bg-gray-100 text-gray-700"
@@ -98,13 +102,13 @@ export function AlertList({ initialAlerts }: AlertListProps) {
                   : alert.status === "REJECTED"
                     ? "Rechazado"
                     : alert.status === "PENDING"
-                      ? `${alert.percentageChange > 0 ? "+" : ""}${formatPercentage(alert.percentageChange)}`
-                      : formatPercentage(alert.percentageChange)
+                      ? `${alert.percentage > 0 ? "+" : ""}${formatPercentage(alert.percentage)}`
+                      : formatPercentage(alert.percentage)
                 }
               </Badge>
             </div>
             <CardDescription>
-              Proveedor: {alert.provider.name} | Factura del {new Date(alert.issueDate).toLocaleDateString("es-ES")} | Detectado el {new Date(alert.createdAt).toLocaleDateString("es-ES")}
+              Proveedor: {alert.provider.name} | Factura del {new Date(alert.effectiveDate).toLocaleDateString("es-ES")} | Detectado el {new Date(alert.createdAt).toLocaleDateString("es-ES")}
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -112,11 +116,11 @@ export function AlertList({ initialAlerts }: AlertListProps) {
               <div className="flex gap-10">
                 <div>
                   <p className="text-sm text-muted-foreground">Precio anterior</p>
-                  <p className="text-lg font-medium">{formatCurrency(alert.previousPrice)}</p>
+                  <p className="text-lg font-medium">{formatCurrency(alert.oldPrice)}</p>
                 </div>
                 <div className="text-right">
                   <p className="text-sm text-muted-foreground">Precio actual</p>
-                  <p className="text-lg font-medium">{formatCurrency(alert.currentPrice)}</p>
+                  <p className="text-lg font-medium">{formatCurrency(alert.newPrice)}</p>
                 </div>
               </div>
 

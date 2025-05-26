@@ -10,10 +10,11 @@ import { createInvoiceFromFiles, type CreateInvoiceResult } from '@/lib/actions/
 
 interface InvoiceDropzoneProps {
     onProcessingComplete?: (results: CreateInvoiceResult[]) => void;
+    onProcessingStart?: () => void;
     className?: string
 }
 
-export function InvoiceDropzone({ onProcessingComplete, className }: InvoiceDropzoneProps) {
+export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, className }: InvoiceDropzoneProps) {
     const [files, setFiles] = useState<File[]>([])
     const [isUploading, setIsUploading] = useState(false)
     const [loadingStep, setLoadingStep] = useState<'processing' | 'analyzing'>('processing');
@@ -86,6 +87,9 @@ export function InvoiceDropzone({ onProcessingComplete, className }: InvoiceDrop
             return;
         }
 
+        if (onProcessingStart) {
+            onProcessingStart();
+        }
         setIsUploading(true);
         const formData = new FormData();
         files.forEach((file) => {

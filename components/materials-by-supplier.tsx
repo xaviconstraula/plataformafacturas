@@ -73,8 +73,8 @@ export function MaterialsBySupplier({ data: rawData }: MaterialsBySupplierProps)
   }
 
   // Calculate dynamic height based on number of items
-  const itemHeight = 40 // Height per bar in pixels
-  const minHeight = 350 // Minimum chart height
+  const itemHeight = 55 // Increased from 40 to 55 for more spacing
+  const minHeight = 400 // Increased from 350 to 400 for better overall height
   const chartHeight = Math.max(minHeight, transformedData.length * itemHeight)
 
   return (
@@ -82,7 +82,7 @@ export function MaterialsBySupplier({ data: rawData }: MaterialsBySupplierProps)
       <CardHeader>
         <CardTitle className="text-xl font-semibold">Materiales por Tipo de Proveedor</CardTitle>
         <p className="text-sm text-muted-foreground">
-          Distribución de materiales entre proveedores y alquileres de maquinaria
+          Distribución de los materiales con más volumen de compra entre proveedores y alquileres de maquinaria
         </p>
       </CardHeader>
       <CardContent>
@@ -109,10 +109,10 @@ export function MaterialsBySupplier({ data: rawData }: MaterialsBySupplierProps)
                 data={transformedData}
                 layout="vertical"
                 margin={{
-                  top: 5,
+                  top: 15, // Increased from 5 to 15
                   right: 30,
-                  left: 200, // Increased left margin for material names
-                  bottom: 5,
+                  left: 220, // Increased from 200 to 220 for longer material names
+                  bottom: 15, // Increased from 5 to 15
                 }}
               >
                 <CartesianGrid
@@ -139,7 +139,7 @@ export function MaterialsBySupplier({ data: rawData }: MaterialsBySupplierProps)
                   }}
                   tickLine={false}
                   axisLine={false}
-                  width={180} // Fixed width for material names
+                  width={200} // Increased from 180 to 200
                   interval={0}
                 />
                 <Tooltip
@@ -172,7 +172,7 @@ export function MaterialsBySupplier({ data: rawData }: MaterialsBySupplierProps)
                   name="value"
                   radius={[0, 4, 4, 0]}
                   isAnimationActive={false}
-                  barSize={30}
+                  barSize={35} // Increased from 30 to 35
                 >
                   {transformedData.map((entry, index) => (
                     <Cell

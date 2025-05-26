@@ -151,7 +151,7 @@ export async function getPendingPriceAlerts() {
         orderBy: {
             createdAt: 'desc'
         },
-        take: 5,
+        take: 3,
         include: {
             material: {
                 select: {

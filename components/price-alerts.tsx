@@ -69,9 +69,7 @@ export function PriceAlerts() {
               <span>Precio anterior: {formatCurrency(alert.oldPrice)}</span>
               <span className="font-medium">Nuevo: {formatCurrency(alert.newPrice)}</span>
             </div>
-            <p className="text-xs text-muted-foreground">
-              Detectado el {new Date(alert.createdAt).toLocaleDateString("es-ES")}
-            </p>
+
           </div>
         </div>
       ))}
