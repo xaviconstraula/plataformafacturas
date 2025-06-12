@@ -4,14 +4,22 @@ import { prisma } from "@/lib/db"
 import { Prisma } from "@/generated/prisma"
 import { revalidatePath } from "next/cache"
 
-interface GetInvoicesParams {
+export interface GetInvoicesParams {
+    page?: number
+    pageSize?: number
     month?: string
     quarter?: string
     year?: string
     supplier?: string
     search?: string
-    page?: number
-    pageSize?: number
+    workOrder?: string
+    material?: string
+    minAmount?: number
+    maxAmount?: number
+    minUnitPrice?: number
+    maxUnitPrice?: number
+    fiscalYear?: string
+    category?: string
 }
 
 const DEFAULT_PAGE_SIZE = 15
@@ -22,42 +30,98 @@ export async function getInvoices(params: GetInvoicesParams) {
         const pageSize = params.pageSize || DEFAULT_PAGE_SIZE
         const skip = (page - 1) * pageSize
 
-        const yearFilter = params.year && params.year !== 'all' ? parseInt(params.year) : null;
-        const monthFilter = params.month && params.month !== 'all' ? parseInt(params.month) : null;
-        const quarterFilter = params.quarter && params.quarter !== 'all' ? parseInt(params.quarter) : null;
+        // Clean up filter parameters - treat "all" as undefined
+        const cleanYear = params.year && params.year !== 'all' ? params.year : undefined
+        const cleanMonth = params.month && params.month !== 'all' ? params.month : undefined
+        const cleanQuarter = params.quarter && params.quarter !== 'all' ? params.quarter : undefined
+        const cleanFiscalYear = params.fiscalYear && params.fiscalYear !== 'all' ? params.fiscalYear : undefined
+        const cleanSupplier = params.supplier && params.supplier !== 'all' ? params.supplier : undefined
+        const cleanMaterial = params.material && params.material !== 'all' ? params.material : undefined
+        const cleanCategory = params.category && params.category !== 'all' ? params.category : undefined
 
-        const effectiveYear = yearFilter ?? (monthFilter || quarterFilter ? new Date().getFullYear() : null);
+        let dateFilter: Prisma.InvoiceWhereInput = {}
 
-        let dateFilter: Prisma.InvoiceWhereInput = {};
-
-        if (effectiveYear) {
-            if (monthFilter) {
-                const startDate = new Date(effectiveYear, monthFilter - 1, 1);
-                const endDate = new Date(effectiveYear, monthFilter, 1);
-                dateFilter = { issueDate: { gte: startDate, lt: endDate } };
-            } else if (quarterFilter) {
-                const startMonth = (quarterFilter - 1) * 3;
-                const startDate = new Date(effectiveYear, startMonth, 1);
-                const endDate = new Date(effectiveYear, startMonth + 3, 1);
-                dateFilter = { issueDate: { gte: startDate, lt: endDate } };
+        if (cleanFiscalYear) {
+            const fiscalYear = parseInt(cleanFiscalYear)
+            dateFilter = {
+                issueDate: {
+                    gte: new Date(`${fiscalYear}-01-01`),
+                    lte: new Date(`${fiscalYear}-12-31`)
+                }
+            }
+        } else if (cleanYear) {
+            const year = parseInt(cleanYear)
+            if (cleanQuarter) {
+                const quarter = parseInt(cleanQuarter)
+                const quarterStart = new Date(year, (quarter - 1) * 3, 1)
+                const quarterEnd = new Date(year, quarter * 3, 0)
+                dateFilter = {
+                    issueDate: {
+                        gte: quarterStart,
+                        lte: quarterEnd
+                    }
+                }
+            } else if (cleanMonth) {
+                const month = parseInt(cleanMonth)
+                const monthStart = new Date(year, month - 1, 1)
+                const monthEnd = new Date(year, month, 0)
+                dateFilter = {
+                    issueDate: {
+                        gte: monthStart,
+                        lte: monthEnd
+                    }
+                }
             } else {
-                const startDate = new Date(effectiveYear, 0, 1);
-                const endDate = new Date(effectiveYear + 1, 0, 1);
-                dateFilter = { issueDate: { gte: startDate, lt: endDate } };
+                dateFilter = {
+                    issueDate: {
+                        gte: new Date(`${year}-01-01`),
+                        lte: new Date(`${year}-12-31`)
+                    }
+                }
+            }
+        }
+
+        let amountFilter: Prisma.InvoiceWhereInput = {}
+        if (params.minAmount !== undefined || params.maxAmount !== undefined) {
+            amountFilter = {
+                totalAmount: {
+                    ...(params.minAmount !== undefined ? { gte: params.minAmount } : {}),
+                    ...(params.maxAmount !== undefined ? { lte: params.maxAmount } : {})
+                }
             }
         }
 
         const where: Prisma.InvoiceWhereInput = {
             ...dateFilter,
-            ...(params.supplier ? { providerId: params.supplier } : {}),
+            ...amountFilter,
+            ...(cleanSupplier ? { providerId: cleanSupplier } : {}),
             ...(params.search ? {
                 OR: [
                     { invoiceCode: { contains: params.search, mode: Prisma.QueryMode.insensitive } },
                     { provider: { name: { contains: params.search, mode: Prisma.QueryMode.insensitive } } },
                     { items: { some: { material: { name: { contains: params.search, mode: Prisma.QueryMode.insensitive } } } } }
                 ]
+            } : {}),
+            ...(params.workOrder ? {
+                items: { some: { workOrder: { contains: params.workOrder, mode: Prisma.QueryMode.insensitive } } }
+            } : {}),
+            ...(cleanMaterial ? {
+                items: { some: { materialId: cleanMaterial } }
+            } : {}),
+            ...(cleanCategory ? {
+                items: { some: { material: { category: { contains: cleanCategory, mode: Prisma.QueryMode.insensitive } } } }
+            } : {}),
+            ...((params.minUnitPrice !== undefined || params.maxUnitPrice !== undefined) ? {
+                items: {
+                    some: {
+                        unitPrice: {
+                            ...(params.minUnitPrice !== undefined ? { gte: params.minUnitPrice } : {}),
+                            ...(params.maxUnitPrice !== undefined ? { lte: params.maxUnitPrice } : {})
+                        }
+                    }
+                }
             } : {})
-        };
+        }
 
         const [totalCount, invoices] = await Promise.all([
             prisma.invoice.count({ where }),
@@ -69,7 +133,11 @@ export async function getInvoices(params: GetInvoicesParams) {
                     provider: true,
                     items: {
                         include: {
-                            material: true
+                            material: {
+                                include: {
+                                    productGroup: true
+                                }
+                            }
                         }
                     }
                 },
@@ -84,13 +152,32 @@ export async function getInvoices(params: GetInvoicesParams) {
         const transformedInvoices = invoices.map(invoice => ({
             id: invoice.id,
             invoiceCode: invoice.invoiceCode,
+            totalAmount: invoice.totalAmount.toNumber(),
             provider: {
-                name: invoice.provider.name
+                id: invoice.provider.id,
+                name: invoice.provider.name,
+                type: invoice.provider.type,
+                cif: invoice.provider.cif
             },
             items: invoice.items.map(item => ({
+                id: item.id,
+                quantity: item.quantity.toNumber(),
                 unitPrice: item.unitPrice.toNumber(),
+                totalPrice: item.totalPrice.toNumber(),
+                workOrder: item.workOrder,
+                description: item.description,
+                lineNumber: item.lineNumber,
+                itemDate: item.itemDate,
                 material: {
-                    name: item.material.name
+                    id: item.material.id,
+                    code: item.material.code,
+                    name: item.material.name,
+                    category: item.material.category,
+                    unit: item.material.unit,
+                    productGroup: item.material.productGroup ? {
+                        id: item.material.productGroup.id,
+                        standardizedName: item.material.productGroup.standardizedName
+                    } : null
                 }
             })),
             issueDate: invoice.issueDate
@@ -176,6 +263,7 @@ export async function getInvoiceDetails(id: string) {
                 id: item.id,
                 quantity: item.quantity.toNumber(),
                 unitPrice: item.unitPrice.toNumber(),
+                workOrder: item.workOrder,
                 material: {
                     id: item.material.id,
                     name: item.material.name,

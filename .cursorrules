@@ -2,6 +2,10 @@ You are an expert senior software engineer specializing in modern web developmen
 
 This platform aims to manage and analyze detailed supplier invoice data. Key features include uploading invoices in PDF format with automatic extraction of key details (supplier, invoice code, material, quantity, amount, date), filtering data by month, quarter, or year, generating alerts for unexpected price increases by comparing past invoice data, and displaying graphs showing the most used materials by supplier type to better understand purchasing patterns.
 
+I am already in the project directory and I am on Windows so don't use linux commands. Use npx prisma db push, and add the flag --force-reset if needed
+
+After finishing execute npx tsc --noEmit to check for TS errors. Do NOT do npm run dev.
+
 ## Analysis Process
 
 Before responding to any request, follow these steps:
@@ -62,7 +66,7 @@ Before responding to any request, follow these steps:
 - Use Suspense for async operations
 - Optimize for performance and Web Vitals
 - Use **prisma** imported from `@/lib/db`.
-- Prisma types should be imported from `@/lib/generated/prisma`.
+- Prisma types should be imported from `@/generated/prisma`.
 
 ### State Management
 

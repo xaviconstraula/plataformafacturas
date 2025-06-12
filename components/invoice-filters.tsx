@@ -30,17 +30,20 @@ export function InvoiceFilters() {
 
   // Initialize state from URL search params
   const [searchTerm, setSearchTerm] = useState(searchParams.get("search") || "")
+  const [workOrder, setWorkOrder] = useState(searchParams.get("workOrder") || "")
   const [month, setMonth] = useState(searchParams.get("month") || "")
   const [quarter, setQuarter] = useState(searchParams.get("quarter") || "")
   const [year, setYear] = useState(searchParams.get("year") || "")
   const [prevFilters, setPrevFilters] = useState({
     search: searchTerm,
+    workOrder: workOrder,
     month,
     quarter,
     year
   })
 
   const debouncedSearchTerm = useDebounce(searchTerm, 150) // Debounce search input by 150ms
+  const debouncedWorkOrder = useDebounce(workOrder, 150)
 
   const currentYear = new Date().getFullYear()
   const years = Array.from({ length: 6 }, (_, i) => currentYear - i)
@@ -52,6 +55,7 @@ export function InvoiceFilters() {
     // Check if any filter has changed
     const filtersChanged =
       debouncedSearchTerm !== prevFilters.search ||
+      debouncedWorkOrder !== prevFilters.workOrder ||
       month !== prevFilters.month ||
       quarter !== prevFilters.quarter ||
       year !== prevFilters.year
@@ -61,6 +65,12 @@ export function InvoiceFilters() {
       params.set("search", debouncedSearchTerm)
     } else {
       params.delete("search")
+    }
+
+    if (debouncedWorkOrder) {
+      params.set("workOrder", debouncedWorkOrder)
+    } else {
+      params.delete("workOrder")
     }
 
     if (month && month !== 'all') {
@@ -88,6 +98,7 @@ export function InvoiceFilters() {
       // Update prevFilters after changing them
       setPrevFilters({
         search: debouncedSearchTerm,
+        workOrder: debouncedWorkOrder,
         month,
         quarter,
         year
@@ -95,12 +106,12 @@ export function InvoiceFilters() {
     }
 
     router.push(`/facturas?${params.toString()}`, { scroll: false })
-  }, [debouncedSearchTerm, month, quarter, year, router, searchParams, prevFilters])
+  }, [debouncedSearchTerm, debouncedWorkOrder, month, quarter, year, router, searchParams, prevFilters])
 
   // Effect to update URL when debounced search term or other filters change
   useEffect(() => {
     updateUrlParams()
-  }, [debouncedSearchTerm, month, quarter, year])
+  }, [debouncedSearchTerm, debouncedWorkOrder, month, quarter, year, updateUrlParams])
 
   // Handlers for select changes
   const handleMonthChange = (value: string) => {
@@ -123,20 +134,38 @@ export function InvoiceFilters() {
 
   return (
     <div className="flex flex-col gap-4 md:flex-row md:items-end">
-      <div className="flex-1 space-y-2">
-        <label htmlFor="search" className="text-sm font-medium">
-          Buscar
-        </label>
-        <div className="relative">
-          <SearchIcon className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-          <Input
-            id="search"
-            type="search"
-            placeholder="Buscar por proveedor, material o código..."
-            className="pl-8"
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-          />
+      <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="space-y-2">
+          <label htmlFor="search" className="text-sm font-medium">
+            Buscar
+          </label>
+          <div className="relative">
+            <SearchIcon className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+            <Input
+              id="search"
+              type="search"
+              placeholder="Proveedor, material, código..."
+              className="pl-8"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+            />
+          </div>
+        </div>
+        <div className="space-y-2">
+          <label htmlFor="workOrder" className="text-sm font-medium">
+            OT/CECO
+          </label>
+          <div className="relative">
+            <SearchIcon className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+            <Input
+              id="workOrder"
+              type="search"
+              placeholder="Buscar OT/CECO..."
+              className="pl-8"
+              value={workOrder}
+              onChange={(e) => setWorkOrder(e.target.value)}
+            />
+          </div>
         </div>
       </div>
 

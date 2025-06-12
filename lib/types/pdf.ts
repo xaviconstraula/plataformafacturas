@@ -14,6 +14,9 @@ export interface ExtractedPdfItemData {
     totalPrice: number;
     itemDate?: string; // Optional ISO date string for items with different dates
     isMaterial: boolean; // New field to indicate if the item is a material
+    workOrder?: string; // OT/CECO - Work Order or Cost Center
+    description?: string; // Additional description for the line item
+    lineNumber?: number; // Line number if present on the invoice
 }
 
 export interface ExtractedPdfData {

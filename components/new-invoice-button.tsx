@@ -47,7 +47,7 @@ export function NewInvoiceButton() {
             const failedUploads = results.filter(r => !r.success).length;
 
             if (successfulUploads > 0 && failedUploads === 0 && skippedUploads === 0) {
-                toast.success(`Successfully processed ${successfulUploads} invoice${successfulUploads > 1 ? 's' : ''}.`);
+                toast.success(`Han sido procesadas ${successfulUploads} factura${successfulUploads > 1 ? 's' : ''}.`);
             } else if (successfulUploads === 0 && failedUploads > 0 && skippedUploads === 0) {
                 // Errors are already shown individually
             } else if (successfulUploads === 0 && failedUploads === 0 && skippedUploads > 0) {

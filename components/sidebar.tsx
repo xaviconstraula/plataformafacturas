@@ -12,6 +12,7 @@ import {
   MenuIcon,
   XIcon,
   Settings,
+  BarChart3Icon,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useState } from "react"
@@ -28,6 +29,11 @@ const navItems = [
     icon: FileTextIcon,
   },
   {
+    name: "Analíticas",
+    href: "/analytics",
+    icon: BarChart3Icon,
+  },
+  {
     name: "Proveedores",
     href: "/proveedores",
     icon: TruckIcon,
@@ -37,6 +43,7 @@ const navItems = [
     href: "/materiales",
     icon: PackageIcon,
   },
+
   {
     name: "Alertas",
     href: "/alertas",

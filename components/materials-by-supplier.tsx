@@ -37,6 +37,12 @@ const SUPPLIER_TYPE_MAP = {
   Maquinaria: "Alquiler de Maquinaria",
 }
 
+// Function to truncate long material names
+function truncateMaterialName(name: string, maxLength: number = 35): string {
+  if (name.length <= maxLength) return name
+  return name.substring(0, maxLength - 3) + "..."
+}
+
 interface MaterialsBySupplierProps {
   data: RawMaterialData[]
 }
@@ -45,10 +51,11 @@ export function MaterialsBySupplier({ data: rawData }: MaterialsBySupplierProps)
   const transformedData = useMemo(() => {
     if (!rawData) return []
 
-    // Sort data by value in descending order
+    // Sort data by value in descending order and truncate long names
     return rawData
       .map(item => ({
-        materialName: item.name,
+        materialName: truncateMaterialName(item.name),
+        fullName: item.name, // Keep original name for tooltips
         value: item.value,
         supplier: item.supplier
       }))
@@ -73,8 +80,8 @@ export function MaterialsBySupplier({ data: rawData }: MaterialsBySupplierProps)
   }
 
   // Calculate dynamic height based on number of items
-  const itemHeight = 55 // Increased from 40 to 55 for more spacing
-  const minHeight = 400 // Increased from 350 to 400 for better overall height
+  const itemHeight = 50 // Reduced from 55 to 50 for more compact display
+  const minHeight = 400
   const chartHeight = Math.max(minHeight, transformedData.length * itemHeight)
 
   return (
@@ -109,10 +116,10 @@ export function MaterialsBySupplier({ data: rawData }: MaterialsBySupplierProps)
                 data={transformedData}
                 layout="vertical"
                 margin={{
-                  top: 15, // Increased from 5 to 15
+                  top: 15,
                   right: 30,
-                  left: 220, // Increased from 200 to 220 for longer material names
-                  bottom: 15, // Increased from 5 to 15
+                  left: 260, // Increased from 220 to 260 for better spacing with truncated names
+                  bottom: 15,
                 }}
               >
                 <CartesianGrid
@@ -124,7 +131,7 @@ export function MaterialsBySupplier({ data: rawData }: MaterialsBySupplierProps)
                   type="number"
                   tick={{
                     fill: '#6B7280',
-                    fontSize: 12,
+                    fontSize: 11, // Reduced from 12 to 11
                   }}
                   tickLine={false}
                   axisLine={{ stroke: '#e5e7eb' }}
@@ -135,21 +142,23 @@ export function MaterialsBySupplier({ data: rawData }: MaterialsBySupplierProps)
                   dataKey="materialName"
                   tick={{
                     fill: '#6B7280',
-                    fontSize: 12,
+                    fontSize: 10, // Reduced from 12 to 10 for better fit
                   }}
                   tickLine={false}
                   axisLine={false}
-                  width={200} // Increased from 180 to 200
+                  width={240} // Increased from 200 to 240
                   interval={0}
                 />
                 <Tooltip
                   formatter={(value: number) => {
                     return [`${value} €`]
                   }}
-                  labelFormatter={(label: string, payload: Array<{ payload?: ChartDataEntry }>) => {
+                  labelFormatter={(label: string, payload: Array<{ payload?: ChartDataEntry & { fullName?: string } }>) => {
                     const entry = payload?.[0]?.payload
                     if (entry) {
-                      return `${label} - ${SUPPLIER_TYPE_MAP[entry.supplier]}`
+                      // Use full name in tooltip if available
+                      const materialName = entry.fullName || entry.materialName
+                      return `${materialName} - ${SUPPLIER_TYPE_MAP[entry.supplier]}`
                     }
                     return label
                   }}
@@ -158,13 +167,15 @@ export function MaterialsBySupplier({ data: rawData }: MaterialsBySupplierProps)
                     border: '1px solid #e5e7eb',
                     borderRadius: '8px',
                     padding: '12px',
-                    fontSize: '13px',
+                    fontSize: '12px', // Reduced from 13px to 12px
                     boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)',
+                    maxWidth: '300px', // Add max width to prevent overly wide tooltips
                   }}
                   labelStyle={{
                     fontWeight: 600,
                     marginBottom: '8px',
                     color: '#111827',
+                    wordWrap: 'break-word',
                   }}
                 />
                 <Bar
@@ -172,7 +183,7 @@ export function MaterialsBySupplier({ data: rawData }: MaterialsBySupplierProps)
                   name="value"
                   radius={[0, 4, 4, 0]}
                   isAnimationActive={false}
-                  barSize={35} // Increased from 30 to 35
+                  barSize={32} // Reduced from 35 to 32 for more compact display
                 >
                   {transformedData.map((entry, index) => (
                     <Cell

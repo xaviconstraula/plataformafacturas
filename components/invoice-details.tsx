@@ -9,6 +9,7 @@ interface InvoiceItem {
   id: string
   quantity: number
   unitPrice: number
+  workOrder?: string | null
   material: {
     id: string
     name: string
@@ -96,6 +97,7 @@ export function InvoiceDetails({ invoice }: InvoiceDetailsProps) {
                 <thead>
                   <tr className="border-b bg-muted/50">
                     <th className="p-3 text-left text-sm font-medium">Material</th>
+                    <th className="p-3 text-left text-sm font-medium">OT/CECO</th>
                     <th className="p-3 text-right text-sm font-medium">Cantidad</th>
                     <th className="p-3 text-right text-sm font-medium">Precio Unitario</th>
                   </tr>
@@ -108,6 +110,7 @@ export function InvoiceDetails({ invoice }: InvoiceDetailsProps) {
                           <p className="font-medium">{item.material.name}</p>
                         </div>
                       </td>
+                      <td className="p-3 text-left font-mono text-xs">{item.workOrder || '-'}</td>
                       <td className="p-3 text-right">{item.quantity}</td>
                       <td className="p-3 text-right">{formatCurrency(item.unitPrice)}</td>
                     </tr>

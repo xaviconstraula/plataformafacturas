@@ -3,126 +3,182 @@
 import { useState } from "react"
 import { useRouter } from "next/navigation"
 import { zodResolver } from "@hookform/resolvers/zod"
-import { useForm } from "react-hook-form"
+import { useForm, useFieldArray } from "react-hook-form"
 import { z } from "zod"
 import { Button } from "@/components/ui/button"
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form"
 import { Input } from "@/components/ui/input"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Card, CardContent } from "@/components/ui/card"
-import { FileUploader } from "@/components/file-uploader"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { InvoiceDropzone } from "@/components/invoice-dropzone"
 import { Textarea } from "@/components/ui/textarea"
+import { Separator } from "@/components/ui/separator"
 import { toast } from "sonner"
-import { simulateCreateInvoice, simulatePdfExtraction } from "@/lib/mock-data"
+import { Trash2, Plus } from "lucide-react"
+import { createManualInvoice, type CreateInvoiceResult } from "@/lib/actions/invoices"
 
-const formSchema = z.object({
-  supplier: z.string().min(2, {
-    message: "El proveedor debe tener al menos 2 caracteres.",
-  }),
-  invoiceCode: z.string().min(1, {
-    message: "El código de factura es obligatorio.",
-  }),
-  material: z.string().min(2, {
+// Enhanced schema that matches the real database structure
+const invoiceItemSchema = z.object({
+  materialName: z.string().min(2, {
     message: "El material debe tener al menos 2 caracteres.",
   }),
   quantity: z.coerce.number().positive({
     message: "La cantidad debe ser un número positivo.",
   }),
-  amount: z.coerce.number().positive({
-    message: "El importe debe ser un número positivo.",
+  unitPrice: z.coerce.number().positive({
+    message: "El precio unitario debe ser un número positivo.",
   }),
-  date: z.string().min(1, {
+  description: z.string().optional(),
+  workOrder: z.string().optional(),
+})
+
+const formSchema = z.object({
+  // Provider information
+  providerName: z.string().min(2, {
+    message: "El proveedor debe tener al menos 2 caracteres.",
+  }),
+  providerCif: z.string().optional(),
+  providerEmail: z.string().email("Email inválido").optional().or(z.literal("")),
+  providerPhone: z.string().optional(),
+
+  // Invoice details
+  invoiceCode: z.string().min(1, {
+    message: "El código de factura es obligatorio.",
+  }),
+  issueDate: z.string().min(1, {
     message: "La fecha es obligatoria.",
   }),
+
+  // Items
+  items: z.array(invoiceItemSchema).min(1, {
+    message: "Debe agregar al menos un item a la factura.",
+  }),
+
+  // Notes
   notes: z.string().optional(),
 })
+
+type FormData = z.infer<typeof formSchema>
 
 export function InvoiceUploadForm() {
   const router = useRouter()
   const [activeTab, setActiveTab] = useState("upload")
-  const [isUploading, setIsUploading] = useState(false)
-  const [uploadProgress, setUploadProgress] = useState(0)
+  const [isSubmitting, setIsSubmitting] = useState(false)
 
-  const form = useForm<z.infer<typeof formSchema>>({
+  const form = useForm<FormData>({
     resolver: zodResolver(formSchema),
     defaultValues: {
-      supplier: "",
+      providerName: "",
+      providerCif: "",
+      providerEmail: "",
+      providerPhone: "",
       invoiceCode: "",
-      material: "",
-      quantity: undefined,
-      amount: undefined,
-      date: new Date().toISOString().split("T")[0],
+      issueDate: new Date().toISOString().split("T")[0],
+      items: [
+        {
+          materialName: "",
+          quantity: 0,
+          unitPrice: 0,
+          description: "",
+          workOrder: "",
+        }
+      ],
       notes: "",
     },
   })
 
-  async function onSubmit(values: z.infer<typeof formSchema>) {
+  const { fields, append, remove } = useFieldArray({
+    control: form.control,
+    name: "items",
+  })
+
+  async function onSubmit(values: FormData) {
+    setIsSubmitting(true)
     try {
-      // Simulamos la creación de la factura
-      await simulateCreateInvoice(values)
+      // Transform the form data to match the expected API format
+      const invoiceData = {
+        provider: {
+          name: values.providerName,
+          cif: values.providerCif || null,
+          email: values.providerEmail || null,
+          phone: values.providerPhone || null,
+        },
+        invoiceCode: values.invoiceCode,
+        issueDate: values.issueDate,
+        items: values.items.map(item => ({
+          materialName: item.materialName,
+          quantity: item.quantity,
+          unitPrice: item.unitPrice,
+          totalPrice: item.quantity * item.unitPrice,
+          description: item.description || null,
+          workOrder: item.workOrder || null,
+          isMaterial: true, // Assume manual entries are materials
+        })),
+        totalAmount: values.items.reduce((sum, item) => sum + (item.quantity * item.unitPrice), 0),
+      }
 
-      toast.success("Factura creada", {
-        description: "La factura ha sido creada exitosamente."
-      })
+      const result = await createManualInvoice(invoiceData)
 
-      // Redirigir a la lista de facturas
-      setTimeout(() => {
-        router.push("/facturas")
-      }, 1500)
+      if (result.success) {
+        toast.success("Factura creada", {
+          description: result.message
+        })
+
+        // Clear form and redirect
+        form.reset()
+        setTimeout(() => {
+          router.push("/facturas")
+        }, 1500)
+      } else {
+        toast.error("Error", {
+          description: result.message
+        })
+      }
     } catch (error: unknown) {
       console.error("Error al crear la factura:", error)
       toast.error("Error", {
-        description: "Ocurrió un error al crear la factura."
+        description: "Ocurrió un error inesperado al crear la factura."
       })
+    } finally {
+      setIsSubmitting(false)
     }
   }
 
-  async function handleFileUpload(file: File) {
-    setIsUploading(true)
-    setUploadProgress(0)
+  function handlePdfProcessingComplete(results: CreateInvoiceResult[]) {
+    // Show results and redirect
+    const successfulUploads = results.filter(r => r.success && !r.message.includes("already exists")).length;
 
-    // Simulamos el progreso de carga
-    const interval = setInterval(() => {
-      setUploadProgress((prev) => {
-        if (prev >= 100) {
-          clearInterval(interval)
-          return 100
-        }
-        return prev + 10
-      })
-    }, 300)
-
-    try {
-      // Simulamos la extracción de datos del PDF
-      const extractedData = await simulatePdfExtraction(file)
-
-      // Cuando llegue al 100%, procesamos los datos
+    if (successfulUploads > 0) {
+      toast.success(`Facturas procesadas exitosamente: ${successfulUploads}`)
       setTimeout(() => {
-        setIsUploading(false)
-
-        form.setValue("supplier", extractedData.supplier)
-        form.setValue("invoiceCode", extractedData.invoiceCode)
-        form.setValue("material", extractedData.material)
-        form.setValue("quantity", extractedData.quantity)
-        form.setValue("amount", extractedData.amount)
-        form.setValue("date", extractedData.date)
-
-        setActiveTab("manual")
-
-        toast.success("PDF procesado", {
-          description: "Los datos han sido extraídos del PDF. Por favor, verifique y complete la información."
-        })
-      }, 1000)
-    } catch (error: unknown) {
-      console.error("Error al procesar el PDF:", error)
-      setIsUploading(false)
-      clearInterval(interval)
-
-      toast.error("Error", {
-        description: "Ocurrió un error al procesar el PDF."
-      })
+        router.push("/facturas")
+      }, 1500)
     }
   }
+
+  function addItem() {
+    append({
+      materialName: "",
+      quantity: 0,
+      unitPrice: 0,
+      description: "",
+      workOrder: "",
+    })
+  }
+
+  function removeItem(index: number) {
+    if (fields.length > 1) {
+      remove(index)
+    }
+  }
+
+  // Calculate total amount
+  const watchedItems = form.watch("items")
+  const totalAmount = watchedItems.reduce((sum, item) => {
+    const quantity = Number(item.quantity) || 0
+    const unitPrice = Number(item.unitPrice) || 0
+    return sum + (quantity * unitPrice)
+  }, 0)
 
   return (
     <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
@@ -134,7 +190,7 @@ export function InvoiceUploadForm() {
       <TabsContent value="upload" className="mt-6">
         <Card>
           <CardContent className="pt-6">
-            <FileUploader onFileUpload={handleFileUpload} isUploading={isUploading} progress={uploadProgress} />
+            <InvoiceDropzone onProcessingComplete={handlePdfProcessingComplete} />
           </CardContent>
         </Card>
       </TabsContent>
@@ -144,96 +200,225 @@ export function InvoiceUploadForm() {
           <CardContent className="pt-6">
             <Form {...form}>
               <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
-                <div className="grid gap-4 md:grid-cols-2">
-                  <FormField
-                    control={form.control}
-                    name="supplier"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Proveedor</FormLabel>
-                        <FormControl>
-                          <Input placeholder="Nombre del proveedor" {...field} />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
 
-                  <FormField
-                    control={form.control}
-                    name="invoiceCode"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Código de Factura</FormLabel>
-                        <FormControl>
-                          <Input placeholder="Ej. FAC-2025-001" {...field} />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
+                {/* Provider Information */}
+                <div>
+                  <h3 className="text-lg font-medium mb-4">Información del Proveedor</h3>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <FormField
+                      control={form.control}
+                      name="providerName"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Nombre del Proveedor *</FormLabel>
+                          <FormControl>
+                            <Input placeholder="Nombre del proveedor" {...field} />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+
+                    <FormField
+                      control={form.control}
+                      name="providerCif"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>CIF/NIF</FormLabel>
+                          <FormControl>
+                            <Input placeholder="B12345678" {...field} />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+
+                    <FormField
+                      control={form.control}
+                      name="providerEmail"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Email</FormLabel>
+                          <FormControl>
+                            <Input placeholder="contacto@proveedor.com" {...field} />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+
+                    <FormField
+                      control={form.control}
+                      name="providerPhone"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Teléfono</FormLabel>
+                          <FormControl>
+                            <Input placeholder="+34 900 000 000" {...field} />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                  </div>
                 </div>
 
-                <div className="grid gap-4 md:grid-cols-2">
-                  <FormField
-                    control={form.control}
-                    name="material"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Material</FormLabel>
-                        <FormControl>
-                          <Input placeholder="Tipo de material" {...field} />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
+                <Separator />
 
-                  <FormField
-                    control={form.control}
-                    name="quantity"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Cantidad</FormLabel>
-                        <FormControl>
-                          <Input type="number" placeholder="0" {...field} />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
+                {/* Invoice Information */}
+                <div>
+                  <h3 className="text-lg font-medium mb-4">Información de la Factura</h3>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <FormField
+                      control={form.control}
+                      name="invoiceCode"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Código de Factura *</FormLabel>
+                          <FormControl>
+                            <Input placeholder="FAC-2025-001" {...field} />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+
+                    <FormField
+                      control={form.control}
+                      name="issueDate"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Fecha de Emisión *</FormLabel>
+                          <FormControl>
+                            <Input type="date" {...field} />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                  </div>
                 </div>
 
-                <div className="grid gap-4 md:grid-cols-2">
-                  <FormField
-                    control={form.control}
-                    name="amount"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Importe</FormLabel>
-                        <FormControl>
-                          <Input type="number" step="0.01" placeholder="0.00" {...field} />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
+                <Separator />
 
-                  <FormField
-                    control={form.control}
-                    name="date"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Fecha</FormLabel>
-                        <FormControl>
-                          <Input type="date" {...field} />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
+                {/* Invoice Items */}
+                <div>
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-lg font-medium">Items de la Factura</h3>
+                    <Button type="button" variant="outline" onClick={addItem}>
+                      <Plus className="h-4 w-4 mr-2" />
+                      Agregar Item
+                    </Button>
+                  </div>
+
+                  <div className="space-y-4">
+                    {fields.map((field, index) => (
+                      <Card key={field.id} className="p-4">
+                        <div className="flex items-center justify-between mb-3">
+                          <h4 className="font-medium">Item {index + 1}</h4>
+                          {fields.length > 1 && (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => removeItem(index)}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          )}
+                        </div>
+
+                        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                          <FormField
+                            control={form.control}
+                            name={`items.${index}.materialName`}
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Material *</FormLabel>
+                                <FormControl>
+                                  <Input placeholder="Nombre del material" {...field} />
+                                </FormControl>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+
+                          <FormField
+                            control={form.control}
+                            name={`items.${index}.quantity`}
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Cantidad *</FormLabel>
+                                <FormControl>
+                                  <Input type="number" step="0.01" placeholder="0" {...field} />
+                                </FormControl>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+
+                          <FormField
+                            control={form.control}
+                            name={`items.${index}.unitPrice`}
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Precio Unitario *</FormLabel>
+                                <FormControl>
+                                  <Input type="number" step="0.01" placeholder="0.00" {...field} />
+                                </FormControl>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+
+                          <FormField
+                            control={form.control}
+                            name={`items.${index}.workOrder`}
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>OT/CECO</FormLabel>
+                                <FormControl>
+                                  <Input placeholder="OT-12345" {...field} />
+                                </FormControl>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+
+                          <div className="md:col-span-2">
+                            <FormField
+                              control={form.control}
+                              name={`items.${index}.description`}
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>Descripción</FormLabel>
+                                  <FormControl>
+                                    <Input placeholder="Descripción adicional del item" {...field} />
+                                  </FormControl>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
+                            />
+                          </div>
+                        </div>
+
+                        <div className="mt-3 p-2 bg-muted rounded text-sm">
+                          Total del item: €{((watchedItems[index]?.quantity || 0) * (watchedItems[index]?.unitPrice || 0)).toFixed(2)}
+                        </div>
+                      </Card>
+                    ))}
+                  </div>
+
+                  <div className="mt-4 p-4 bg-primary/5 rounded-lg">
+                    <div className="text-lg font-semibold">
+                      Total de la Factura: €{totalAmount.toFixed(2)}
+                    </div>
+                  </div>
                 </div>
 
+                <Separator />
+
+                {/* Notes */}
                 <FormField
                   control={form.control}
                   name="notes"
@@ -248,8 +433,8 @@ export function InvoiceUploadForm() {
                   )}
                 />
 
-                <Button type="submit" className="w-full">
-                  Guardar Factura
+                <Button type="submit" className="w-full" disabled={isSubmitting}>
+                  {isSubmitting ? "Guardando..." : "Guardar Factura"}
                 </Button>
               </form>
             </Form>

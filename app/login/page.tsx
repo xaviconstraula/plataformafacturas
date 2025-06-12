@@ -58,9 +58,7 @@ export default function LoginPage() {
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <Label htmlFor="password">Contraseña</Label>
-                <Link href="/forgot-password" className="text-xs text-primary hover:underline">
-                  ¿Olvidaste tu contraseña?
-                </Link>
+
               </div>
               <Input
                 id="password"
@@ -78,14 +76,9 @@ export default function LoginPage() {
               )}
             </div>
           </CardContent>
-          <CardFooter className="flex flex-col px-6 py-6">
+          <CardFooter className="flex flex-col px-6 pb-6">
             <SubmitButton isPending={isPending} />
-            <div className="mt-6 text-center text-sm">
-              ¿No tienes una cuenta?{" "}
-              <Link href="/signup" className="text-primary hover:underline">
-                Regístrate
-              </Link>
-            </div>
+
           </CardFooter>
         </form>
       </Card>

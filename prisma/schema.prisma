@@ -60,17 +60,30 @@ model Invoice {
 
 // Modelo para Materiales
 model Material {
-  id           String             @id @default(cuid())
-  code         String             @unique // Código único del material
-  name         String
-  description  String?
-  createdAt    DateTime           @default(now())
-  updatedAt    DateTime           @updatedAt
+  id          String   @id @default(cuid())
+  code        String   @unique // Código único del material
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Nueva funcionalidad para agrupación
+  productGroup   ProductGroup? @relation(fields: [productGroupId], references: [id])
+  productGroupId String?
+
+  // Campos adicionales para mejor análisis
+  category String? // Categoría del material
+  unit     String? // Unidad de medida
+  isActive Boolean @default(true) // Para productos descontinuados
+
   providers    MaterialProvider[]
   invoiceItems InvoiceItem[]
   PriceAlert   PriceAlert[]
 
   @@index([code])
+  @@index([category])
+  @@index([productGroupId])
+  @@index([isActive])
 }
 
 // Modelo para Items de Factura
@@ -87,8 +100,17 @@ model InvoiceItem {
   totalPrice Decimal  @db.Decimal(10, 2)
   itemDate   DateTime // Date specific to this item, may differ from invoice date
 
+  // Nueva funcionalidad: OT/CECO
+  workOrder String? // OT (Orden de Trabajo) o CECO (Centro de Coste)
+
+  // Campos adicionales para mejor análisis
+  description String? // Descripción específica del ítem en la factura
+  lineNumber  Int? // Número de línea en la factura original
+
   @@index([invoiceId])
   @@index([materialId])
+  @@index([workOrder]) // Índice para filtrar por OT/CECO
+  @@index([itemDate])
 }
 
 // Tabla de relación entre Materiales y Proveedores
@@ -141,4 +163,19 @@ model User {
   updatedAt DateTime @updatedAt
 
   @@index([email])
+}
+
+// Nuevo modelo para agrupación de productos similares
+model ProductGroup {
+  id               String     @id @default(cuid())
+  standardizedName String     @unique // Nombre estandarizado del grupo
+  description      String?
+  category         String? // Categoría del producto
+  unit             String? // Unidad de medida estándar
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+  materials        Material[] // Materiales que pertenecen a este grupo
+
+  @@index([category])
+  @@index([standardizedName])
 }

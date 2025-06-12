@@ -183,6 +183,26 @@ CRITICAL NOTE FOR NUMBER RECOGNITION:
    - Unit price (must be a decimal number with 2 decimal places, extracted exactly)
    - Total price per item (must be quantity * unit price, extracted exactly. If not present, calculate it carefully.)
    - Item date if different from invoice date (in ISO format). If not visible, assume same as invoice date and omit.
+   - Work Order/CECO: CRITICAL - Follow these rules to identify the correct Work Order. Your main goal is to find the project or cost center code that contains "OT" (Orden de Trabajo).
+
+     1.  **Identify the Source:**
+         *   Look for a global work order reference at the top of the invoice, often labeled "Obra", "Proyecto", or "Work Order". This global reference applies to all items.
+         *   If no global reference is found, look for per-item references labeled "OT" or "CECO".
+
+     2.  **Validation Rules (Strict):**
+         *   A valid work order **MUST** contain the letters "OT".
+         *   **DO NOT** use order numbers ("Pedidos") as the work order. These often start with 'P' (e.g., "Pedido 21P0015614") and are not the correct code.
+         *   Ignore any other codes, references, or text that do not explicitly contain "OT".
+
+     3.  **Extraction and Formatting:**
+         *   If a valid global work order containing "OT" is found, use it for ALL line items.
+         *   Extract only the relevant code part. For example, from "Obra: OT 6118 ESCOLA EINA", the code is "OT 6118".
+         *   **Format the final code by replacing any spaces with a hyphen (-).** For example, "OT 6118" MUST become "OT-6118".
+         *   If no reference containing "OT" can be found anywhere, use \`null\`.
+
+     To summarize: Your only target is a code containing "OT". Find it, format it (e.g., "OT-6118"), and apply it. Ignore everything else, especially "Pedido" codes.
+   - Description: Extract any additional description text specific to this line item (different from the material name)
+   - Line Number: If line items are numbered on the invoice, extract the line number
    Note: If the same material appears multiple times with different dates or prices,
    create separate line items for each occurrence.
 
@@ -215,7 +235,10 @@ Format the response as valid JSON exactly like this:
       "quantity": "number - quantity with 2 decimal places",
       "unitPrice": "number - price per unit with 2 decimal places",
       "totalPrice": "number - quantity * unitPrice with 2 decimal places",
-      "itemDate": "string | null - optional ISO date format if different from invoice date, null if not specified or same as invoice date"
+      "itemDate": "string | null - optional ISO date format if different from invoice date, null if not specified or same as invoice date",
+      "workOrder": "string | null - The FULL alphanumeric work order (e.g., '38600-OT-4077-1426'), null if not found",
+      "description": "string | null - additional description text for this line item, null if not present",
+      "lineNumber": "number | null - line number if items are numbered on the invoice, null if not numbered"
     }
   ]
 }`;
@@ -223,7 +246,7 @@ Format the response as valid JSON exactly like this:
         console.log(`Calling OpenAI API for file: ${file.name} with ${imageUrls.length} page images.`);
 
         const apiCallResponse = await openai.chat.completions.create({
-            model: "gpt-4.1-mini", //USE 4.1-mini ALWAYS
+            model: "gpt-4.1",
             temperature: 0.1,
             messages: [
                 {
@@ -286,7 +309,7 @@ Format the response as valid JSON exactly like this:
     }
 }
 
-async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData: ExtractedPdfData['provider']): Promise<Provider> {
+async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData: ExtractedPdfData['provider'], providerType: 'MATERIAL_SUPPLIER' | 'MACHINERY_RENTAL' = 'MATERIAL_SUPPLIER'): Promise<Provider> {
     const { cif, name, email, phone, address } = providerData;
     let provider = await tx.provider.findUnique({
         where: { cif },
@@ -300,7 +323,7 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
                 email,
                 phone,
                 address,
-                type: "MATERIAL_SUPPLIER",
+                type: providerType,
             },
         });
     } else {
@@ -311,13 +334,14 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
                 email: email || provider.email,
                 phone: phone || provider.phone,
                 address: address || provider.address,
+                type: providerType, // Update type if needed
             }
         });
     }
     return provider;
 }
 
-async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName: string, materialCode?: string): Promise<Material> {
+async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName: string, materialCode?: string, providerType?: string): Promise<Material> {
     const normalizedName = materialName.trim();
     let material: Material | null = null;
 
@@ -333,13 +357,25 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
         });
     }
 
+    // Set category based on provider type
+    const category = providerType === 'MACHINERY_RENTAL' ? 'Alquiler Maquinaria' : 'Proveedor de Materiales';
+
     if (!material) {
         material = await tx.material.create({
             data: {
                 code: materialCode || normalizedName.toLowerCase().replace(/\s+/g, '-').substring(0, 50),
                 name: normalizedName,
+                category: category,
             },
         });
+    } else {
+        // Update category if not set or different
+        if (!material.category || material.category !== category) {
+            material = await tx.material.update({
+                where: { id: material.id },
+                data: { category: category },
+            });
+        }
     }
     return material;
 }
@@ -378,6 +414,9 @@ async function processInvoiceItemTx(
             unitPrice: currentUnitPriceDecimal,
             totalPrice: totalPriceDecimal,
             itemDate: effectiveDate, // Store the effective date for the item
+            workOrder: itemData.workOrder || null,
+            description: itemData.description || null,
+            lineNumber: itemData.lineNumber || null,
         },
     });
 
@@ -688,17 +727,19 @@ export async function createInvoiceFromFiles(
                     }
 
                     // Add validation for required numeric fields
-                    if (typeof itemData.unitPrice !== 'number' || isNaN(itemData.unitPrice)) {
-                        console.warn(`Skipping item due to invalid unit price in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}, Unit Price: ${itemData.unitPrice}`);
+                    if (typeof itemData.quantity !== 'number' || isNaN(itemData.quantity)) {
+                        console.warn(`Skipping item due to invalid or missing quantity in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}, Quantity: ${itemData.quantity}`);
                         continue;
                     }
-                    if (typeof itemData.quantity !== 'number' || isNaN(itemData.quantity)) {
-                        console.warn(`Skipping item due to invalid quantity in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}, Quantity: ${itemData.quantity}`);
-                        continue;
+
+                    // For items that might not have a price (e.g., informational lines), default to 0 instead of skipping.
+                    if (typeof itemData.unitPrice !== 'number' || isNaN(itemData.unitPrice)) {
+                        console.warn(`Missing or invalid unit price for item in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}. Defaulting to 0.`);
+                        itemData.unitPrice = 0;
                     }
                     if (typeof itemData.totalPrice !== 'number' || isNaN(itemData.totalPrice)) {
-                        console.warn(`Skipping item due to invalid total price in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}, Total Price: ${itemData.totalPrice}`);
-                        continue;
+                        console.warn(`Missing or invalid total price for item in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}. Defaulting to 0.`);
+                        itemData.totalPrice = 0;
                     }
                     // Default isMaterial to true if not provided by AI, though it should be.
                     // This maintains previous behavior for old data or if AI misses it.
@@ -716,21 +757,13 @@ export async function createInvoiceFromFiles(
                         await tx.invoiceItem.create({
                             data: {
                                 invoiceId: invoice.id,
-                                // For non-materials, we might not have a materialId or link it to a generic "non-material" entry.
-                                // For now, let's make materialId nullable in the schema or handle this appropriately.
-                                // TEMPORARY: Skip materialId for non-materials. This will require schema change or a placeholder material.
-                                // For this iteration, let's assume a placeholder material or adapt the logic later.
-                                // For now, to avoid breaking, we'll create a "dummy" material entry for it or skip it.
-                                // Let's log and decide. For now, if not a material, we just create the invoice item without linking to material-specific logic.
-                                // This part needs careful consideration of how to represent non-materials in InvoiceItem.
-                                // A simple solution is to still call findOrCreateMaterialTx, but it will create "Ecotasa" as a material.
-                                // The prompt asks AI to use name like "Ecotasa". We can create them as materials but they won't be used for alerts or MaterialProvider.
-
-                                materialId: (await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialDescription)).id, // Create "Ecotasa", "Transporte" as materials for now.
+                                // For non-materials, we create a corresponding material entry for tracking purposes.
+                                materialId: (await findOrCreateMaterialTx(tx, itemData.materialName, itemData.description, provider.type)).id,
                                 quantity: quantityDecimal,
                                 unitPrice: currentUnitPriceDecimal,
                                 totalPrice: totalPriceDecimal,
                                 itemDate: effectiveItemDate,
+                                workOrder: itemData.workOrder || null, // Ensure OT is assigned to non-materials
                             },
                         });
                         console.log(`[Invoice ${invoice.invoiceCode}] Non-material item "${itemData.materialName}" added to invoice items. No price alert/MaterialProvider update.`);
@@ -738,7 +771,7 @@ export async function createInvoiceFromFiles(
                     }
 
                     // The rest of the loop is for isMaterialItem === true
-                    const material = await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialDescription);
+                    const material = await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialDescription, provider.type);
                     const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
                     const currentItemUnitPrice = new Prisma.Decimal(itemData.unitPrice.toFixed(2));
 
@@ -860,4 +893,204 @@ export async function createInvoiceFromFiles(
     }
 
     return { overallSuccess, results: finalResults };
+}
+
+// Manual invoice creation function for form submissions
+export interface ManualInvoiceData {
+    provider: {
+        name: string;
+        cif: string | null;
+        email: string | null;
+        phone: string | null;
+    };
+    invoiceCode: string;
+    issueDate: string;
+    items: Array<{
+        materialName: string;
+        quantity: number;
+        unitPrice: number;
+        totalPrice: number;
+        description: string | null;
+        workOrder: string | null;
+        isMaterial: boolean;
+    }>;
+    totalAmount: number;
+}
+
+export async function createManualInvoice(data: ManualInvoiceData): Promise<CreateInvoiceResult> {
+    try {
+        const result = await prisma.$transaction(async (tx) => {
+            // 1. Find or create provider
+            const provider = await findOrCreateProviderTx(tx, {
+                name: data.provider.name,
+                cif: data.provider.cif || `MANUAL-${Date.now()}`, // Ensure CIF is not null
+                email: data.provider.email || undefined,
+                phone: data.provider.phone || undefined,
+            });
+
+            // 2. Check if invoice already exists
+            const existingInvoice = await tx.invoice.findFirst({
+                where: {
+                    invoiceCode: data.invoiceCode,
+                    providerId: provider.id,
+                },
+            });
+
+            if (existingInvoice) {
+                return {
+                    success: false,
+                    message: `Invoice with code '${data.invoiceCode}' already exists for this provider.`,
+                };
+            }
+
+            // 3. Create invoice
+            const invoice = await tx.invoice.create({
+                data: {
+                    invoiceCode: data.invoiceCode,
+                    providerId: provider.id,
+                    issueDate: new Date(data.issueDate),
+                    totalAmount: new Prisma.Decimal(data.totalAmount.toFixed(2)),
+                    status: "PROCESSED",
+                },
+            });
+
+            let alertsCounter = 0;
+            const currentInvoiceIssueDate = new Date(data.issueDate);
+
+            // 4. Process each item
+            for (const itemData of data.items) {
+                if (!itemData.materialName) {
+                    console.warn(`Skipping item due to missing material name in manual invoice ${invoice.invoiceCode}`);
+                    continue;
+                }
+
+                // Find or create material
+                const material = await findOrCreateMaterialTx(tx, itemData.materialName, undefined, provider.type);
+
+                // Create invoice item
+                const invoiceItem = await tx.invoiceItem.create({
+                    data: {
+                        invoiceId: invoice.id,
+                        materialId: material.id,
+                        quantity: new Prisma.Decimal(itemData.quantity.toFixed(2)),
+                        unitPrice: new Prisma.Decimal(itemData.unitPrice.toFixed(2)),
+                        totalPrice: new Prisma.Decimal(itemData.totalPrice.toFixed(2)),
+                        itemDate: currentInvoiceIssueDate,
+                        description: itemData.description,
+                        workOrder: itemData.workOrder,
+                    },
+                });
+
+                // Only create price alerts for material items
+                if (itemData.isMaterial) {
+                    // Check for price changes (only inter-invoice for manual entries)
+                    const lastPurchase = await tx.invoiceItem.findFirst({
+                        where: {
+                            materialId: material.id,
+                            invoice: {
+                                providerId: provider.id,
+                                issueDate: {
+                                    lt: currentInvoiceIssueDate,
+                                },
+                            },
+                        },
+                        orderBy: {
+                            itemDate: 'desc',
+                        },
+                    });
+
+                    if (lastPurchase) {
+                        const currentPrice = new Prisma.Decimal(itemData.unitPrice.toFixed(2));
+                        const lastPrice = lastPurchase.unitPrice;
+
+                        if (!currentPrice.equals(lastPrice)) {
+                            const priceDiff = currentPrice.minus(lastPrice);
+                            let percentageChange: Prisma.Decimal;
+
+                            if (!lastPrice.isZero()) {
+                                percentageChange = priceDiff.dividedBy(lastPrice).times(100);
+                            } else {
+                                percentageChange = new Prisma.Decimal(currentPrice.isPositive() ? 9999 : -9999);
+                            }
+
+                            // Only create alert if change is significant (>5%)
+                            if (percentageChange.abs().gte(5)) {
+                                await tx.priceAlert.create({
+                                    data: {
+                                        materialId: material.id,
+                                        providerId: provider.id,
+                                        oldPrice: lastPrice,
+                                        newPrice: currentPrice,
+                                        percentage: percentageChange,
+                                        status: "PENDING",
+                                        effectiveDate: currentInvoiceIssueDate,
+                                        invoiceId: invoice.id,
+                                    },
+                                });
+                                alertsCounter++;
+                            }
+                        }
+                    }
+
+                    // Update or create MaterialProvider relationship
+                    await tx.materialProvider.upsert({
+                        where: {
+                            materialId_providerId: {
+                                materialId: material.id,
+                                providerId: provider.id,
+                            },
+                        },
+                        update: {
+                            lastPriceDate: currentInvoiceIssueDate,
+                            lastPrice: new Prisma.Decimal(itemData.unitPrice.toFixed(2)),
+                        },
+                        create: {
+                            materialId: material.id,
+                            providerId: provider.id,
+                            lastPriceDate: currentInvoiceIssueDate,
+                            lastPrice: new Prisma.Decimal(itemData.unitPrice.toFixed(2)),
+                        },
+                    });
+                }
+            }
+
+            return {
+                success: true,
+                message: `Manual invoice ${invoice.invoiceCode} created successfully.`,
+                invoiceId: invoice.id,
+                alertsCreated: alertsCounter,
+            };
+        });
+
+        // Revalidate paths if successful
+        if (result.success) {
+            revalidatePath("/facturas");
+            if (result.alertsCreated && result.alertsCreated > 0) {
+                revalidatePath("/alertas");
+            }
+        }
+
+        return result;
+    } catch (error) {
+        console.error("Error creating manual invoice:", error);
+
+        let errorMessage = "An unexpected error occurred.";
+
+        if (error instanceof Error) {
+            errorMessage = error.message;
+        }
+
+        // Handle specific Prisma errors
+        if (typeof error === 'object' && error !== null && 'code' in error) {
+            const prismaError = error as { code: string; meta?: { target?: string[] } };
+            if (prismaError.code === 'P2002' && prismaError.meta?.target?.includes('invoiceCode')) {
+                errorMessage = `An invoice with code '${data.invoiceCode}' already exists.`;
+            }
+        }
+
+        return {
+            success: false,
+            message: errorMessage,
+        };
+    }
 } 
