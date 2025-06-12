@@ -100,11 +100,14 @@ async function callPdfExtractAPI(file: File): Promise<CallPdfExtractAPIResponse>
         try {
             pages = await pdfToPng(arrayBuffer, {
                 disableFontFace: true,
-                // useSystemFonts: true,
-                viewportScale: 4, // Balance between resolution and full page coverage
+                useSystemFonts: true,
+                viewportScale: 3, // Balance between resolution and full page coverage
                 strictPagesToProcess: false,
                 verbosityLevel: 0,
             });
+
+
+
         } catch (conversionError: unknown) {
             console.error(`Error during pdfToPng conversion for ${file.name}:`, conversionError);
             if (typeof conversionError === 'object' && conversionError !== null && 'code' in conversionError && (conversionError as { code: unknown }).code === 'InvalidArg' && 'message' in conversionError && typeof (conversionError as { message: unknown }).message === 'string' && (conversionError as { message: string }).message.includes('Convert String to CString failed')) {
