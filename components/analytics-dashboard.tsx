@@ -2,14 +2,13 @@
 
 import { useState } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { ExcelExportButton } from "@/components/excel-export-button"
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts'
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line, Legend } from 'recharts'
 import { formatCurrency } from "@/lib/utils"
 import { MaterialAnalytics, SupplierAnalytics } from "@/lib/actions/analytics"
 import { ExportFilters } from "@/lib/actions/export"
@@ -25,8 +24,6 @@ interface AnalyticsDashboardProps {
     categories: string[]
     workOrders: string[]
 }
-
-const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884D8', '#82CA9D']
 
 export function AnalyticsDashboard({
     materialAnalytics,
@@ -99,11 +96,30 @@ export function AnalyticsDashboard({
         invoices: supplier.invoiceCount
     }))
 
-    const categoryData = categories.map(category => {
-        const categoryMaterials = filteredMaterials.filter(m => m.category === category)
-        const totalCost = categoryMaterials.reduce((sum, m) => sum + m.totalCost, 0)
-        return { name: category, value: totalCost }
-    }).filter(item => item.value > 0).sort((a, b) => b.value - a.value)
+    // Prepare monthly evolution chart data
+    const monthlyEvolutionData = (() => {
+        const monthlyMap = new Map<string, number>()
+
+        // Aggregate monthly spending from filtered suppliers
+        filteredSuppliers.forEach(supplier => {
+            supplier.monthlySpending.forEach(monthData => {
+                const existingAmount = monthlyMap.get(monthData.month) || 0
+                monthlyMap.set(monthData.month, existingAmount + monthData.totalSpent)
+            })
+        })
+
+        // Convert to array and sort by month
+        return Array.from(monthlyMap.entries())
+            .map(([month, totalSpent]) => ({
+                month,
+                totalSpent,
+                formattedMonth: new Date(month + '-01').toLocaleDateString('es-ES', {
+                    year: 'numeric',
+                    month: 'short'
+                })
+            }))
+            .sort((a, b) => a.month.localeCompare(b.month))
+    })()
 
     const clearFilters = () => {
         setFilters({})
@@ -203,7 +219,7 @@ export function AnalyticsDashboard({
                         <div className="space-y-2">
                             <Label>OT/CECO</Label>
                             <Input
-                                placeholder="1234..."
+                                placeholder="OT-1234..."
                                 value={filters.workOrder || ''}
                                 onChange={(e) => setFilters(prev => ({ ...prev, workOrder: e.target.value || undefined }))}
                             />
@@ -237,124 +253,20 @@ export function AnalyticsDashboard({
                 </CardContent>
             </Card>
 
-            {/* Main Analytics Tabs - Now only Overview and Charts */}
-            <Tabs defaultValue="overview" className="space-y-4">
-                <TabsList>
-                    <TabsTrigger value="overview">Resumen</TabsTrigger>
-                    <TabsTrigger value="charts">Gráficos</TabsTrigger>
-                </TabsList>
+            {/* Charts - All displayed directly without tabs */}
+            <div className="space-y-6">
 
-                <TabsContent value="overview" className="space-y-4">
-                    <div className="grid gap-4 md:grid-cols-2">
-                        <Card>
-                            <CardHeader>
-                                <CardTitle>Top 10 Materiales por Coste</CardTitle>
-                                <CardDescription>
-                                    <Link href="/materiales" className="text-blue-600 hover:underline">
-                                        Ver análisis completo de materiales →
-                                    </Link>
-                                </CardDescription>
-                            </CardHeader>
-                            <CardContent>
-                                <ResponsiveContainer width="100%" height={300}>
-                                    <BarChart data={topMaterialsChart}>
-                                        <CartesianGrid strokeDasharray="3 3" />
-                                        <XAxis
-                                            dataKey="name"
-                                            angle={-45}
-                                            textAnchor="end"
-                                            height={80}
-                                            tick={{ fontSize: 10 }}
-                                        />
-                                        <YAxis
-                                            tickFormatter={(value) => formatCurrency(value)}
-                                            tick={{ fontSize: 11 }}
-                                        />
-                                        <Tooltip
-                                            formatter={(value: number) => [formatCurrency(value), 'Coste']}
-                                            labelFormatter={(label: string, payload: Array<{ payload?: { fullName?: string } }>) => {
-                                                const entry = payload?.[0]?.payload
-                                                return entry?.fullName || label
-                                            }}
-                                        />
-                                        <Bar dataKey="cost" fill="#8884d8" />
-                                    </BarChart>
-                                </ResponsiveContainer>
-                            </CardContent>
-                        </Card>
 
-                        <Card>
-                            <CardHeader>
-                                <CardTitle>Top 10 Proveedores por Gasto</CardTitle>
-                                <CardDescription>
-                                    <Link href="/proveedores" className="text-blue-600 hover:underline">
-                                        Ver análisis completo de proveedores →
-                                    </Link>
-                                </CardDescription>
-                            </CardHeader>
-                            <CardContent>
-                                <ResponsiveContainer width="100%" height={300}>
-                                    <BarChart data={topSuppliersChart}>
-                                        <CartesianGrid strokeDasharray="3 3" />
-                                        <XAxis
-                                            dataKey="name"
-                                            angle={-45}
-                                            textAnchor="end"
-                                            height={80}
-                                            tick={{ fontSize: 10 }}
-                                        />
-                                        <YAxis
-                                            tickFormatter={(value) => formatCurrency(value)}
-                                            tick={{ fontSize: 11 }}
-                                        />
-                                        <Tooltip
-                                            formatter={(value: number) => [formatCurrency(value), 'Gasto']}
-                                            labelFormatter={(label: string, payload: Array<{ payload?: { fullName?: string } }>) => {
-                                                const entry = payload?.[0]?.payload
-                                                return entry?.fullName || label
-                                            }}
-                                        />
-                                        <Bar dataKey="spent" fill="#82ca9d" />
-                                    </BarChart>
-                                </ResponsiveContainer>
-                            </CardContent>
-                        </Card>
-                    </div>
-
-                    {categoryData.length > 0 && (
-                        <Card>
-                            <CardHeader>
-                                <CardTitle>Distribución por Categorías</CardTitle>
-                            </CardHeader>
-                            <CardContent>
-                                <ResponsiveContainer width="100%" height={300}>
-                                    <PieChart>
-                                        <Pie
-                                            data={categoryData.slice(0, 8)}
-                                            cx="50%"
-                                            cy="50%"
-                                            labelLine={false}
-                                            label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
-                                            outerRadius={80}
-                                            fill="#8884d8"
-                                            dataKey="value"
-                                        >
-                                            {categoryData.slice(0, 8).map((entry, index) => (
-                                                <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                                            ))}
-                                        </Pie>
-                                        <Tooltip formatter={(value: number) => [formatCurrency(value), 'Coste']} />
-                                    </PieChart>
-                                </ResponsiveContainer>
-                            </CardContent>
-                        </Card>
-                    )}
-                </TabsContent>
-
-                <TabsContent value="charts" className="space-y-4">
+                {/* Top Materials and Suppliers Charts */}
+                <div className="grid gap-4 md:grid-cols-2">
                     <Card>
                         <CardHeader>
-                            <CardTitle>Materiales por Cantidad vs Coste</CardTitle>
+                            <CardTitle>Top 10 Materiales por Coste</CardTitle>
+                            <CardDescription>
+                                <Link href="/materiales" className="text-blue-600 hover:underline">
+                                    Ver análisis completo de materiales →
+                                </Link>
+                            </CardDescription>
                         </CardHeader>
                         <CardContent>
                             <ResponsiveContainer width="100%" height={300}>
@@ -368,30 +280,145 @@ export function AnalyticsDashboard({
                                         tick={{ fontSize: 10 }}
                                     />
                                     <YAxis
-                                        yAxisId="left"
-                                        orientation="left"
                                         tickFormatter={(value) => formatCurrency(value)}
                                         tick={{ fontSize: 11 }}
                                     />
-                                    <YAxis
-                                        yAxisId="right"
-                                        orientation="right"
-                                        tick={{ fontSize: 11 }}
-                                    />
                                     <Tooltip
+                                        formatter={(value: number) => [formatCurrency(value), 'Coste']}
                                         labelFormatter={(label: string, payload: Array<{ payload?: { fullName?: string } }>) => {
                                             const entry = payload?.[0]?.payload
                                             return entry?.fullName || label
                                         }}
                                     />
-                                    <Bar yAxisId="left" dataKey="cost" fill="#8884d8" name="Coste" />
-                                    <Bar yAxisId="right" dataKey="quantity" fill="#82ca9d" name="Cantidad" />
+                                    <Bar dataKey="cost" fill="#8884d8" />
                                 </BarChart>
                             </ResponsiveContainer>
                         </CardContent>
                     </Card>
-                </TabsContent>
-            </Tabs>
+
+                    <Card>
+                        <CardHeader>
+                            <CardTitle>Top 10 Proveedores por Gasto</CardTitle>
+                            <CardDescription>
+                                <Link href="/proveedores" className="text-blue-600 hover:underline">
+                                    Ver análisis completo de proveedores →
+                                </Link>
+                            </CardDescription>
+                        </CardHeader>
+                        <CardContent>
+                            <ResponsiveContainer width="100%" height={300}>
+                                <BarChart data={topSuppliersChart}>
+                                    <CartesianGrid strokeDasharray="3 3" />
+                                    <XAxis
+                                        dataKey="name"
+                                        angle={-45}
+                                        textAnchor="end"
+                                        height={80}
+                                        tick={{ fontSize: 10 }}
+                                    />
+                                    <YAxis
+                                        tickFormatter={(value) => formatCurrency(value)}
+                                        tick={{ fontSize: 11 }}
+                                    />
+                                    <Tooltip
+                                        formatter={(value: number) => [formatCurrency(value), 'Gasto']}
+                                        labelFormatter={(label: string, payload: Array<{ payload?: { fullName?: string } }>) => {
+                                            const entry = payload?.[0]?.payload
+                                            return entry?.fullName || label
+                                        }}
+                                    />
+                                    <Bar dataKey="spent" fill="#82ca9d" />
+                                </BarChart>
+                            </ResponsiveContainer>
+                        </CardContent>
+                    </Card>
+                </div>
+
+                {/* Combined Chart: Materials by Quantity vs Cost */}
+                <Card>
+                    <CardHeader>
+                        <CardTitle>Materiales por Cantidad vs Coste</CardTitle>
+                        <CardDescription>
+                            Comparación de cantidad y coste por material
+                        </CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                        <ResponsiveContainer width="100%" height={300}>
+                            <BarChart data={topMaterialsChart}>
+                                <CartesianGrid strokeDasharray="3 3" />
+                                <XAxis
+                                    dataKey="name"
+                                    angle={-45}
+                                    textAnchor="end"
+                                    height={80}
+                                    tick={{ fontSize: 10 }}
+                                />
+                                <YAxis
+                                    yAxisId="left"
+                                    orientation="left"
+                                    tickFormatter={(value) => formatCurrency(value)}
+                                    tick={{ fontSize: 11 }}
+                                />
+                                <YAxis
+                                    yAxisId="right"
+                                    orientation="right"
+                                    tick={{ fontSize: 11 }}
+                                />
+                                <Tooltip
+                                    labelFormatter={(label: string, payload: Array<{ payload?: { fullName?: string } }>) => {
+                                        const entry = payload?.[0]?.payload
+                                        return entry?.fullName || label
+                                    }}
+                                />
+                                <Legend />
+                                <Bar yAxisId="left" dataKey="cost" fill="#8884d8" name="Coste" />
+                                <Bar yAxisId="right" dataKey="quantity" fill="#82ca9d" name="Cantidad" />
+                            </BarChart>
+                        </ResponsiveContainer>
+                    </CardContent>
+                </Card>
+
+                {/* Monthly Evolution Chart */}
+                {monthlyEvolutionData.length > 0 && (
+                    <Card>
+                        <CardHeader>
+                            <CardTitle>Evolución Mensual del Gasto</CardTitle>
+                            <CardDescription>
+                                Tendencia de gastos por mes {hasActiveFilters && '(filtrado)'}
+                            </CardDescription>
+                        </CardHeader>
+                        <CardContent>
+                            <ResponsiveContainer width="100%" height={300}>
+                                <LineChart data={monthlyEvolutionData}>
+                                    <CartesianGrid strokeDasharray="3 3" />
+                                    <XAxis
+                                        dataKey="formattedMonth"
+                                        tick={{ fontSize: 11 }}
+                                    />
+                                    <YAxis
+                                        tickFormatter={(value) => formatCurrency(value)}
+                                        tick={{ fontSize: 11 }}
+                                    />
+                                    <Tooltip
+                                        formatter={(value: number) => [formatCurrency(value), 'Gasto']}
+                                        labelFormatter={(label) => `Mes: ${label}`}
+                                    />
+                                    <Line
+                                        type="monotone"
+                                        dataKey="totalSpent"
+                                        stroke="#8884d8"
+                                        strokeWidth={2}
+                                        dot={{ fill: '#8884d8', strokeWidth: 2, r: 4 }}
+                                        activeDot={{ r: 6 }}
+                                    />
+                                </LineChart>
+                            </ResponsiveContainer>
+                        </CardContent>
+                    </Card>
+                )}
+
+
+            </div>
         </div>
     )
 } 

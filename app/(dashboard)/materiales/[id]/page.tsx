@@ -149,7 +149,7 @@ export default async function MaterialDetailPage({ params }: MaterialDetailPageP
                                 {material.invoiceItems.length > 0 ? (
                                     material.invoiceItems.map((item) => (
                                         <TableRow key={item.id}>
-                                            <TableCell>{item.itemDate.toLocaleDateString("es-ES")}</TableCell>
+                                            <TableCell>{item.invoice.issueDate.toLocaleDateString("es-ES")}</TableCell>
                                             <TableCell>
                                                 <Link
                                                     href={`/proveedores/${item.invoice.provider.id}`}

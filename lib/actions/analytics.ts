@@ -1,6 +1,11 @@
 import { prisma } from "@/lib/db";
 import { Prisma, ProviderType } from "@/generated/prisma";
 
+// Helper function to process workOrder search terms
+function processWorkOrderSearch(workOrder: string): string {
+    return workOrder.replace(/\s+/g, '-');
+}
+
 export interface MaterialAnalytics {
     materialId: string;
     materialCode: string;
@@ -86,7 +91,7 @@ export async function getMaterialAnalytics(params: GetMaterialAnalyticsParams = 
     const where: Prisma.InvoiceItemWhereInput = {
         ...(params.materialId ? { materialId: params.materialId } : {}),
         ...(params.category ? { material: { category: { contains: params.category, mode: 'insensitive' } } } : {}),
-        ...(params.workOrder ? { workOrder: { contains: params.workOrder, mode: 'insensitive' } } : {}),
+        ...(params.workOrder ? { workOrder: { contains: processWorkOrderSearch(params.workOrder), mode: 'insensitive' } } : {}),
         ...(params.supplierId ? { invoice: { providerId: params.supplierId } } : {}),
         ...(params.startDate || params.endDate ? {
             itemDate: {
@@ -252,7 +257,7 @@ export async function getSupplierAnalytics(params: GetSupplierAnalyticsParams = 
     const where: Prisma.InvoiceWhereInput = {
         ...(params.supplierId ? { providerId: params.supplierId } : {}),
         ...(params.supplierType ? { provider: { type: params.supplierType as 'MATERIAL_SUPPLIER' | 'MACHINERY_RENTAL' } } : {}),
-        ...(params.workOrder ? { items: { some: { workOrder: { contains: params.workOrder, mode: 'insensitive' } } } } : {}),
+        ...(params.workOrder ? { items: { some: { workOrder: { contains: processWorkOrderSearch(params.workOrder), mode: 'insensitive' } } } } : {}),
         ...(params.materialCategory ? { items: { some: { material: { category: { contains: params.materialCategory, mode: 'insensitive' } } } } } : {}),
         ...(params.startDate || params.endDate ? {
             issueDate: {
@@ -405,7 +410,7 @@ export async function getSupplierAnalytics(params: GetSupplierAnalyticsParams = 
 export async function getWorkOrderAnalytics(workOrder: string) {
     const items = await prisma.invoiceItem.findMany({
         where: {
-            workOrder: { contains: workOrder, mode: 'insensitive' }
+            workOrder: { contains: processWorkOrderSearch(workOrder), mode: 'insensitive' }
         },
         include: {
             material: {

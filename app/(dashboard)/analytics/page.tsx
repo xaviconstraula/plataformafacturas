@@ -49,10 +49,10 @@ export default async function AnalyticsPage() {
         <div className="flex flex-col gap-6">
             <div className="flex items-center justify-between">
                 <div>
-                    <h1 className="text-3xl font-bold">Analytics</h1>
+                    <h1 className="text-3xl font-bold">Analíticas</h1>
                     <p className="text-muted-foreground">
                         Resumen general y tendencias de compra.
-                        Para análisis detallados visite <Link href="/materiales" className="underline">Materiales</Link> o <Link href="/proveedores" className="underline">Proveedores</Link>
+
                     </p>
                 </div>
             </div>

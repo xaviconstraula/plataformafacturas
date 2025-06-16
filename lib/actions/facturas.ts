@@ -4,6 +4,11 @@ import { prisma } from "@/lib/db"
 import { Prisma } from "@/generated/prisma"
 import { revalidatePath } from "next/cache"
 
+// Helper function to process workOrder search terms
+function processWorkOrderSearch(workOrder: string): string {
+    return workOrder.replace(/\s+/g, '-');
+}
+
 export interface GetInvoicesParams {
     page?: number
     pageSize?: number
@@ -103,7 +108,7 @@ export async function getInvoices(params: GetInvoicesParams) {
                 ]
             } : {}),
             ...(params.workOrder ? {
-                items: { some: { workOrder: { contains: params.workOrder, mode: Prisma.QueryMode.insensitive } } }
+                items: { some: { workOrder: { contains: processWorkOrderSearch(params.workOrder), mode: Prisma.QueryMode.insensitive } } }
             } : {}),
             ...(cleanMaterial ? {
                 items: { some: { materialId: cleanMaterial } }

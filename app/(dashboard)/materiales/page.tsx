@@ -10,7 +10,7 @@ import { formatCurrency } from "@/lib/utils"
 
 async function getMaterialsData() {
   const [materialAnalytics, suppliers, categories, workOrders] = await Promise.all([
-    getMaterialAnalytics({ sortBy: 'cost', sortOrder: 'desc', limit: 50 }),
+    getMaterialAnalytics({ sortBy: 'cost', sortOrder: 'desc' }),
     prisma.provider.findMany({
       select: { id: true, name: true, type: true },
       orderBy: { name: 'asc' }

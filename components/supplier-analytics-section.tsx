@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from "react"
+import { useSearchParams } from "next/navigation"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Input } from "@/components/ui/input"
@@ -16,6 +17,7 @@ import Link from "next/link"
 import { ArrowUpRight, Filter, PencilIcon, TrashIcon, X } from "lucide-react"
 import { DeleteProviderDialog } from "./delete-provider-dialog"
 import { EditProviderDialog } from "./edit-provider-dialog"
+import { Pagination } from "./pagination"
 
 interface SupplierAnalyticsSectionProps {
     supplierAnalytics: SupplierAnalytics[]
@@ -28,9 +30,14 @@ export function SupplierAnalyticsSection({
     categories,
     workOrders
 }: SupplierAnalyticsSectionProps) {
+    const searchParams = useSearchParams()
     const [filters, setFilters] = useState<ExportFilters>({})
     const [sortBy, setSortBy] = useState<'spent' | 'invoices' | 'materials' | 'name'>('spent')
     const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc')
+
+    // Pagination params
+    const currentPage = parseInt(searchParams.get('page') || '1', 10)
+    const itemsPerPage = 20
 
     // Apply filters and sorting to supplier analytics
     const filteredSuppliers = supplierAnalytics
@@ -71,6 +78,13 @@ export function SupplierAnalyticsSection({
             return sortOrder === 'asc' ? aValue - bValue : bValue - aValue
         })
 
+    // Pagination logic
+    const totalItems = filteredSuppliers.length
+    const totalPages = Math.ceil(totalItems / itemsPerPage)
+    const startIndex = (currentPage - 1) * itemsPerPage
+    const endIndex = startIndex + itemsPerPage
+    const paginatedSuppliers = filteredSuppliers.slice(startIndex, endIndex)
+
     // Prepare chart data
     const topSuppliersChart = filteredSuppliers.slice(0, 10).map(supplier => ({
         name: supplier.supplierName.length > 15 ? supplier.supplierName.substring(0, 15) + '...' : supplier.supplierName,
@@ -87,11 +101,25 @@ export function SupplierAnalyticsSection({
 
     return (
         <div className="space-y-6">
-            {/* Filters */}
+            {/* Results Summary */}
+            {hasActiveFilters && (
+                <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                        <Badge variant="secondary">
+                            {filteredSuppliers.length} de {supplierAnalytics.length} proveedores
+                        </Badge>
+                        {hasActiveFilters && (
+                            <Badge variant="outline">
+                                Filtros aplicados
+                            </Badge>
+                        )}
+                    </div>
+                </div>
+            )}
 
+            {/* Filters */}
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-
                     {hasActiveFilters && (
                         <Badge variant="secondary">
                             {Object.values(filters).filter(v => v !== undefined && v !== '').length} activos
@@ -167,7 +195,7 @@ export function SupplierAnalyticsSection({
 
 
             {/* Chart */}
-            <Card>
+            {/* <Card>
                 <CardHeader>
                     <CardTitle>Top 10 Proveedores por Gasto</CardTitle>
                 </CardHeader>
@@ -197,7 +225,7 @@ export function SupplierAnalyticsSection({
                         </BarChart>
                     </ResponsiveContainer>
                 </CardContent>
-            </Card>
+            </Card> */}
 
             {/* Analytics Table */}
             <Card>
@@ -218,7 +246,7 @@ export function SupplierAnalyticsSection({
                             </TableRow>
                         </TableHeader>
                         <TableBody>
-                            {filteredSuppliers.slice(0, 20).map((supplier) => (
+                            {paginatedSuppliers.map((supplier) => (
                                 <TableRow key={supplier.supplierId}>
                                     <TableCell>
                                         <Link
@@ -271,6 +299,16 @@ export function SupplierAnalyticsSection({
                             ))}
                         </TableBody>
                     </Table>
+
+                    {/* Pagination */}
+                    <div className="mt-4">
+                        <Pagination
+                            currentPage={currentPage}
+                            totalPages={totalPages}
+                            itemsPerPage={itemsPerPage}
+                            totalItems={totalItems}
+                        />
+                    </div>
                 </CardContent>
             </Card>
         </div>

@@ -13,6 +13,7 @@ import Link from "next/link"
 import { ArrowUpRight, PencilIcon, TrashIcon, X } from "lucide-react"
 import { EditMaterialDialog } from "./edit-material-dialog"
 import { DeleteMaterialDialog } from "./delete-material-dialog"
+import { Pagination } from "./pagination"
 
 interface MaterialAnalyticsSectionProps {
     materialAnalytics: MaterialAnalytics[]
@@ -47,6 +48,10 @@ export function MaterialAnalyticsSection({
 
     const sortBy = (searchParams.get('sortBy') || 'cost') as 'quantity' | 'cost' | 'name' | 'avgUnitPrice'
     const sortOrder = (searchParams.get('sortOrder') || 'desc') as 'asc' | 'desc'
+
+    // Pagination params
+    const currentPage = parseInt(searchParams.get('page') || '1', 10)
+    const itemsPerPage = 20
 
     // Apply filters and sorting to material analytics
     const filteredMaterials = materialAnalytics
@@ -112,6 +117,13 @@ export function MaterialAnalyticsSection({
             return sortOrder === 'asc' ? aValue - bValue : bValue - aValue
         })
 
+    // Pagination logic
+    const totalItems = filteredMaterials.length
+    const totalPages = Math.ceil(totalItems / itemsPerPage)
+    const startIndex = (currentPage - 1) * itemsPerPage
+    const endIndex = startIndex + itemsPerPage
+    const paginatedMaterials = filteredMaterials.slice(startIndex, endIndex)
+
     // Prepare chart data
     const topMaterialsChart = filteredMaterials.slice(0, 10).map(material => ({
         name: material.materialName.length > 15 ? material.materialName.substring(0, 15) + '...' : material.materialName,
@@ -120,6 +132,18 @@ export function MaterialAnalyticsSection({
         quantity: material.totalQuantity,
         avgUnitPrice: material.averageUnitPrice
     }))
+
+    // Prepare quantity chart data (sorted by quantity)
+    const topQuantityChart = [...filteredMaterials]
+        .sort((a, b) => b.totalQuantity - a.totalQuantity)
+        .slice(0, 10)
+        .map(material => ({
+            name: material.materialName.length > 15 ? material.materialName.substring(0, 15) + '...' : material.materialName,
+            fullName: material.materialName,
+            cost: material.totalCost,
+            quantity: material.totalQuantity,
+            avgUnitPrice: material.averageUnitPrice
+        }))
 
     const hasActiveFilters = Object.values(filters).some(value => value !== undefined && value !== '' && value !== 'all')
 
@@ -141,7 +165,45 @@ export function MaterialAnalyticsSection({
                 </div>
             )}
 
-            {/* Chart */}
+            {/* Dedicated Quantity Chart */}
+            <Card>
+                <CardHeader>
+                    <CardTitle>
+                        Top 10 Materiales por Cantidad Total Comprada
+                    </CardTitle>
+                </CardHeader>
+                <CardContent>
+                    <ResponsiveContainer width="100%" height={300}>
+                        <BarChart data={topQuantityChart}>
+                            <CartesianGrid strokeDasharray="3 3" />
+                            <XAxis
+                                dataKey="name"
+                                angle={-45}
+                                textAnchor="end"
+                                height={80}
+                                tick={{ fontSize: 10 }}
+                            />
+                            <YAxis
+                                tickFormatter={(value) => value.toString()}
+                                tick={{ fontSize: 11 }}
+                            />
+                            <Tooltip
+                                formatter={(value: number) => [value.toString(), 'Cantidad Total']}
+                                labelFormatter={(label: string, payload: Array<{ payload?: { fullName?: string } }>) => {
+                                    const entry = payload?.[0]?.payload
+                                    return entry?.fullName || label
+                                }}
+                            />
+                            <Bar
+                                dataKey="quantity"
+                                fill="#10b981"
+                            />
+                        </BarChart>
+                    </ResponsiveContainer>
+                </CardContent>
+            </Card>
+
+            {/* Dynamic Chart - Original */}
             <Card>
                 <CardHeader>
                     <CardTitle>
@@ -186,6 +248,8 @@ export function MaterialAnalyticsSection({
                 </CardContent>
             </Card>
 
+
+
             {/* Analytics Table */}
             <Card className="py-8">
                 <CardContent>
@@ -201,7 +265,7 @@ export function MaterialAnalyticsSection({
                             </TableRow>
                         </TableHeader>
                         <TableBody>
-                            {filteredMaterials.slice(0, 50).map((material) => (
+                            {paginatedMaterials.map((material) => (
                                 <TableRow key={material.materialId}>
                                     <TableCell>
                                         <div className="space-y-1">
@@ -253,11 +317,15 @@ export function MaterialAnalyticsSection({
                         </TableBody>
                     </Table>
 
-                    {filteredMaterials.length > 50 && (
-                        <div className="mt-4 text-center text-sm text-muted-foreground">
-                            Mostrando los primeros 50 de {filteredMaterials.length} materiales. Use los filtros para refinar los resultados.
-                        </div>
-                    )}
+                    {/* Pagination */}
+                    <div className="mt-4">
+                        <Pagination
+                            currentPage={currentPage}
+                            totalPages={totalPages}
+                            itemsPerPage={itemsPerPage}
+                            totalItems={totalItems}
+                        />
+                    </div>
                 </CardContent>
             </Card>
         </div>

@@ -100,7 +100,7 @@ async function callPdfExtractAPI(file: File): Promise<CallPdfExtractAPIResponse>
         try {
             pages = await pdfToPng(arrayBuffer, {
                 disableFontFace: true,
-                useSystemFonts: true,
+                useSystemFonts: false,
                 viewportScale: 3, // Balance between resolution and full page coverage
                 strictPagesToProcess: false,
                 verbosityLevel: 0,

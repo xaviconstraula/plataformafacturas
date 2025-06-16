@@ -61,6 +61,11 @@ export interface SupplierSummaryExport {
     'Última Factura': string;
 }
 
+// Helper function to process workOrder search terms
+function processWorkOrderSearch(workOrder: string): string {
+    return workOrder.replace(/\s+/g, '-');
+}
+
 export async function exportDetailedInvoiceData(filters: ExportFilters = {}) {
     const where: Prisma.InvoiceItemWhereInput = buildWhereClause(filters);
 
@@ -191,7 +196,7 @@ export async function exportSupplierSummary(filters: ExportFilters = {}) {
         ...(filters.workOrder || filters.materialId || filters.category ? {
             items: {
                 some: {
-                    ...(filters.workOrder ? { workOrder: { contains: filters.workOrder, mode: 'insensitive' } } : {}),
+                    ...(filters.workOrder ? { workOrder: { contains: processWorkOrderSearch(filters.workOrder), mode: 'insensitive' } } : {}),
                     ...(filters.materialId ? { materialId: filters.materialId } : {}),
                     ...(filters.category ? { material: { category: { contains: filters.category, mode: 'insensitive' } } } : {})
                 }
@@ -279,7 +284,7 @@ function buildWhereClause(filters: ExportFilters): Prisma.InvoiceItemWhereInput 
     return {
         ...(filters.materialId ? { materialId: filters.materialId } : {}),
         ...(filters.category ? { material: { category: { contains: filters.category, mode: 'insensitive' } } } : {}),
-        ...(filters.workOrder ? { workOrder: { contains: filters.workOrder, mode: 'insensitive' } } : {}),
+        ...(filters.workOrder ? { workOrder: { contains: processWorkOrderSearch(filters.workOrder), mode: 'insensitive' } } : {}),
         ...(filters.supplierId ? { invoice: { providerId: filters.supplierId } } : {}),
         ...(filters.minPrice ? { unitPrice: { gte: filters.minPrice } } : {}),
         ...(filters.maxPrice ? { unitPrice: { lte: filters.maxPrice } } : {}),
