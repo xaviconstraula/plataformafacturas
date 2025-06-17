@@ -4,12 +4,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
 import { ArrowUpDownIcon, PackageIcon, DollarSignIcon, CalendarIcon, TruckIcon } from "lucide-react"
 import { formatCurrency, formatDate } from "@/lib/utils"
 import { prisma } from "@/lib/db"
+import { WorkOrderFilters } from "@/components/work-order-filters"
 
 interface SearchParams {
     sortBy?: string
@@ -33,7 +31,7 @@ async function getWorkOrdersData(params: SearchParams) {
                 not: null,
                 ...(search && { contains: search, mode: 'insensitive' })
             },
-            ...(provider && {
+            ...(provider && provider !== 'all' && {
                 invoice: {
                     providerId: provider
                 }
@@ -75,7 +73,7 @@ async function getWorkOrdersData(params: SearchParams) {
 
             return {
                 workOrder: wo.workOrder!,
-                totalCost: wo._sum.totalPrice?.toNumber() || 0,
+                totalCost: (wo._sum.totalPrice?.toNumber() || 0) * 1.21, // Add 21% IVA
                 totalQuantity: wo._sum.quantity?.toNumber() || 0,
                 itemCount: wo._count._all,
                 providers: uniqueProviders,
@@ -161,7 +159,7 @@ export default async function WorkOrdersPage({ searchParams }: PageProps) {
 
                 <div className="p-6 rounded-lg bg-white border border-border shadow-sm">
                     <div className="flex items-center justify-between">
-                        <div className="text-sm font-medium text-muted-foreground">Coste Total</div>
+                        <div className="text-sm font-medium text-muted-foreground">Coste Total (c/IVA)</div>
                         <DollarSignIcon className="h-4 w-4 text-muted-foreground" />
                     </div>
                     <div className="text-3xl font-bold mt-2">{formatCurrency(data.totalCost)}</div>
@@ -177,7 +175,7 @@ export default async function WorkOrdersPage({ searchParams }: PageProps) {
 
                 <div className="p-6 rounded-lg bg-white border border-border shadow-sm">
                     <div className="flex items-center justify-between">
-                        <div className="text-sm font-medium text-muted-foreground">Coste Promedio</div>
+                        <div className="text-sm font-medium text-muted-foreground">Coste Promedio (c/IVA)</div>
                         <TruckIcon className="h-4 w-4 text-muted-foreground" />
                     </div>
                     <div className="text-3xl font-bold mt-2">
@@ -187,75 +185,7 @@ export default async function WorkOrdersPage({ searchParams }: PageProps) {
             </div>
 
             {/* Filters */}
-            <Card>
-                <CardHeader>
-                    <CardTitle>Filtros y Ordenación</CardTitle>
-                </CardHeader>
-                <CardContent>
-                    <form className="grid gap-4 md:grid-cols-4">
-                        <div className="space-y-2">
-                            <Label>Buscar OT</Label>
-                            <Input
-                                name="search"
-                                placeholder="OT-1234..."
-                                defaultValue={params.search || ''}
-                            />
-                        </div>
-
-                        <div className="space-y-2">
-                            <Label>Proveedor</Label>
-                            <Select name="provider" defaultValue={params.provider || 'all'}>
-                                <SelectTrigger>
-                                    <SelectValue placeholder="Todos los proveedores" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                    <SelectItem value="all">Todos los proveedores</SelectItem>
-                                    {data.providers.map(provider => (
-                                        <SelectItem key={provider.id} value={provider.id}>
-                                            {provider.name}
-                                        </SelectItem>
-                                    ))}
-                                </SelectContent>
-                            </Select>
-                        </div>
-
-                        <div className="space-y-2">
-                            <Label>Ordenar por</Label>
-                            <Select name="sortBy" defaultValue={params.sortBy || 'totalCost'}>
-                                <SelectTrigger>
-                                    <SelectValue />
-                                </SelectTrigger>
-                                <SelectContent>
-                                    <SelectItem value="totalCost">Coste Total</SelectItem>
-                                    <SelectItem value="totalQuantity">Cantidad Total</SelectItem>
-                                    <SelectItem value="itemCount">Número de Items</SelectItem>
-                                    <SelectItem value="workOrder">Código OT</SelectItem>
-                                </SelectContent>
-                            </Select>
-                        </div>
-
-                        <div className="space-y-2">
-                            <Label>Orden</Label>
-                            <Select name="sortOrder" defaultValue={params.sortOrder || 'desc'}>
-                                <SelectTrigger>
-                                    <SelectValue />
-                                </SelectTrigger>
-                                <SelectContent>
-                                    <SelectItem value="desc">Descendente</SelectItem>
-                                    <SelectItem value="asc">Ascendente</SelectItem>
-                                </SelectContent>
-                            </Select>
-                        </div>
-
-                        <div className="md:col-span-4 flex gap-2">
-                            <Button type="submit">Aplicar Filtros</Button>
-                            <Button type="button" variant="outline" asChild>
-                                <Link href="/ordenes-trabajo">Limpiar</Link>
-                            </Button>
-                        </div>
-                    </form>
-                </CardContent>
-            </Card>
+            <WorkOrderFilters providers={data.providers} />
 
             {/* Work Orders Table */}
             <Card>
@@ -272,7 +202,7 @@ export default async function WorkOrdersPage({ searchParams }: PageProps) {
                                 <TableHeader>
                                     <TableRow>
                                         <TableHead>Código OT</TableHead>
-                                        <TableHead>Coste Total</TableHead>
+                                        <TableHead>Coste Total (c/IVA)</TableHead>
                                         <TableHead>Items</TableHead>
                                         <TableHead>Proveedores</TableHead>
                                         <TableHead>Materiales</TableHead>

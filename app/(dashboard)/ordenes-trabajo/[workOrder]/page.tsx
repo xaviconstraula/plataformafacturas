@@ -48,7 +48,8 @@ async function getWorkOrderDetails(workOrderCode: string) {
     }
 
     // Calculate summary statistics
-    const totalCost = items.reduce((sum, item) => sum + item.totalPrice.toNumber(), 0)
+    const totalCostBeforeIva = items.reduce((sum, item) => sum + item.totalPrice.toNumber(), 0)
+    const totalCost = totalCostBeforeIva * 1.21 // Add 21% IVA
     const totalQuantity = items.reduce((sum, item) => sum + item.quantity.toNumber(), 0)
     const uniqueProviders = [...new Set(items.map(item => item.invoice.provider.name))]
     const uniqueMaterials = [...new Set(items.map(item => item.material.name))]
@@ -70,7 +71,7 @@ async function getWorkOrderDetails(workOrderCode: string) {
             }
         }
         acc[providerId].items.push(item)
-        acc[providerId].totalCost += item.totalPrice.toNumber()
+        acc[providerId].totalCost += item.totalPrice.toNumber() * 1.21 // Add 21% IVA
         acc[providerId].totalQuantity += item.quantity.toNumber()
         return acc
     }, {} as Record<string, { provider: Provider, items: InvoiceItemWithDetails[], totalCost: number, totalQuantity: number }>)
@@ -88,7 +89,7 @@ async function getWorkOrderDetails(workOrderCode: string) {
             }
         }
         acc[materialId].items.push(item)
-        acc[materialId].totalCost += item.totalPrice.toNumber()
+        acc[materialId].totalCost += item.totalPrice.toNumber() * 1.21 // Add 21% IVA
         acc[materialId].totalQuantity += item.quantity.toNumber()
         acc[materialId].uniqueProviders.add(item.invoice.provider.name)
         return acc
@@ -106,7 +107,7 @@ async function getWorkOrderDetails(workOrderCode: string) {
             }
         }
         acc[monthKey].items.push(item)
-        acc[monthKey].totalCost += item.totalPrice.toNumber()
+        acc[monthKey].totalCost += item.totalPrice.toNumber() * 1.21 // Add 21% IVA
         acc[monthKey].totalQuantity += item.quantity.toNumber()
         return acc
     }, {} as Record<string, { month: string, items: InvoiceItemWithDetails[], totalCost: number, totalQuantity: number }>)
@@ -116,6 +117,7 @@ async function getWorkOrderDetails(workOrderCode: string) {
         items,
         summary: {
             totalCost,
+            totalCostBeforeIva,
             totalQuantity,
             itemCount: items.length,
             providerCount: uniqueProviders.length,
@@ -163,7 +165,7 @@ export default async function WorkOrderDetailPage({ params }: PageProps) {
                         <div className="flex items-center gap-3">
                             <DollarSignIcon className="h-5 w-5 text-muted-foreground" />
                             <div>
-                                <p className="text-sm font-medium text-muted-foreground">Coste Total</p>
+                                <p className="text-sm font-medium text-muted-foreground">Coste Total (c/IVA)</p>
                                 <p className="text-2xl font-bold">{formatCurrency(data.summary.totalCost)}</p>
                             </div>
                         </div>
@@ -200,6 +202,38 @@ export default async function WorkOrderDetailPage({ params }: PageProps) {
                                 {data.summary.dateRange.earliest.getTime() !== data.summary.dateRange.latest.getTime() && (
                                     <p className="text-xs text-muted-foreground">hasta {formatDate(data.summary.dateRange.latest)}</p>
                                 )}
+                            </div>
+                        </div>
+                    </div>
+                </CardContent>
+            </Card>
+
+            {/* IVA Breakdown */}
+            <Card>
+                <CardHeader>
+                    <CardTitle>Desglose de Costes</CardTitle>
+                    <CardDescription>
+                        Breakdown detallado de costes con IVA incluido
+                    </CardDescription>
+                </CardHeader>
+                <CardContent>
+                    <div className="grid gap-4 md:grid-cols-3">
+                        <div className="rounded-lg border p-4">
+                            <div className="flex justify-between">
+                                <span className="text-sm font-medium text-muted-foreground">Base Imponible:</span>
+                                <span className="font-medium">{formatCurrency(data.summary.totalCostBeforeIva)}</span>
+                            </div>
+                        </div>
+                        <div className="rounded-lg border p-4">
+                            <div className="flex justify-between">
+                                <span className="text-sm font-medium text-muted-foreground">IVA (21%):</span>
+                                <span className="font-medium">{formatCurrency(data.summary.totalCostBeforeIva * 0.21)}</span>
+                            </div>
+                        </div>
+                        <div className="rounded-lg border p-4 bg-primary/5">
+                            <div className="flex justify-between">
+                                <span className="text-sm font-bold">Total con IVA:</span>
+                                <span className="font-bold text-lg">{formatCurrency(data.summary.totalCost)}</span>
                             </div>
                         </div>
                     </div>
@@ -247,7 +281,7 @@ export default async function WorkOrderDetailPage({ params }: PageProps) {
                                                         <TableHead>Fecha</TableHead>
                                                         <TableHead>Cantidad</TableHead>
                                                         <TableHead>Precio Unit.</TableHead>
-                                                        <TableHead>Total</TableHead>
+                                                        <TableHead>Total (c/IVA)</TableHead>
                                                         <TableHead>Factura</TableHead>
                                                     </TableRow>
                                                 </TableHeader>
@@ -258,7 +292,7 @@ export default async function WorkOrderDetailPage({ params }: PageProps) {
                                                             <TableCell>{formatDate(item.itemDate)}</TableCell>
                                                             <TableCell>{item.quantity.toNumber().toLocaleString()}</TableCell>
                                                             <TableCell>{formatCurrency(item.unitPrice.toNumber())}</TableCell>
-                                                            <TableCell className="font-semibold">{formatCurrency(item.totalPrice.toNumber())}</TableCell>
+                                                            <TableCell className="font-semibold">{formatCurrency(item.totalPrice.toNumber() * 1.21)}</TableCell>
                                                             <TableCell>
                                                                 <Link
                                                                     href={`/facturas/${item.invoice.id}`}
@@ -315,7 +349,7 @@ export default async function WorkOrderDetailPage({ params }: PageProps) {
                                                         <TableHead>Fecha</TableHead>
                                                         <TableHead>Cantidad</TableHead>
                                                         <TableHead>Precio Unit.</TableHead>
-                                                        <TableHead>Total</TableHead>
+                                                        <TableHead>Total (c/IVA)</TableHead>
                                                         <TableHead>Factura</TableHead>
                                                     </TableRow>
                                                 </TableHeader>
@@ -326,7 +360,7 @@ export default async function WorkOrderDetailPage({ params }: PageProps) {
                                                             <TableCell>{formatDate(item.itemDate)}</TableCell>
                                                             <TableCell>{item.quantity.toNumber().toLocaleString()}</TableCell>
                                                             <TableCell>{formatCurrency(item.unitPrice.toNumber())}</TableCell>
-                                                            <TableCell className="font-semibold">{formatCurrency(item.totalPrice.toNumber())}</TableCell>
+                                                            <TableCell className="font-semibold">{formatCurrency(item.totalPrice.toNumber() * 1.21)}</TableCell>
                                                             <TableCell>
                                                                 <Link
                                                                     href={`/facturas/${item.invoice.id}`}
@@ -383,7 +417,7 @@ export default async function WorkOrderDetailPage({ params }: PageProps) {
                                                         <TableHead>Proveedor</TableHead>
                                                         <TableHead>Fecha</TableHead>
                                                         <TableHead>Cantidad</TableHead>
-                                                        <TableHead>Total</TableHead>
+                                                        <TableHead>Total (c/IVA)</TableHead>
                                                     </TableRow>
                                                 </TableHeader>
                                                 <TableBody>
@@ -393,7 +427,7 @@ export default async function WorkOrderDetailPage({ params }: PageProps) {
                                                             <TableCell>{item.invoice.provider.name}</TableCell>
                                                             <TableCell>{formatDate(item.itemDate)}</TableCell>
                                                             <TableCell>{item.quantity.toNumber().toLocaleString()}</TableCell>
-                                                            <TableCell className="font-semibold">{formatCurrency(item.totalPrice.toNumber())}</TableCell>
+                                                            <TableCell className="font-semibold">{formatCurrency(item.totalPrice.toNumber() * 1.21)}</TableCell>
                                                         </TableRow>
                                                     ))}
                                                 </TableBody>
@@ -423,7 +457,7 @@ export default async function WorkOrderDetailPage({ params }: PageProps) {
                                         <TableHead>Proveedor</TableHead>
                                         <TableHead>Cantidad</TableHead>
                                         <TableHead>Precio Unit.</TableHead>
-                                        <TableHead>Total</TableHead>
+                                        <TableHead>Total (c/IVA)</TableHead>
                                         <TableHead>Factura</TableHead>
                                     </TableRow>
                                 </TableHeader>
@@ -435,7 +469,7 @@ export default async function WorkOrderDetailPage({ params }: PageProps) {
                                             <TableCell>{item.invoice.provider.name}</TableCell>
                                             <TableCell>{item.quantity.toNumber().toLocaleString()}</TableCell>
                                             <TableCell>{formatCurrency(item.unitPrice.toNumber())}</TableCell>
-                                            <TableCell className="font-semibold">{formatCurrency(item.totalPrice.toNumber())}</TableCell>
+                                            <TableCell className="font-semibold">{formatCurrency(item.totalPrice.toNumber() * 1.21)}</TableCell>
                                             <TableCell>
                                                 <Link
                                                     href={`/facturas/${item.invoice.id}`}

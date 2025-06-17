@@ -9,6 +9,7 @@ interface InvoiceItem {
   id: string
   quantity: number
   unitPrice: number
+  totalPrice: number
   workOrder?: string | null
   material: {
     id: string
@@ -22,6 +23,7 @@ interface InvoiceData {
   id: string
   issueDate: Date
   status: string
+  totalAmount: number
   provider: {
     id: string
     name: string
@@ -38,6 +40,11 @@ interface InvoiceDetailsProps {
 }
 
 export function InvoiceDetails({ invoice }: InvoiceDetailsProps) {
+  // Calculate totals
+  const subtotal = invoice.items.reduce((sum, item) => sum + item.totalPrice, 0)
+  const ivaAmount = subtotal * 0.21 // 21% IVA
+  const totalWithIva = subtotal + ivaAmount
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -100,6 +107,7 @@ export function InvoiceDetails({ invoice }: InvoiceDetailsProps) {
                     <th className="p-3 text-left text-sm font-medium">OT/CECO</th>
                     <th className="p-3 text-right text-sm font-medium">Cantidad</th>
                     <th className="p-3 text-right text-sm font-medium">Precio Unitario</th>
+                    <th className="p-3 text-right text-sm font-medium">Total</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -113,10 +121,40 @@ export function InvoiceDetails({ invoice }: InvoiceDetailsProps) {
                       <td className="p-3 text-left font-mono text-xs">{item.workOrder || '-'}</td>
                       <td className="p-3 text-right">{item.quantity}</td>
                       <td className="p-3 text-right">{formatCurrency(item.unitPrice)}</td>
+                      <td className="p-3 text-right font-medium">{formatCurrency(item.totalPrice)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+            </div>
+          </div>
+
+          <Separator />
+
+          {/* IVA Breakdown */}
+          <div>
+            <h3 className="mb-3 text-sm font-medium text-muted-foreground">Desglose de Factura</h3>
+            <div className="rounded-lg border p-4 space-y-3">
+              <div className="flex justify-between">
+                <span className="text-sm">Base Imponible:</span>
+                <span className="font-medium">{formatCurrency(subtotal)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-sm">IVA (21%):</span>
+                <span className="font-medium">{formatCurrency(ivaAmount)}</span>
+              </div>
+              <Separator />
+              <div className="flex justify-between text-lg font-bold">
+                <span>Total con IVA:</span>
+                <span>{formatCurrency(totalWithIva)}</span>
+              </div>
+              {/* Show actual invoice total if different (for verification) */}
+              {Math.abs(totalWithIva - invoice.totalAmount) > 0.01 && (
+                <div className="flex justify-between text-sm text-muted-foreground">
+                  <span>Total Factura:</span>
+                  <span>{formatCurrency(invoice.totalAmount)}</span>
+                </div>
+              )}
             </div>
           </div>
         </CardContent>

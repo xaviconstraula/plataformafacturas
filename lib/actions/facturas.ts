@@ -256,6 +256,7 @@ export async function getInvoiceDetails(id: string) {
             id: invoice.id,
             issueDate: invoice.issueDate,
             status: invoice.status,
+            totalAmount: invoice.totalAmount.toNumber(),
             provider: {
                 id: invoice.provider.id,
                 name: invoice.provider.name,
@@ -268,6 +269,7 @@ export async function getInvoiceDetails(id: string) {
                 id: item.id,
                 quantity: item.quantity.toNumber(),
                 unitPrice: item.unitPrice.toNumber(),
+                totalPrice: item.totalPrice.toNumber(),
                 workOrder: item.workOrder,
                 material: {
                     id: item.material.id,

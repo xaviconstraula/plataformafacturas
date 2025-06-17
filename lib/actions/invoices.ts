@@ -171,7 +171,7 @@ NUMBER ACCURACY: Distinguish 5 vs 3 (flat vs curved top), 8 vs 6 (complete vs op
 
 PROVIDER (Invoice Issuer - NOT the client):
 - Find company at TOP of invoice, labeled "Vendedor/Proveedor/Emisor"
-- Extract: name, tax ID (CIF/NIF/DNI format: Letter+8digits or 8digits+letter), email, phone, address
+- Extract: name, tax ID (CIF/NIF/DNI format: Letter+8digits or 8digits+letter), email, phone (the first one present), address
 - Tax ID is CRITICAL for deduplication - scan entire document
 
 INVOICE: Extract code, issue date (ISO), total amount
@@ -227,7 +227,6 @@ JSON format:
         }).withResponse();
 
         const content = apiCallResponse.data.choices[0].message.content;
-        console.log(apiCallResponse);
         const responseHeaders = apiCallResponse.response.headers;
 
         const rateLimitHeaders: OpenAIRateLimitHeaders = {

@@ -78,7 +78,7 @@ export const helpContent = {
                         <CardTitle className="text-base">Flujo Básico</CardTitle>
                     </CardHeader>
                     <CardContent className="text-sm space-y-2">
-                        <div>• Arrastra múltiples archivos PDF o haz clic para seleccionar</div>
+                        <div>• Selecciona o arrastra múltiples archivos PDF o haz clic para seleccionar</div>
                         <div>• El sistema extrae automáticamente toda la información</div>
                         <div>• Revisa y corrige antes de guardar</div>
                     </CardContent>
