@@ -246,6 +246,7 @@ export async function getMaterialAnalytics(params: GetMaterialAnalyticsParams = 
 export interface GetSupplierAnalyticsParams {
     supplierId?: string;
     supplierType?: string;
+    supplierCif?: string;
     workOrder?: string;
     materialCategory?: string;
     startDate?: Date;
@@ -257,6 +258,7 @@ export async function getSupplierAnalytics(params: GetSupplierAnalyticsParams = 
     const where: Prisma.InvoiceWhereInput = {
         ...(params.supplierId ? { providerId: params.supplierId } : {}),
         ...(params.supplierType ? { provider: { type: params.supplierType as 'MATERIAL_SUPPLIER' | 'MACHINERY_RENTAL' } } : {}),
+        ...(params.supplierCif ? { provider: { cif: { contains: params.supplierCif, mode: 'insensitive' } } } : {}),
         ...(params.workOrder ? { items: { some: { workOrder: { contains: processWorkOrderSearch(params.workOrder), mode: 'insensitive' } } } } : {}),
         ...(params.materialCategory ? { items: { some: { material: { category: { contains: params.materialCategory, mode: 'insensitive' } } } } } : {}),
         ...(params.startDate || params.endDate ? {

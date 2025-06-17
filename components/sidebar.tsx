@@ -13,6 +13,8 @@ import {
   XIcon,
   Settings,
   BarChart3Icon,
+  ClipboardListIcon,
+  HelpCircleIcon,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useState } from "react"
@@ -43,11 +45,20 @@ const navItems = [
     href: "/materiales",
     icon: PackageIcon,
   },
-
+  {
+    name: "Órdenes de Trabajo",
+    href: "/ordenes-trabajo",
+    icon: ClipboardListIcon,
+  },
   {
     name: "Alertas",
     href: "/alertas",
     icon: AlertTriangleIcon,
+  },
+  {
+    name: "Ayuda",
+    href: "/ayuda",
+    icon: HelpCircleIcon,
   }
 ]
 

@@ -1,10 +1,11 @@
 "use client"
 
 import { useState, useEffect } from "react"
+import Link from "next/link"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { AlertTriangleIcon, CheckIcon, XIcon } from "lucide-react"
+import { AlertTriangleIcon, CheckIcon, XIcon, EyeIcon } from "lucide-react"
 import { formatCurrency, formatPercentage } from "@/lib/utils"
 import { toast } from "sonner"
 import { updateAlertStatus } from "@/lib/actions/alerts"
@@ -124,30 +125,44 @@ export function AlertList({ initialAlerts }: AlertListProps) {
                 </div>
               </div>
 
-              {alert.status === "PENDING" && (
-                <div className="flex justify-end gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="gap-1 border-green-200 bg-green-100 text-green-700 hover:bg-green-200 hover:text-green-800"
-                    onClick={() => handleApprove(alert.id)}
-                    disabled={isUpdating === alert.id}
-                  >
-                    <CheckIcon className="h-4 w-4" />
-                    Aprobar
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="gap-1 border-red-200 bg-red-100 text-red-700 hover:bg-red-200 hover:text-red-800"
-                    onClick={() => handleReject(alert.id)}
-                    disabled={isUpdating === alert.id}
-                  >
-                    <XIcon className="h-4 w-4" />
-                    Rechazar
-                  </Button>
-                </div>
-              )}
+              <div className="flex justify-between items-center">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-1"
+                  asChild
+                >
+                  <Link href={`/alertas/${alert.id}`}>
+                    <EyeIcon className="h-4 w-4" />
+                    Ver Detalles
+                  </Link>
+                </Button>
+
+                {alert.status === "PENDING" && (
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="gap-1 border-green-200 bg-green-100 text-green-700 hover:bg-green-200 hover:text-green-800"
+                      onClick={() => handleApprove(alert.id)}
+                      disabled={isUpdating === alert.id}
+                    >
+                      <CheckIcon className="h-4 w-4" />
+                      Aprobar
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="gap-1 border-red-200 bg-red-100 text-red-700 hover:bg-red-200 hover:text-red-800"
+                      onClick={() => handleReject(alert.id)}
+                      disabled={isUpdating === alert.id}
+                    >
+                      <XIcon className="h-4 w-4" />
+                      Rechazar
+                    </Button>
+                  </div>
+                )}
+              </div>
             </div>
           </CardContent>
         </Card>

@@ -2,6 +2,7 @@ import { Suspense } from "react"
 import Link from "next/link"
 import { AnalyticsDashboard } from "@/components/analytics-dashboard"
 import { MaterialsBySupplier } from "@/components/materials-by-supplier"
+import { HelpTooltip, helpContent } from "@/components/help-tooltip"
 import { getMaterialAnalytics, getSupplierAnalytics } from "@/lib/actions/analytics"
 import { getMaterialsBySupplierType } from "@/lib/actions/dashboard"
 import { prisma } from "@/lib/db"
@@ -52,9 +53,13 @@ export default async function AnalyticsPage() {
                     <h1 className="text-3xl font-bold">Analíticas</h1>
                     <p className="text-muted-foreground">
                         Resumen general y tendencias de compra.
-
                     </p>
                 </div>
+                <HelpTooltip
+                    title={helpContent.analytics.title}
+                    description={helpContent.analytics.description}
+                    content={helpContent.analytics.content}
+                />
             </div>
 
             <Suspense fallback={<div className="h-96 rounded-lg bg-muted animate-pulse" />}>

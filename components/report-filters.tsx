@@ -3,6 +3,7 @@
 import { useState } from "react"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { FilterIcon } from "lucide-react"
 
 export function ReportFilters() {
@@ -37,19 +38,12 @@ export function ReportFilters() {
           <label htmlFor="material" className="text-sm font-medium">
             Material
           </label>
-          <Select onValueChange={(value) => setMaterial(value)}>
-            <SelectTrigger id="material">
-              <SelectValue placeholder="Todos los materiales" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">Todos los materiales</SelectItem>
-              <SelectItem value="acero">Acero Inoxidable</SelectItem>
-              <SelectItem value="aluminio">Aluminio</SelectItem>
-              <SelectItem value="polietileno">Polietileno</SelectItem>
-              <SelectItem value="madera">Madera de Pino</SelectItem>
-              <SelectItem value="vidrio">Vidrio Templado</SelectItem>
-            </SelectContent>
-          </Select>
+          <Input
+            id="material"
+            placeholder="Buscar material..."
+            value={material === "all" ? "" : material}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setMaterial(e.target.value || "all")}
+          />
         </div>
 
         <div className="space-y-2">

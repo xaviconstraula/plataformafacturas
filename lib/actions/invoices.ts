@@ -90,6 +90,26 @@ function parseOpenAIResetTime(timeStr: string | null | undefined): number {
     return totalMilliseconds > 0 ? totalMilliseconds : 60000; // Fallback to 60s if parsing fails or yields 0
 }
 
+// Function to check if a provider should be ignored
+function isBlockedProvider(providerName: string): boolean {
+    const normalizedName = providerName
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '') // Remove accents
+        .replace(/\s+/g, ''); // Remove spaces
+
+    const blockedProviders = [
+        'constraula',
+        'sorigué',
+        'sorigüe',
+        'soriguè',
+        'soriguê',
+        'sorigui'
+    ].map(name => name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ''));
+
+    return blockedProviders.some(blocked => normalizedName.includes(blocked));
+}
+
 async function callPdfExtractAPI(file: File): Promise<CallPdfExtractAPIResponse> {
     try {
         console.log(`Starting PDF extraction for file: ${file.name}`);
@@ -101,7 +121,7 @@ async function callPdfExtractAPI(file: File): Promise<CallPdfExtractAPIResponse>
             pages = await pdfToPng(arrayBuffer, {
                 disableFontFace: true,
                 useSystemFonts: false,
-                viewportScale: 3, // Balance between resolution and full page coverage
+                viewportScale: 4, // Balance between resolution and full page coverage
                 strictPagesToProcess: false,
                 verbosityLevel: 0,
             });
@@ -145,105 +165,48 @@ async function callPdfExtractAPI(file: File): Promise<CallPdfExtractAPIResponse>
             return { extractedData: null, error: "No valid page images could be prepared for OpenAI.", rateLimitHeaders: undefined };
         }
 
-        const promptText = `Analyze these invoice images, which collectively represent a single invoice, with extreme care and extract the following information in a structured way.
-Consolidate all information across all provided images into a single, coherent invoice structure.
-The invoice-level details (provider, invoice code, date, total amount) may appear on any page, but should be extracted once for the entire invoice.
-Aggregate all line items from all pages into a single list.
-IMPORTANT: Only extract data that is clearly visible on the invoice. Do NOT guess or infer information. If an optional field is not present, use null. Extract all text, especially codes and numbers, EXACTLY as it appears.
+        const promptText = `Extract invoice data from these images (consolidate all pages into a single invoice). Only extract visible data, use null for missing optional fields.
 
-CRITICAL NOTE FOR NUMBER RECOGNITION:
-- Pay special attention to distinguishing between similar-looking numbers, especially:
-  * The number "5" vs "3" - Look for the flat top of "5" vs the curved top of "3"
-  * The number "8" vs "6" - Note the complete shape of "8" vs the open top of "6"
-  * The number "0" vs "6" - Look for the complete oval of "0" vs the curved shape of "6"
-- For material codes and quantities, verify each digit multiple times
-- If a number is unclear or ambiguous, look for context clues such as:
-  * Matching totals (quantity x unit price should equal total price)
-  * Consistent formatting with other similar numbers in the document
-  * Related entries or subtotals that could validate the number
+NUMBER ACCURACY: Distinguish 5 vs 3 (flat vs curved top), 8 vs 6 (complete vs open), 0 vs 6 (oval vs curved). Verify quantities and codes carefully.
 
-1. Provider Information (invoice issuer):
-   - Company name
-   - Provider Tax ID: Extract any official tax identification number found (e.g., VAT ID, Company Registration Number, etc.).
-     If a Spanish CIF/NIF/DNI is present, ensure it matches these formats:
-       * CIF: Letter + 8 digits (e.g., B12345678)
-       * NIF: 8 digits + letter (e.g., 12345678A)
-       * DNI: 8 digits + letter (e.g., 12345678Z)
-     If no Spanish-formatted ID is found, provide the most relevant tax identifier present on the invoice for the \`cif\` field. If no tax ID is found, use null for cif.
-   - Provider email: Extract the provider's primary email address if available. If not visible, use null.
-   - Provider phone: Extract the provider's primary phone number if available. If not visible, use null.
-2. Invoice Details:
-   - Unique invoice code
-   - Issue date (must be a valid date)
-   - Total amount (must be a decimal number with 2 decimal places)
-3. Line Items (IMPORTANT: Extract EVERY line item listed across all provided pages. Each distinct line entry on the invoice should be a separate item in your response, even if the material name appears to be the same as a previous line. Pay close attention to quantities, prices, and any subtle variations that differentiate them):
-   For each line item extracted:
-   - Material name/identifier: IMPORTANT RULES FOR MATERIAL NAME EXTRACTION:
-     * If both a descriptive name AND a code are present, use the descriptive name as materialName
-     * If only a code is present (e.g., "21PA0010771"), use the code as materialName but prefix it with "CODE: " (e.g., "CODE: 21PA0010771")
-   - isMaterial: boolean - Set to true if the item is a physical material or product. Set to false if it's a service, tax, fee, or other non-material charge (e.g., "Ecotasa", "Transporte", "Handling Fee").
-   - Quantity (must be a decimal number with 2 decimal places, extracted exactly)
-   - Unit price (must be a decimal number with 2 decimal places, extracted exactly)
-   - Total price per item (must be quantity * unit price, extracted exactly. If not present, calculate it carefully.)
-   - Item date if different from invoice date (in ISO format). If not visible, assume same as invoice date and omit.
-   - Work Order/CECO: CRITICAL - Follow these rules to identify the correct Work Order. Your main goal is to find the project or cost center code that contains "OT" (Orden de Trabajo).
+PROVIDER (Invoice Issuer - NOT the client):
+- Find company at TOP of invoice, labeled "Vendedor/Proveedor/Emisor"
+- Extract: name, tax ID (CIF/NIF/DNI format: Letter+8digits or 8digits+letter), email, phone, address
+- Tax ID is CRITICAL for deduplication - scan entire document
 
-     1.  **Identify the Source:**
-         *   Look for a global work order reference at the top of the invoice, often labeled "Obra", "Proyecto", or "Work Order". This global reference applies to all items.
-         *   If no global reference is found, look for per-item references labeled "OT" or "CECO".
+INVOICE: Extract code, issue date (ISO), total amount
 
-     2.  **Validation Rules (Strict):**
-         *   A valid work order **MUST** contain the letters "OT".
-         *   **DO NOT** use order numbers ("Pedidos") as the work order. These often start with 'P' (e.g., "Pedido 21P0015614") and are not the correct code.
-         *   Ignore any other codes, references, or text that do not explicitly contain "OT".
+LINE ITEMS (extract ALL items from all pages):
+- materialName: Use descriptive name if available, otherwise "CODE: [code]"
+- isMaterial: true for physical items, false for services/fees/taxes
+- quantity, unitPrice, totalPrice (2 decimals)
+- itemDate: ISO format if different from invoice date
+- workOrder: Find simple 3-5 digit OT number (e.g., "Obra: 4077" → "OT-4077"). Avoid complex refs like "38600-OT-4077-1427". Apply globally to all items.
+- description, lineNumber
 
-     3.  **Extraction and Formatting:**
-         *   If a valid global work order containing "OT" is found, use it for ALL line items.
-         *   Extract only the relevant code part. For example, from "Obra: OT 6118 ESCOLA EINA", the code is "OT 6118".
-         *   **Format the final code by replacing any spaces with a hyphen (-).** For example, "OT 6118" MUST become "OT-6118".
-         *   If no reference containing "OT" can be found anywhere, use \`null\`.
-
-     To summarize: Your only target is a code containing "OT". Find it, format it (e.g., "OT-6118"), and apply it. Ignore everything else, especially "Pedido" codes.
-   - Description: Extract any additional description text specific to this line item (different from the material name)
-   - Line Number: If line items are numbered on the invoice, extract the line number
-   Note: If the same material appears multiple times with different dates or prices,
-   create separate line items for each occurrence.
-
-Verification Step: If possible, after extracting all items, mentally sum their total prices. This sum should ideally be close to the overall invoice 'totalAmount'. If there's a large discrepancy, please double-check item extractions. If the invoice explicitly states a grand total that differs from the sum of items, prioritize the explicitly stated grand total for the 'totalAmount' field.
-
-Database Schema Requirements:
-- Provider must have a tax ID (\`cif\`) extracted if visible. This is a critical field. Prioritize Spanish CIF/NIF/DNI if available; otherwise, use any other official provider tax identifier found. If no Tax ID is found on the invoice, the \`cif\` field in the JSON should be null.
-- Include provider email and phone if these are present on the invoice, otherwise use null.
-- Invoice must have a unique invoice code and valid issue date.
-- Each line item represents an InvoiceItem linked to a Material.
-- All monetary values must be Decimal(10,2).
-- All quantities must be Decimal(10,2).
-
-Format the response as valid JSON exactly like this:
+JSON format:
 {
-  "invoiceCode": "string - unique invoice identifier - usually "Nº de documento",
+  "invoiceCode": "string",
   "provider": {
-    "name": "string - company name",
-    "cif": "string | null - provider tax ID (any official format, Spanish CIF/NIF/DNI preferred if available, null if not found)",
-    "email": "string | null - optional provider email extracted from invoice, null if not found",
-    "phone": "string | null - optional provider phone extracted from invoice, null if not found",
-    "address": "string | null - optional address, null if not found"
+    "name": "string",
+    "cif": "string|null",
+    "email": "string|null", 
+    "phone": "string|null",
+    "address": "string|null"
   },
-  "issueDate": "string - ISO date format",
-  "totalAmount": "number - total invoice amount with 2 decimal places",
-  "items": [
-    {
-      "materialName": "string - the exact material name as it appears in the invoice",
-      "isMaterial": "boolean - true if it's a material, false otherwise (e.g., for fees, taxes like Ecotasa, transport)",
-      "quantity": "number - quantity with 2 decimal places",
-      "unitPrice": "number - price per unit with 2 decimal places",
-      "totalPrice": "number - quantity * unitPrice with 2 decimal places",
-      "itemDate": "string | null - optional ISO date format if different from invoice date, null if not specified or same as invoice date",
-      "workOrder": "string | null - The FULL alphanumeric work order (e.g., '38600-OT-4077-1426'), null if not found",
-      "description": "string | null - additional description text for this line item, null if not present",
-      "lineNumber": "number | null - line number if items are numbered on the invoice, null if not numbered"
-    }
-  ]
+  "issueDate": "string",
+  "totalAmount": "number",
+  "items": [{
+    "materialName": "string",
+    "isMaterial": "boolean",
+    "quantity": "number",
+    "unitPrice": "number", 
+    "totalPrice": "number",
+    "itemDate": "string|null",
+    "workOrder": "string|null",
+    "description": "string|null",
+    "lineNumber": "number|null"
+  }]
 }`;
 
         console.log(`Calling OpenAI API for file: ${file.name} with ${imageUrls.length} page images.`);
@@ -264,6 +227,7 @@ Format the response as valid JSON exactly like this:
         }).withResponse();
 
         const content = apiCallResponse.data.choices[0].message.content;
+        console.log(apiCallResponse);
         const responseHeaders = apiCallResponse.response.headers;
 
         const rateLimitHeaders: OpenAIRateLimitHeaders = {
@@ -314,11 +278,49 @@ Format the response as valid JSON exactly like this:
 
 async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData: ExtractedPdfData['provider'], providerType: 'MATERIAL_SUPPLIER' | 'MACHINERY_RENTAL' = 'MATERIAL_SUPPLIER'): Promise<Provider> {
     const { cif, name, email, phone, address } = providerData;
+
+    // Check if provider is blocked
+    if (isBlockedProvider(name)) {
+        throw new Error(`Provider '${name}' is blocked and cannot be processed.`);
+    }
+
+    // Ensure CIF is available for provider unification
+    if (!cif) {
+        throw new Error(`Provider '${name}' does not have a CIF. All providers must have a CIF for proper unification.`);
+    }
+
+    // First check by CIF
     let provider = await tx.provider.findUnique({
         where: { cif },
     });
 
+    // If no provider found by CIF, check by phone number (duplicate detection)
+    if (!provider && phone) {
+        provider = await tx.provider.findFirst({
+            where: { phone: phone },
+        });
+
+        if (provider) {
+            console.log(`Found existing provider by phone number: ${phone}. Updating CIF from ${provider.cif} to ${cif}`);
+            // Update the existing provider with the new CIF and other data
+            provider = await tx.provider.update({
+                where: { id: provider.id },
+                data: {
+                    cif, // Update CIF to the new one
+                    name, // Update name to keep it current
+                    email: email || provider.email,
+                    phone: phone || provider.phone,
+                    address: address || provider.address,
+                    type: providerType,
+                }
+            });
+            console.log(`Updated existing provider found by phone: ${provider.name} (New CIF: ${cif})`);
+            return provider;
+        }
+    }
+
     if (!provider) {
+        // Create new provider
         provider = await tx.provider.create({
             data: {
                 cif,
@@ -329,17 +331,20 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
                 type: providerType,
             },
         });
+        console.log(`Created new provider: ${name} (CIF: ${cif})`);
     } else {
+        // Update existing provider found by CIF with the most recent data
         provider = await tx.provider.update({
             where: { cif },
             data: {
-                name,
-                email: email || provider.email,
-                phone: phone || provider.phone,
-                address: address || provider.address,
+                name, // Always update name to keep it current
+                email: email || provider.email, // Keep new email if provided, otherwise keep existing
+                phone: phone || provider.phone, // Keep new phone if provided, otherwise keep existing
+                address: address || provider.address, // Keep new address if provided, otherwise keep existing
                 type: providerType, // Update type if needed
             }
         });
+        console.log(`Updated existing provider with CIF ${cif}: ${provider.name} -> ${name}`);
     }
     return provider;
 }
@@ -923,15 +928,20 @@ export interface ManualInvoiceData {
 export async function createManualInvoice(data: ManualInvoiceData): Promise<CreateInvoiceResult> {
     try {
         const result = await prisma.$transaction(async (tx) => {
-            // 1. Find or create provider
+            // 1. Validate provider data
+            if (!data.provider.cif) {
+                throw new Error(`Provider '${data.provider.name}' must have a CIF for manual invoice creation.`);
+            }
+
+            // 2. Find or create provider
             const provider = await findOrCreateProviderTx(tx, {
                 name: data.provider.name,
-                cif: data.provider.cif || `MANUAL-${Date.now()}`, // Ensure CIF is not null
+                cif: data.provider.cif,
                 email: data.provider.email || undefined,
                 phone: data.provider.phone || undefined,
             });
 
-            // 2. Check if invoice already exists
+            // 3. Check if invoice already exists
             const existingInvoice = await tx.invoice.findFirst({
                 where: {
                     invoiceCode: data.invoiceCode,
@@ -946,7 +956,7 @@ export async function createManualInvoice(data: ManualInvoiceData): Promise<Crea
                 };
             }
 
-            // 3. Create invoice
+            // 4. Create invoice
             const invoice = await tx.invoice.create({
                 data: {
                     invoiceCode: data.invoiceCode,
@@ -960,7 +970,7 @@ export async function createManualInvoice(data: ManualInvoiceData): Promise<Crea
             let alertsCounter = 0;
             const currentInvoiceIssueDate = new Date(data.issueDate);
 
-            // 4. Process each item
+            // 5. Process each item
             for (const itemData of data.items) {
                 if (!itemData.materialName) {
                     console.warn(`Skipping item due to missing material name in manual invoice ${invoice.invoiceCode}`);

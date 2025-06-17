@@ -53,6 +53,7 @@ export function MaterialAnalyticsFilters({
     const [category, setCategory] = useState(searchParams.get("category") || "")
     const [workOrder, setWorkOrder] = useState(searchParams.get("workOrder") || "")
     const [supplierId, setSupplierId] = useState(searchParams.get("supplierId") || "")
+    const [supplierCif, setSupplierCif] = useState(searchParams.get("supplierCif") || "")
     const [sortBy, setSortBy] = useState(searchParams.get("sortBy") || "cost")
     const [sortOrder, setSortOrder] = useState(searchParams.get("sortOrder") || "desc")
 
@@ -74,6 +75,7 @@ export function MaterialAnalyticsFilters({
 
     const debouncedMaterialSearch = useDebounce(materialSearch, 300)
     const debouncedWorkOrder = useDebounce(workOrder, 500)
+    const debouncedSupplierCif = useDebounce(supplierCif, 500)
     const debouncedMinUnitPrice = useDebounce(minUnitPrice, 500)
     const debouncedMaxUnitPrice = useDebounce(maxUnitPrice, 500)
     const debouncedMinTotalCost = useDebounce(minTotalCost, 500)
@@ -88,6 +90,7 @@ export function MaterialAnalyticsFilters({
             (category && category !== 'all') ||
             debouncedWorkOrder ||
             (supplierId && supplierId !== 'all') ||
+            debouncedSupplierCif ||
             startDate ||
             endDate ||
             debouncedMinUnitPrice ||
@@ -103,7 +106,7 @@ export function MaterialAnalyticsFilters({
             setShowFilters(true)
         }
     }, [
-        debouncedMaterialSearch, category, debouncedWorkOrder, supplierId,
+        debouncedMaterialSearch, category, debouncedWorkOrder, supplierId, debouncedSupplierCif,
         startDate, endDate, debouncedMinUnitPrice, debouncedMaxUnitPrice,
         debouncedMinTotalCost, debouncedMaxTotalCost, debouncedMinQuantity,
         debouncedMaxQuantity, showFilters
@@ -117,6 +120,7 @@ export function MaterialAnalyticsFilters({
         if (category && category !== 'all') params.set("category", category)
         if (debouncedWorkOrder) params.set("workOrder", debouncedWorkOrder)
         if (supplierId && supplierId !== 'all') params.set("supplierId", supplierId)
+        if (debouncedSupplierCif) params.set("supplierCif", debouncedSupplierCif)
         if (sortBy) params.set("sortBy", sortBy)
         if (sortOrder) params.set("sortOrder", sortOrder)
 
@@ -134,7 +138,7 @@ export function MaterialAnalyticsFilters({
 
         router.push(`/materiales?${params.toString()}`, { scroll: false })
     }, [
-        debouncedMaterialSearch, category, debouncedWorkOrder, supplierId,
+        debouncedMaterialSearch, category, debouncedWorkOrder, supplierId, debouncedSupplierCif,
         sortBy, sortOrder, startDate, endDate, debouncedMinUnitPrice,
         debouncedMaxUnitPrice, debouncedMinTotalCost, debouncedMaxTotalCost,
         debouncedMinQuantity, debouncedMaxQuantity, router
@@ -149,6 +153,7 @@ export function MaterialAnalyticsFilters({
         setCategory("")
         setWorkOrder("")
         setSupplierId("")
+        setSupplierCif("")
         setSortBy("cost")
         setSortOrder("desc")
         setStartDate("")
@@ -167,6 +172,7 @@ export function MaterialAnalyticsFilters({
         category && category !== 'all' ? category : null,
         debouncedWorkOrder,
         supplierId && supplierId !== 'all' ? supplierId : null,
+        debouncedSupplierCif,
         startDate,
         endDate,
         debouncedMinUnitPrice,
@@ -182,6 +188,7 @@ export function MaterialAnalyticsFilters({
         category && category !== 'all' ? category : null,
         debouncedWorkOrder,
         supplierId && supplierId !== 'all' ? supplierId : null,
+        debouncedSupplierCif,
         startDate,
         endDate
     ].filter(Boolean).length
@@ -288,6 +295,16 @@ export function MaterialAnalyticsFilters({
                                             ))}
                                         </SelectContent>
                                     </Select>
+                                </div>
+
+                                <div className="space-y-1">
+                                    <Label className="text-xs text-gray-600">CIF</Label>
+                                    <Input
+                                        placeholder="Buscar por CIF..."
+                                        className="h-8 text-sm border-gray-300 focus:border-gray-400"
+                                        value={supplierCif}
+                                        onChange={(e) => setSupplierCif(e.target.value)}
+                                    />
                                 </div>
 
                                 <div className="space-y-1">

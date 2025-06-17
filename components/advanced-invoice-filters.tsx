@@ -72,6 +72,7 @@ export function AdvancedInvoiceFilters({
     const [workOrder, setWorkOrder] = useState(searchParams.get("workOrder") || "")
     const [material, setMaterial] = useState(searchParams.get("material") || "")
     const [category, setCategory] = useState(searchParams.get("category") || "")
+    const [supplierCif, setSupplierCif] = useState(searchParams.get("supplierCif") || "")
     const [minAmount, setMinAmount] = useState(searchParams.get("minAmount") || "")
     const [maxAmount, setMaxAmount] = useState(searchParams.get("maxAmount") || "")
 
@@ -81,6 +82,7 @@ export function AdvancedInvoiceFilters({
 
     const debouncedSearchTerm = useDebounce(searchTerm, 300)
     const debouncedWorkOrder = useDebounce(workOrder, 500)
+    const debouncedSupplierCif = useDebounce(supplierCif, 500)
     const debouncedMinAmount = useDebounce(minAmount, 500)
     const debouncedMaxAmount = useDebounce(maxAmount, 500)
 
@@ -99,6 +101,7 @@ export function AdvancedInvoiceFilters({
             debouncedWorkOrder ||
             material ||
             category ||
+            debouncedSupplierCif ||
             debouncedMinAmount ||
             debouncedMaxAmount
         )
@@ -110,7 +113,7 @@ export function AdvancedInvoiceFilters({
         }
     }, [
         debouncedSearchTerm, month, quarter, year, fiscalYear, supplier,
-        debouncedWorkOrder, material, category, debouncedMinAmount, debouncedMaxAmount, showFilters
+        debouncedWorkOrder, material, category, debouncedSupplierCif, debouncedMinAmount, debouncedMaxAmount, showFilters
     ])
 
     const updateUrlParams = useCallback(() => {
@@ -128,6 +131,7 @@ export function AdvancedInvoiceFilters({
         if (debouncedWorkOrder) params.set("workOrder", debouncedWorkOrder)
         if (material && material !== 'all') params.set("material", material)
         if (category && category !== 'all') params.set("category", category)
+        if (debouncedSupplierCif) params.set("supplierCif", debouncedSupplierCif)
         if (debouncedMinAmount) params.set("minAmount", debouncedMinAmount)
         if (debouncedMaxAmount) params.set("maxAmount", debouncedMaxAmount)
 
@@ -137,7 +141,7 @@ export function AdvancedInvoiceFilters({
         router.push(`/facturas?${params.toString()}`, { scroll: false })
     }, [
         debouncedSearchTerm, month, quarter, year, fiscalYear, supplier,
-        debouncedWorkOrder, material, category, debouncedMinAmount, debouncedMaxAmount, router
+        debouncedWorkOrder, material, category, debouncedSupplierCif, debouncedMinAmount, debouncedMaxAmount, router
     ])
 
     useEffect(() => {
@@ -154,6 +158,7 @@ export function AdvancedInvoiceFilters({
         setWorkOrder("")
         setMaterial("")
         setCategory("")
+        setSupplierCif("")
         setMinAmount("")
         setMaxAmount("")
     }
@@ -201,6 +206,7 @@ export function AdvancedInvoiceFilters({
         debouncedWorkOrder,
         material && material !== 'all' ? material : null,
         category && category !== 'all' ? category : null,
+        debouncedSupplierCif,
         debouncedMinAmount,
         debouncedMaxAmount
     ].filter(Boolean).length
@@ -374,19 +380,12 @@ export function AdvancedInvoiceFilters({
 
                                 <div className="space-y-1">
                                     <Label className="text-xs text-gray-600">Material</Label>
-                                    <Select value={material} onValueChange={setMaterial}>
-                                        <SelectTrigger className="h-8 text-sm border-gray-300 focus:border-gray-400">
-                                            <SelectValue placeholder="Todos" />
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                            <SelectItem value="all">Todos</SelectItem>
-                                            {materials.map((m) => (
-                                                <SelectItem key={m.id} value={m.id}>
-                                                    {m.name} ({m.code})
-                                                </SelectItem>
-                                            ))}
-                                        </SelectContent>
-                                    </Select>
+                                    <Input
+                                        placeholder="Buscar material..."
+                                        className="h-8 text-sm border-gray-300 focus:border-gray-400"
+                                        value={material === 'all' ? '' : material}
+                                        onChange={(e) => setMaterial(e.target.value || 'all')}
+                                    />
                                 </div>
                             </div>
 
@@ -423,6 +422,16 @@ export function AdvancedInvoiceFilters({
                                                 className="h-8 text-sm border-gray-300 focus:border-gray-400"
                                                 value={workOrder}
                                                 onChange={(e) => setWorkOrder(e.target.value)}
+                                            />
+                                        </div>
+
+                                        <div className="space-y-1">
+                                            <Label className="text-xs text-gray-600">CIF Proveedor</Label>
+                                            <Input
+                                                placeholder="Buscar por CIF..."
+                                                className="h-8 text-sm border-gray-300 focus:border-gray-400"
+                                                value={supplierCif}
+                                                onChange={(e) => setSupplierCif(e.target.value)}
                                             />
                                         </div>
 

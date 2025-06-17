@@ -3,6 +3,7 @@ import { AlertList } from "@/components/alert-list"
 import { getPriceAlerts } from "@/lib/actions/alertas"
 import { Pagination } from "@/components/ui/pagination"
 import { AlertStatusFilter } from "@/components/alert-status-filter"
+import { HelpTooltip, helpContent } from "@/components/help-tooltip"
 
 interface SearchParams {
   page?: string
@@ -22,10 +23,19 @@ export default async function AlertsPage({ searchParams }: PageProps) {
 
   return (
     <div className="flex flex-col gap-6">
-      <h1 className="text-3xl font-bold">Alertas de Precios</h1>
-      <p className="text-muted-foreground">
-        Variaciones significativas en los precios de materiales detectadas automáticamente.
-      </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold">Alertas de Precios</h1>
+          <p className="text-muted-foreground">
+            Variaciones significativas en los precios de materiales detectadas automáticamente.
+          </p>
+        </div>
+        <HelpTooltip
+          title={helpContent.alertas.title}
+          description={helpContent.alertas.description}
+          content={helpContent.alertas.content}
+        />
+      </div>
 
       <div className="flex justify-end">
         <AlertStatusFilter />

@@ -71,6 +71,7 @@ export function AnalyticsDashboard({
     const filteredSuppliers = supplierAnalytics
         .filter(supplier => {
             if (filters.supplierId && supplier.supplierId !== filters.supplierId) return false
+            if (filters.supplierCif && !supplier.supplierCif.toLowerCase().includes(filters.supplierCif.toLowerCase())) return false
             return true
         })
         .sort((a, b) => b.totalSpent - a.totalSpent)
@@ -161,13 +162,18 @@ export function AnalyticsDashboard({
                     </div>
                 </div>
 
-                <div className="p-6 rounded-lg bg-white border border-border shadow-sm">
-                    <div className="flex items-center justify-between">
-                        <div className="text-sm font-medium text-muted-foreground">Órdenes de Trabajo</div>
-                        <Package className="h-4 w-4 text-muted-foreground" />
+                <Link href="/ordenes-trabajo" className="block transition-all duration-200 hover:shadow-md hover:scale-[1.02]">
+                    <div className="p-6 rounded-lg bg-white border border-border shadow-sm cursor-pointer hover:bg-muted/50">
+                        <div className="flex items-center justify-between">
+                            <div className="text-sm font-medium text-muted-foreground">Órdenes de Trabajo</div>
+                            <Package className="h-4 w-4 text-muted-foreground" />
+                        </div>
+                        <div className="text-3xl font-bold mt-2">{workOrders.length}</div>
+                        <div className="text-xs text-muted-foreground mt-1">
+                            <span className="text-blue-600 hover:underline">Ver desglose completo →</span>
+                        </div>
                     </div>
-                    <div className="text-3xl font-bold mt-2">{workOrders.length}</div>
-                </div>
+                </Link>
             </div>
 
             {/* Filters */}
@@ -214,6 +220,15 @@ export function AnalyticsDashboard({
                                     ))}
                                 </SelectContent>
                             </Select>
+                        </div>
+
+                        <div className="space-y-2">
+                            <Label>CIF</Label>
+                            <Input
+                                placeholder="Buscar por CIF..."
+                                value={filters.supplierCif || ''}
+                                onChange={(e) => setFilters(prev => ({ ...prev, supplierCif: e.target.value || undefined }))}
+                            />
                         </div>
 
                         <div className="space-y-2">

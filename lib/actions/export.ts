@@ -7,6 +7,7 @@ export interface ExportFilters {
     category?: string;
     workOrder?: string;
     supplierId?: string;
+    supplierCif?: string;
     startDate?: Date;
     endDate?: Date;
     minPrice?: number;
@@ -175,6 +176,7 @@ export async function exportMaterialSummary(filters: ExportFilters = {}) {
 export async function exportSupplierSummary(filters: ExportFilters = {}) {
     const where: Prisma.InvoiceWhereInput = {
         ...(filters.supplierId ? { providerId: filters.supplierId } : {}),
+        ...(filters.supplierCif ? { provider: { cif: { contains: filters.supplierCif, mode: 'insensitive' } } } : {}),
         ...(filters.startDate || filters.endDate ? {
             issueDate: {
                 ...(filters.startDate ? { gte: filters.startDate } : {}),
@@ -286,6 +288,7 @@ function buildWhereClause(filters: ExportFilters): Prisma.InvoiceItemWhereInput 
         ...(filters.category ? { material: { category: { contains: filters.category, mode: 'insensitive' } } } : {}),
         ...(filters.workOrder ? { workOrder: { contains: processWorkOrderSearch(filters.workOrder), mode: 'insensitive' } } : {}),
         ...(filters.supplierId ? { invoice: { providerId: filters.supplierId } } : {}),
+        ...(filters.supplierCif ? { invoice: { provider: { cif: { contains: filters.supplierCif, mode: 'insensitive' } } } } : {}),
         ...(filters.minPrice ? { unitPrice: { gte: filters.minPrice } } : {}),
         ...(filters.maxPrice ? { unitPrice: { lte: filters.maxPrice } } : {}),
         ...(filters.startDate || filters.endDate ? {

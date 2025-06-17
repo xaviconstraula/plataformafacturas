@@ -4,6 +4,7 @@ import { InvoiceFilters } from "@/components/invoice-filters"
 import { AdvancedInvoiceFilters } from "@/components/advanced-invoice-filters"
 import { getInvoices } from "@/lib/actions/facturas"
 import { NewInvoiceButton } from "@/components/new-invoice-button"
+import { HelpTooltip, helpContent } from "@/components/help-tooltip"
 import { exportInvoiceData } from "@/lib/actions/analytics"
 import { prisma } from "@/lib/db"
 
@@ -79,7 +80,14 @@ export default async function InvoicesPage({ searchParams }: InvoicesPageProps) 
     <div className="flex flex-col gap-6">
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">Facturas</h1>
-        <NewInvoiceButton />
+        <div className="flex items-center gap-2">
+          <HelpTooltip
+            title={helpContent.facturas.title}
+            description={helpContent.facturas.description}
+            content={helpContent.facturas.content}
+          />
+          <NewInvoiceButton />
+        </div>
       </div>
 
       <AdvancedInvoiceFilters

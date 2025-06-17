@@ -43,6 +43,7 @@ export function SupplierAnalyticsSection({
     const filteredSuppliers = supplierAnalytics
         .filter(supplier => {
             if (filters.supplierId && supplier.supplierId !== filters.supplierId) return false
+            if (filters.supplierCif && !supplier.supplierCif.toLowerCase().includes(filters.supplierCif.toLowerCase())) return false
             if (filters.category) {
                 const hasCategory = supplier.topMaterialsByCost.some(m =>
                     m.materialName.toLowerCase().includes(filters.category!.toLowerCase())
@@ -156,6 +157,14 @@ export function SupplierAnalyticsSection({
                     </Select>
                 </div>
 
+                <div className="space-y-2">
+                    <Label>CIF</Label>
+                    <Input
+                        placeholder="Buscar por CIF..."
+                        value={filters.supplierCif || ''}
+                        onChange={(e) => setFilters(prev => ({ ...prev, supplierCif: e.target.value || undefined }))}
+                    />
+                </div>
 
                 <div className="space-y-2">
                     <Label>OT/CECO</Label>

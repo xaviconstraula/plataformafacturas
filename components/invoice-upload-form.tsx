@@ -37,7 +37,9 @@ const formSchema = z.object({
   providerName: z.string().min(2, {
     message: "El proveedor debe tener al menos 2 caracteres.",
   }),
-  providerCif: z.string().optional(),
+  providerCif: z.string().min(1, {
+    message: "El CIF es obligatorio para unificar proveedores.",
+  }),
   providerEmail: z.string().email("Email inválido").optional().or(z.literal("")),
   providerPhone: z.string().optional(),
 
@@ -99,7 +101,7 @@ export function InvoiceUploadForm() {
       const invoiceData = {
         provider: {
           name: values.providerName,
-          cif: values.providerCif || null,
+          cif: values.providerCif,
           email: values.providerEmail || null,
           phone: values.providerPhone || null,
         },
@@ -224,7 +226,7 @@ export function InvoiceUploadForm() {
                       name="providerCif"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>CIF/NIF</FormLabel>
+                          <FormLabel>CIF/NIF *</FormLabel>
                           <FormControl>
                             <Input placeholder="B12345678" {...field} />
                           </FormControl>

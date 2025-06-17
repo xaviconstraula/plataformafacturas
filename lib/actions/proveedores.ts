@@ -96,6 +96,22 @@ export async function createSupplier(
             }
         }
 
+        // Check for duplicates using phone number if available - treat as same provider
+        if (phone) {
+            const duplicateByPhone = await prisma.provider.findFirst({
+                where: { phone: phone },
+            });
+
+            if (duplicateByPhone) {
+                return {
+                    errors: {
+                        phone: [`Ya existe un proveedor con este teléfono (${duplicateByPhone.name}, CIF: ${duplicateByPhone.cif}). Es el mismo proveedor.`]
+                    },
+                    message: 'Proveedor duplicado: ya existe un proveedor con este número de teléfono.',
+                }
+            }
+        }
+
         await prisma.provider.create({
             data: {
                 name,
