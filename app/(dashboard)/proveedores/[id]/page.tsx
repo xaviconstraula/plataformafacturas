@@ -22,6 +22,7 @@ import {
     ClipboardListIcon,
     DollarSignIcon
 } from "lucide-react"
+import { GoBackButton } from "@/components/go-back-button"
 
 interface SupplierDetailPageProps {
     params: Promise<{ id: string }>
@@ -96,11 +97,17 @@ export default async function SupplierDetailPage({ params }: SupplierDetailPageP
                         </div>
                     </div>
                 </div>
-                <ExcelExportButton
-                    filters={{ supplierId: supplier.id }}
-                    includeDetails={true}
-                    variant="outline"
-                />
+                <div className="flex items-center gap-2">
+                    <ExcelExportButton
+                        filters={{ supplierId: supplier.id }}
+                        includeDetails={true}
+                        variant="outline"
+                    />
+                    <GoBackButton
+                        fallbackUrl="/proveedores"
+                        label="Volver a Proveedores"
+                    />
+                </div>
             </div>
 
             {/* Contact Information */}

@@ -8,6 +8,7 @@ import { Separator } from "@/components/ui/separator"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { formatCurrency, formatPercentage, formatDate } from "@/lib/utils"
 import { prisma } from "@/lib/db"
+import { GoBackButton } from "@/components/go-back-button"
 
 interface PageProps {
     params: Promise<{ id: string }>
@@ -95,14 +96,17 @@ export default async function AlertDetailPage({ params }: PageProps) {
 
     return (
         <div className="flex flex-col gap-6 max-w-6xl mx-auto">
-            {/* Header */}
-            <div className="flex items-center gap-4">
-                <Button variant="outline" size="sm" asChild>
-                    <Link href="/alertas">
-                        <ArrowLeftIcon className="h-4 w-4 mr-2" />
-                        Volver a Alertas
-                    </Link>
-                </Button>
+            <div className="flex items-center justify-between">
+                <div>
+                    <h1 className="text-3xl font-bold">Detalles de Alerta</h1>
+                    <p className="text-muted-foreground">
+                        Información detallada sobre la variación de precio detectada
+                    </p>
+                </div>
+                <GoBackButton
+                    fallbackUrl="/alertas"
+                    label="Volver a Alertas"
+                />
             </div>
 
             {/* Alert Summary */}

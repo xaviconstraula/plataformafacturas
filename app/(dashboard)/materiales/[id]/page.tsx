@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { ExcelExportButton } from "@/components/excel-export-button"
+import { GoBackButton } from "@/components/go-back-button"
 import { formatCurrency } from "@/lib/utils"
 import { getMaterialAnalytics } from "@/lib/actions/analytics"
 import { prisma } from "@/lib/db"
@@ -76,6 +77,10 @@ export default async function MaterialDetailPage({ params }: MaterialDetailPageP
                         )}
                     </div>
                 </div>
+                <GoBackButton
+                    fallbackUrl="/materiales"
+                    label="Volver a Materiales"
+                />
             </div>
 
             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">

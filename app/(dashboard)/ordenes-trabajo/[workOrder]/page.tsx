@@ -9,6 +9,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { formatCurrency, formatDate } from "@/lib/utils"
 import { prisma } from "@/lib/db"
 import type { InvoiceItem, Material, Invoice, Provider } from "@/generated/prisma"
+import { GoBackButton } from "@/components/go-back-button"
 
 type InvoiceItemWithDetails = InvoiceItem & {
     material: Material
@@ -141,15 +142,18 @@ export default async function WorkOrderDetailPage({ params }: PageProps) {
     }
 
     return (
-        <div className="flex flex-col gap-6 max-w-7xl mx-auto">
-            {/* Header */}
-            <div className="flex items-center gap-4">
-                <Button variant="outline" size="sm" asChild>
-                    <Link href="/ordenes-trabajo">
-                        <ArrowLeftIcon className="h-4 w-4 mr-2" />
-                        Volver a OT
-                    </Link>
-                </Button>
+        <div className="flex flex-col gap-6">
+            <div className="flex items-center justify-between">
+                <div>
+                    <h1 className="text-3xl font-bold">OT: {workOrder}</h1>
+                    <p className="text-muted-foreground">
+                        Desglose detallado de materiales y costes
+                    </p>
+                </div>
+                <GoBackButton
+                    fallbackUrl="/ordenes-trabajo"
+                    label="Volver a Órdenes de Trabajo"
+                />
             </div>
 
             {/* Work Order Summary */}

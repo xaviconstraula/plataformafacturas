@@ -8,6 +8,7 @@ import { ArrowUpDownIcon, PackageIcon, DollarSignIcon, CalendarIcon, TruckIcon }
 import { formatCurrency, formatDate } from "@/lib/utils"
 import { prisma } from "@/lib/db"
 import { WorkOrderFilters } from "@/components/work-order-filters"
+import { HelpTooltip, helpContent } from "@/components/help-tooltip"
 
 interface SearchParams {
     sortBy?: string
@@ -145,6 +146,11 @@ export default async function WorkOrdersPage({ searchParams }: PageProps) {
                         Análisis detallado de costes y materiales por OT/CECO
                     </p>
                 </div>
+                <HelpTooltip
+                    title={helpContent.ordenesTrabajos.title}
+                    description={helpContent.ordenesTrabajos.description}
+                    content={helpContent.ordenesTrabajos.content}
+                />
             </div>
 
             {/* Summary Stats */}

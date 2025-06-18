@@ -3,6 +3,7 @@ import { getSupplierAnalytics } from "@/lib/actions/analytics"
 import { NewSupplierButton } from "@/components/new-supplier-button"
 import { ExcelExportButton } from "@/components/excel-export-button"
 import { SupplierAnalyticsSection } from "@/components/supplier-analytics-section"
+import { HelpTooltip, helpContent } from "@/components/help-tooltip"
 import { prisma } from "@/lib/db"
 import { DollarSign, Users, FileText, TrendingUp } from "lucide-react"
 import { formatCurrency } from "@/lib/utils"
@@ -55,6 +56,11 @@ export default async function SuppliersPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <HelpTooltip
+            title={helpContent.proveedores.title}
+            description={helpContent.proveedores.description}
+            content={helpContent.proveedores.content}
+          />
           <ExcelExportButton />
           <NewSupplierButton />
         </div>

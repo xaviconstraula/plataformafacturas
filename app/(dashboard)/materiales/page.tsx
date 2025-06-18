@@ -4,6 +4,7 @@ import { NewMaterialButton } from "@/components/new-material-button"
 import { ExcelExportButton } from "@/components/excel-export-button"
 import { MaterialAnalyticsSection } from "@/components/material-analytics-section"
 import { MaterialAnalyticsFilters } from "@/components/material-analytics-filters"
+import { HelpTooltip, helpContent } from "@/components/help-tooltip"
 import { prisma } from "@/lib/db"
 import { DollarSign, Package, Users, TrendingUp } from "lucide-react"
 import { formatCurrency } from "@/lib/utils"
@@ -61,6 +62,11 @@ export default async function MaterialsPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <HelpTooltip
+            title={helpContent.materiales.title}
+            description={helpContent.materiales.description}
+            content={helpContent.materiales.content}
+          />
           <ExcelExportButton />
           {/* <NewMaterialButton /> */}
         </div>

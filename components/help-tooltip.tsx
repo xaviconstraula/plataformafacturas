@@ -1,4 +1,3 @@
-
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
@@ -163,6 +162,134 @@ export const helpContent = {
                         <div>• <span className="text-yellow-600 font-medium">Medio (10-20%)</span>: Debe ser revisado</div>
                         <div>• <span className="text-blue-600 font-medium">Bajo (5-10%)</span>: Aumento notable</div>
                         <div>• Haz clic en una alerta para ver detalles y resolver</div>
+                    </CardContent>
+                </Card>
+            </div>
+        )
+    },
+
+    materiales: {
+        title: "Gestión de Materiales - Ayuda",
+        description: "Análisis detallado de materiales y su consumo",
+        content: (
+            <div className="space-y-4">
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="text-base">Vista General</CardTitle>
+                    </CardHeader>
+                    <CardContent className="text-sm space-y-2">
+                        <div>• Analiza el consumo y coste de cada material</div>
+                        <div>• Identifica los materiales más utilizados y costosos</div>
+                        <div>• Compara precios entre diferentes proveedores</div>
+                    </CardContent>
+                </Card>
+
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="text-base">Filtros Disponibles</CardTitle>
+                    </CardHeader>
+                    <CardContent className="text-sm space-y-2">
+                        <div>• <strong>Búsqueda:</strong> Por nombre o código de material</div>
+                        <div>• <strong>Categoría:</strong> Filtra por tipo de material</div>
+                        <div>• <strong>Proveedor:</strong> Analiza compras de proveedor específico</div>
+                        <div>• <strong>Rangos:</strong> Filtra por precios, costes o cantidades</div>
+                    </CardContent>
+                </Card>
+
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="text-base">Navegación</CardTitle>
+                    </CardHeader>
+                    <CardContent className="text-sm space-y-2">
+                        <div>• Haz clic en cualquier <strong>material</strong> para ver su historial completo</div>
+                        <div>• Ve datos detallados de proveedores y precios</div>
+                        <div>• Exporta análisis filtrados a Excel</div>
+                    </CardContent>
+                </Card>
+            </div>
+        )
+    },
+
+    proveedores: {
+        title: "Gestión de Proveedores - Ayuda",
+        description: "Análisis de rendimiento y gastos por proveedor",
+        content: (
+            <div className="space-y-4">
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="text-base">Vista General</CardTitle>
+                    </CardHeader>
+                    <CardContent className="text-sm space-y-2">
+                        <div>• Analiza el gasto total con cada proveedor</div>
+                        <div>• Revisa frecuencia de facturación y materiales suministrados</div>
+                        <div>• Compara rendimiento entre proveedores</div>
+                    </CardContent>
+                </Card>
+
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="text-base">Métricas Clave</CardTitle>
+                    </CardHeader>
+                    <CardContent className="text-sm space-y-2">
+                        <div>• <strong>Gasto Total:</strong> Inversión acumulada con el proveedor</div>
+                        <div>• <strong>N° Facturas:</strong> Frecuencia de transacciones</div>
+                        <div>• <strong>Materiales:</strong> Diversidad de productos suministrados</div>
+                        <div>• <strong>Promedio Factura:</strong> Importe medio por transacción</div>
+                    </CardContent>
+                </Card>
+
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="text-base">Navegación</CardTitle>
+                    </CardHeader>
+                    <CardContent className="text-sm space-y-2">
+                        <div>• Haz clic en cualquier <strong>proveedor</strong> para ver su perfil detallado</div>
+                        <div>• Accede al historial completo de facturas y materiales</div>
+                        <div>• Exporta datos de proveedores específicos</div>
+                    </CardContent>
+                </Card>
+            </div>
+        )
+    },
+
+    ordenesTrabajos: {
+        title: "Órdenes de Trabajo - Ayuda",
+        description: "Análisis de costes por orden de trabajo y centro de coste",
+        content: (
+            <div className="space-y-4">
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="text-base">¿Qué son las OT?</CardTitle>
+                    </CardHeader>
+                    <CardContent className="text-sm space-y-2">
+                        <div>Las Órdenes de Trabajo (OT) o Centros de Coste (CECO) permiten:</div>
+                        <div>• Agrupar gastos por proyecto o actividad específica</div>
+                        <div>• Controlar presupuestos de cada trabajo</div>
+                        <div>• Analizar rentabilidad por proyecto</div>
+                    </CardContent>
+                </Card>
+
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="text-base">Análisis Disponible</CardTitle>
+                    </CardHeader>
+                    <CardContent className="text-sm space-y-2">
+                        <div>• <strong>Coste Total:</strong> Gasto acumulado por OT (incluye IVA)</div>
+                        <div>• <strong>Desglose por Proveedor:</strong> Quién ha facturado qué</div>
+                        <div>• <strong>Desglose por Material:</strong> Qué materiales se han usado</div>
+                        <div>• <strong>Evolución Temporal:</strong> Cómo ha evolucionado el gasto</div>
+                    </CardContent>
+                </Card>
+
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="text-base">Filtros y Navegación</CardTitle>
+                    </CardHeader>
+                    <CardContent className="text-sm space-y-2">
+                        <div>• Busca OT específicas por código</div>
+                        <div>• Filtra por proveedor para ver su participación</div>
+                        <div>• Haz clic en cualquier <strong>OT</strong> para ver el desglose completo</div>
+                        <div>• Ordena por coste, cantidad de items o código</div>
                     </CardContent>
                 </Card>
             </div>
