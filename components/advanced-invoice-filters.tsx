@@ -277,7 +277,7 @@ export function AdvancedInvoiceFilters({
                                     <SearchIcon className="absolute left-3 top-2.5 h-4 w-4 text-gray-400" />
                                     <Input
                                         type="search"
-                                        placeholder="Buscar por proveedor, material, código..."
+                                        placeholder="Buscar por proveedor, material, nº factura..."
                                         className="pl-10 h-9 border-gray-300 focus:border-gray-400"
                                         value={searchTerm}
                                         onChange={(e) => setSearchTerm(e.target.value)}

@@ -1,38 +1,56 @@
 @import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Nexa:wght@300;400;700;900&display=swap');
 
 :root {
   --radius: 0.5rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.141 0.005 285.823);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.141 0.005 285.823);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.141 0.005 285.823);
-  --primary: oklch(0.61 0.23 41.0);
-  --primary-foreground: oklch(0.98 0.016 73.684);
-  --secondary: oklch(0.967 0.001 286.375);
-  --secondary-foreground: oklch(0.21 0.006 285.885);
-  --muted: oklch(0.967 0.001 286.375);
-  --muted-foreground: oklch(0.552 0.016 285.938);
-  --accent: oklch(0.967 0.001 286.375);
-  --accent-foreground: oklch(0.21 0.006 285.885);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.92 0.004 286.32);
-  --input: oklch(0.92 0.004 286.32);
-  --ring: oklch(0.61 0.23 41.0);
-  --chart-1: oklch(0.61 0.23 41.0);
-  --chart-2: oklch(0.55 0.20 41.0);
-  --chart-3: oklch(0.65 0.20 41.0);
-  --chart-4: oklch(0.70 0.18 41.0);
-  --chart-5: oklch(0.50 0.25 41.0);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.141 0.005 285.823);
-  --sidebar-primary: oklch(0.61 0.23 41.0);
-  --sidebar-primary-foreground: oklch(0.98 0.016 73.684);
-  --sidebar-accent: oklch(0.967 0.001 286.375);
-  --sidebar-accent-foreground: oklch(0.21 0.006 285.885);
-  --sidebar-border: oklch(0.92 0.004 286.32);
-  --sidebar-ring: oklch(0.705 0.213 47.604);
+  
+  /* Colores corporativos Constraula */
+  /* Verde Constraula #CDDE00 */
+  --constraula-green: oklch(0.86 0.15 92);
+  /* Negro #000000 */  
+  --constraula-black: oklch(0 0 0);
+  /* Gris #9EABAA */
+  --constraula-gray: oklch(0.69 0.02 186);
+  /* Blanco #FFFFFF */
+  --constraula-white: oklch(1 0 0);
+  
+  /* Sistema de colores basado en identidad corporativa */
+  --background: var(--constraula-white);
+  --foreground: var(--constraula-black);
+  --card: var(--constraula-white);
+  --card-foreground: var(--constraula-black);
+  --popover: var(--constraula-white);
+  --popover-foreground: var(--constraula-black);
+  --primary: var(--constraula-green);
+  --primary-foreground: var(--constraula-black);
+  --secondary: oklch(0.96 0.005 92);
+  --secondary-foreground: var(--constraula-black);
+  --muted: oklch(0.94 0.01 186);
+  --muted-foreground: var(--constraula-gray);
+  --accent: var(--constraula-green);
+  --accent-foreground: var(--constraula-black);
+  --destructive: oklch(0.58 0.22 29);
+  --destructive-foreground: var(--constraula-white);
+  --border: oklch(0.88 0.01 186);
+  --input: oklch(0.88 0.01 186);
+  --ring: var(--constraula-green);
+  
+  /* Charts usando tonos del verde corporativo */
+  --chart-1: var(--constraula-green);
+  --chart-2: oklch(0.76 0.12 92);
+  --chart-3: oklch(0.81 0.13 92);
+  --chart-4: oklch(0.71 0.11 92);
+  --chart-5: oklch(0.66 0.10 92);
+  
+  /* Sidebar usando colores corporativos */
+  --sidebar: var(--constraula-white);
+  --sidebar-foreground: var(--constraula-black);
+  --sidebar-primary: var(--constraula-green);
+  --sidebar-primary-foreground: var(--constraula-black);
+  --sidebar-accent: oklch(0.94 0.01 186);
+  --sidebar-accent-foreground: var(--constraula-black);
+  --sidebar-border: oklch(0.88 0.01 186);
+  --sidebar-ring: var(--constraula-green);
 }
 
 
@@ -41,6 +59,12 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+  
+  /* Tipografía corporativa Constraula */
+  --font-family-nexa: 'Nexa', 'Arial', system-ui, sans-serif;
+  --font-family-fallback: 'Arial', system-ui, sans-serif;
+  
+  /* Colores del tema */
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -56,6 +80,7 @@
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
@@ -72,13 +97,48 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+  
+  /* Colores corporativos específicos de Constraula */
+  --color-constraula-green: var(--constraula-green);
+  --color-constraula-black: var(--constraula-black);
+  --color-constraula-gray: var(--constraula-gray);
+  --color-constraula-white: var(--constraula-white);
 }
 
 @layer base {
   * {
     @apply border-border outline-ring/50;
   }
-
+  
+  /* Aplicar tipografía corporativa Nexa por defecto */
+  html {
+    font-family: 'Nexa', 'Arial', system-ui, sans-serif;
+  }
+  
+  body {
+    font-family: 'Nexa', 'Arial', system-ui, sans-serif;
+  }
+  
+  /* Clases de tipografía específicas según el manual de identidad */
+  .font-nexa-light {
+    font-family: 'Nexa', 'Arial', system-ui, sans-serif;
+    font-weight: 300;
+  }
+  
+  .font-nexa-regular {
+    font-family: 'Nexa', 'Arial', system-ui, sans-serif;
+    font-weight: 400;
+  }
+  
+  .font-nexa-bold {
+    font-family: 'Nexa', 'Arial', system-ui, sans-serif;
+    font-weight: 700;
+  }
+  
+  .font-nexa-black {
+    font-family: 'Nexa', 'Arial', system-ui, sans-serif;
+    font-weight: 900;
+  }
 }
 
 @layer utilities {
@@ -88,6 +148,55 @@
     padding-left: 2rem;
     padding-right: 2rem;
     max-width: 1400px;
+  }
+  
+  /* Colores corporativos Constraula como utilidades */
+  .bg-constraula-green {
+    background-color: var(--constraula-green);
+  }
+  
+  .bg-constraula-black {
+    background-color: var(--constraula-black);
+  }
+  
+  .bg-constraula-gray {
+    background-color: var(--constraula-gray);
+  }
+  
+  .bg-constraula-white {
+    background-color: var(--constraula-white);
+  }
+  
+  .text-constraula-green {
+    color: var(--constraula-green);
+  }
+  
+  .text-constraula-black {
+    color: var(--constraula-black);
+  }
+  
+  .text-constraula-gray {
+    color: var(--constraula-gray);
+  }
+  
+  .text-constraula-white {
+    color: var(--constraula-white);
+  }
+  
+  .border-constraula-green {
+    border-color: var(--constraula-green);
+  }
+  
+  .border-constraula-black {
+    border-color: var(--constraula-black);
+  }
+  
+  .border-constraula-gray {
+    border-color: var(--constraula-gray);
+  }
+  
+  .border-constraula-white {
+    border-color: var(--constraula-white);
   }
 
   @keyframes accordion-down {

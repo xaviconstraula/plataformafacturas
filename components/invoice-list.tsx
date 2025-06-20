@@ -71,11 +71,11 @@ export function InvoiceList({ invoices, totalPages, currentPage, pageSize, total
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Código</TableHead>
+              <TableHead>Nº Factura</TableHead>
               <TableHead>Proveedor</TableHead>
               <TableHead>Fecha</TableHead>
-              <TableHead className="text-right">Total</TableHead>
-              <TableHead className="w-[120px] text-right">Acciones</TableHead>
+              <TableHead>Total</TableHead>
+              <TableHead className="w-[120px]">Acciones</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -93,8 +93,8 @@ export function InvoiceList({ invoices, totalPages, currentPage, pageSize, total
                       </Link>
                     </TableCell>
                     <TableCell>{invoice.issueDate.toLocaleDateString("es-ES")}</TableCell>
-                    <TableCell className="text-right font-medium">{formatCurrency(invoice.totalAmount)}</TableCell>
-                    <TableCell className="text-right">
+                    <TableCell className="font-medium">{formatCurrency(invoice.totalAmount)}</TableCell>
+                    <TableCell>
                       <Link href={`/facturas/${invoice.id}`} passHref>
                         <Button variant="ghost" size="icon" aria-label="Ver factura">
                           <EyeIcon className="h-4 w-4" />

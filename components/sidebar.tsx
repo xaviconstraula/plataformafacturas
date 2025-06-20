@@ -18,6 +18,7 @@ import {
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useState } from "react"
+import Image from "next/image"
 
 const navItems = [
   {
@@ -85,7 +86,20 @@ export default function Sidebar() {
       >
         <div className="flex h-full flex-col border-r">
           <div className="p-6">
-            <h2 className="text-2xl font-bold">Gestión de Facturas</h2>
+            <div className="flex items-center gap-3">
+              <Image
+                src="/logofull.png"
+                alt="Constraula"
+                className="h-10 w-auto"
+                width={100}
+                height={100}
+                onError={(e) => {
+                  e.currentTarget.style.display = 'none';
+                  e.currentTarget.nextElementSibling?.classList.remove('hidden');
+                }}
+              />
+              <h2 className="text-2xl font-nexa-bold text-constraula-black hidden">Constraula</h2>
+            </div>
           </div>
 
           <nav className="flex-1 space-y-1 p-4">
@@ -108,7 +122,7 @@ export default function Sidebar() {
           </nav>
 
           <div className="p-4">
-            <p className="text-xs text-muted-foreground">© 2025 Gestión de Facturas</p>
+            <p className="text-xs text-muted-foreground font-nexa-light">© 2025 Constraula</p>
           </div>
         </div>
       </div>

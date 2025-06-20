@@ -8,6 +8,7 @@ export interface ExtractedPdfProviderData {
 
 export interface ExtractedPdfItemData {
     materialName: string;
+    materialCode?: string; // Código de referencia del producto extraído del PDF
     materialDescription?: string;
     quantity: number;
     unitPrice: number;

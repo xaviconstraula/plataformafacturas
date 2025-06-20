@@ -247,10 +247,10 @@ export function SupplierAnalyticsSection({
                             <TableRow>
                                 <TableHead>Proveedor</TableHead>
                                 <TableHead>Tipo</TableHead>
-                                <TableHead className="text-right">Gasto Total</TableHead>
-                                <TableHead className="text-right">Nº Facturas</TableHead>
-                                <TableHead className="text-right">Nº Materiales</TableHead>
-                                <TableHead className="text-right">Promedio/Factura</TableHead>
+                                <TableHead >Gasto Total</TableHead>
+                                <TableHead >Nº Facturas</TableHead>
+                                <TableHead >Nº Materiales</TableHead>
+                                <TableHead >Promedio/Factura</TableHead>
                                 <TableHead className="w-[100px]">Acciones</TableHead>
                             </TableRow>
                         </TableHeader>
@@ -271,10 +271,10 @@ export function SupplierAnalyticsSection({
                                             {supplier.supplierType === 'MATERIAL_SUPPLIER' ? 'Material' : 'Maquinaria'}
                                         </Badge>
                                     </TableCell>
-                                    <TableCell className="text-right">{formatCurrency(supplier.totalSpent)}</TableCell>
-                                    <TableCell className="text-right">{supplier.invoiceCount}</TableCell>
-                                    <TableCell className="text-right">{supplier.materialCount}</TableCell>
-                                    <TableCell className="text-right">{formatCurrency(supplier.averageInvoiceAmount)}</TableCell>
+                                    <TableCell className="font-medium text-center">{formatCurrency(supplier.totalSpent)}</TableCell>
+                                    <TableCell className="font-medium text-center">{supplier.invoiceCount}</TableCell>
+                                    <TableCell className="font-medium text-center">{supplier.materialCount}</TableCell>
+                                    <TableCell className="font-medium text-center">{formatCurrency(supplier.averageInvoiceAmount)}</TableCell>
                                     <TableCell className="space-x-1">
                                         <EditProviderDialog
                                             providerId={supplier.supplierId}

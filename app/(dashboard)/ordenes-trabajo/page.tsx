@@ -173,7 +173,7 @@ export default async function WorkOrdersPage({ searchParams }: PageProps) {
 
                 <div className="p-6 rounded-lg bg-white border border-border shadow-sm">
                     <div className="flex items-center justify-between">
-                        <div className="text-sm font-medium text-muted-foreground">Total Items</div>
+                        <div className="text-sm font-medium text-muted-foreground">Materiales </div>
                         <CalendarIcon className="h-4 w-4 text-muted-foreground" />
                     </div>
                     <div className="text-3xl font-bold mt-2">{data.totalItems}</div>
@@ -209,7 +209,7 @@ export default async function WorkOrdersPage({ searchParams }: PageProps) {
                                     <TableRow>
                                         <TableHead>Código OT</TableHead>
                                         <TableHead>Coste Total (c/IVA)</TableHead>
-                                        <TableHead>Items</TableHead>
+                                        <TableHead>Materiales</TableHead>
                                         <TableHead>Proveedores</TableHead>
                                         <TableHead>Materiales</TableHead>
                                         <TableHead>Periodo</TableHead>

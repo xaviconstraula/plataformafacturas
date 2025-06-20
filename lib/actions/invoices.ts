@@ -7,6 +7,7 @@ import { revalidatePath } from "next/cache";
 import { pdfToPng } from "pdf-to-png-converter";
 import pdfParse from "pdf-parse";
 import OpenAI from "openai";
+import { extractMaterialCode, normalizeMaterialCode, areMaterialCodesSimilar, generateStandardMaterialCode, areMaterialNamesSimilar } from "@/lib/utils";
 
 // Ensure we have the OpenAI API key
 const openaiApiKey = process.env.OPENAI_API_KEY;
@@ -338,6 +339,7 @@ INVOICE: Extract code, issue date (ISO), total amount
 
 LINE ITEMS (extract ALL items from all pages):
 - materialName: Use descriptive name if available, otherwise "CODE: [code]"
+- materialCode: Extract product reference code if visible (e.g., 6806520030). Look in columns labeled "Código", "Ref", "Art", "Material", or within item descriptions.
 - isMaterial: true for physical items, false for services/fees/taxes
 - quantity, unitPrice, totalPrice (2 decimals)
 - itemDate: ISO format if different from invoice date
@@ -358,6 +360,7 @@ JSON format:
   "totalAmount": "number",
   "items": [{
     "materialName": "string",
+    "materialCode": "string|null",
     "isMaterial": "boolean",
     "quantity": "number",
     "unitPrice": "number", 
@@ -583,16 +586,77 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
     const normalizedName = materialName.trim();
     let material: Material | null = null;
 
+    // Priorizar el código extraído del PDF por OpenAI
+    let finalCode: string | null = null;
+
     if (materialCode) {
-        material = await tx.material.findUnique({
-            where: { code: materialCode },
-        });
+        // Si OpenAI extrajo un código del PDF, usarlo directamente
+        finalCode = normalizeMaterialCode(materialCode);
+    } else {
+        // Solo si no hay código del PDF, intentar extraer del nombre con patrones básicos
+        const extracted = extractMaterialCode(materialName);
+        finalCode = extracted ? normalizeMaterialCode(extracted) : null;
     }
 
-    if (!material) {
-        material = await tx.material.findFirst({
-            where: { name: { equals: normalizedName, mode: 'insensitive' } }
+    // Buscar primero por código exacto
+    if (finalCode) {
+        material = await tx.material.findUnique({
+            where: { code: finalCode },
         });
+
+        if (material) {
+            console.log(`Found existing material by exact code: "${finalCode}" -> "${material.name}"`);
+            return material;
+        }
+    }
+
+    // Si no se encuentra por código exacto, buscar por referenceCode
+    if (finalCode) {
+        material = await tx.material.findFirst({
+            where: { referenceCode: finalCode }
+        });
+
+        if (material) {
+            console.log(`Found existing material by reference code: "${finalCode}" -> "${material.name}"`);
+            return material;
+        }
+    }
+
+    // Buscar por nombre exacto
+    material = await tx.material.findFirst({
+        where: { name: { equals: normalizedName, mode: 'insensitive' } }
+    });
+
+    if (material) {
+        console.log(`Found existing material by exact name: "${normalizedName}" -> "${material.name}"`);
+        return material;
+    }
+
+    // Solo si no encontramos nada, hacer búsqueda por similitud (más conservadora)
+    if (finalCode && finalCode.length >= 6) {
+        const allMaterials = await tx.material.findMany({
+            select: { id: true, name: true, code: true, referenceCode: true, category: true }
+        });
+
+        for (const existingMaterial of allMaterials) {
+            // Verificar similitud por código solo si ambos códigos son largos
+            if (existingMaterial.code && areMaterialCodesSimilar(finalCode, existingMaterial.code)) {
+                console.log(`Found material with similar code: "${existingMaterial.code}" vs "${finalCode}" for material "${materialName}"`);
+                material = await tx.material.findUnique({
+                    where: { id: existingMaterial.id }
+                });
+                break;
+            }
+
+            // También verificar con referenceCode
+            if (existingMaterial.referenceCode && areMaterialCodesSimilar(finalCode, existingMaterial.referenceCode)) {
+                console.log(`Found material with similar reference code: "${existingMaterial.referenceCode}" vs "${finalCode}" for material "${materialName}"`);
+                material = await tx.material.findUnique({
+                    where: { id: existingMaterial.id }
+                });
+                break;
+            }
+        }
     }
 
     // Set category based on provider type
@@ -620,6 +684,7 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
                         code: codeToTry,
                         name: normalizedName,
                         category: category,
+                        referenceCode: materialCode, // Guardar el código original extraído del PDF
                     },
                 });
                 break; // Success, exit loop
@@ -745,19 +810,43 @@ async function processInvoiceItemTx(
                     percentageChangeDecimal = new Prisma.Decimal(currentUnitPriceDecimal.isPositive() ? 9999 : -9999);
                 }
 
-                alert = await tx.priceAlert.create({
-                    data: {
+                // Verificar si ya existe una alerta para el mismo material, proveedor y fecha
+                const existingAlert = await tx.priceAlert.findFirst({
+                    where: {
                         materialId: createdMaterial.id,
                         providerId,
-                        oldPrice: previousPrice,
-                        newPrice: currentUnitPriceDecimal,
-                        percentage: percentageChangeDecimal,
-                        status: "PENDING",
                         effectiveDate,
-                        invoiceId,
                     },
                 });
-                console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Price alert created. Old: ${previousPrice}, New: ${currentUnitPriceDecimal}, Change: ${percentageChangeDecimal.toFixed(2)}%, Effective Date: ${effectiveDate.toISOString()}`);
+
+                if (!existingAlert) {
+                    try {
+                        alert = await tx.priceAlert.create({
+                            data: {
+                                materialId: createdMaterial.id,
+                                providerId,
+                                oldPrice: previousPrice,
+                                newPrice: currentUnitPriceDecimal,
+                                percentage: percentageChangeDecimal,
+                                status: "PENDING",
+                                effectiveDate,
+                                invoiceId,
+                            },
+                        });
+                        console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Price alert created. Old: ${previousPrice}, New: ${currentUnitPriceDecimal}, Change: ${percentageChangeDecimal.toFixed(2)}%, Effective Date: ${effectiveDate.toISOString()}`);
+                    } catch (alertError) {
+                        // Manejar error de constraint único
+                        if (typeof alertError === 'object' && alertError !== null && 'code' in alertError &&
+                            (alertError as { code: string }).code === 'P2002') {
+                            console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Price alert already exists (caught constraint violation). Skipping duplicate creation.`);
+                        } else {
+                            // Re-lanzar otros errores
+                            throw alertError;
+                        }
+                    }
+                } else {
+                    console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Price alert already exists for effective date ${effectiveDate.toISOString()}. Skipping duplicate creation.`);
+                }
             } else {
                 console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Price (${currentUnitPriceDecimal}) is unchanged compared to previous invoice item dated ${previousInvoiceItemRecord.itemDate.toISOString()}.`);
             }
@@ -1156,7 +1245,7 @@ export async function createInvoiceFromFiles(
                             await tx.invoiceItem.create({
                                 data: {
                                     invoiceId: invoice.id,
-                                    materialId: (await findOrCreateMaterialTx(tx, itemData.materialName, itemData.description, provider.type)).id,
+                                    materialId: (await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialCode, provider.type)).id,
                                     quantity: quantityDecimal,
                                     unitPrice: currentUnitPriceDecimal,
                                     totalPrice: totalPriceDecimal,
@@ -1170,7 +1259,7 @@ export async function createInvoiceFromFiles(
 
                         let material: Material;
                         try {
-                            material = await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialDescription, provider.type);
+                            material = await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialCode, provider.type);
                         } catch (materialError) {
                             console.error(`Error creating/finding material '${itemData.materialName}' in invoice ${invoice.invoiceCode}:`, materialError);
                             throw new Error(`Failed to process material '${itemData.materialName}': ${materialError instanceof Error ? materialError.message : 'Unknown error'}`);
@@ -1192,18 +1281,30 @@ export async function createInvoiceFromFiles(
                                     percentageChangeDecimal = new Prisma.Decimal(currentItemUnitPrice.isPositive() ? 9999 : -9999);
                                 }
 
-                                await tx.priceAlert.create({
-                                    data: {
-                                        materialId: material.id,
-                                        providerId: provider.id,
-                                        oldPrice: lastSeenPriceRecordInThisInvoice.price,
-                                        newPrice: currentItemUnitPrice,
-                                        percentage: percentageChangeDecimal,
-                                        status: "PENDING",
-                                        effectiveDate: effectiveItemDate,
-                                        invoiceId: invoice.id,
-                                    },
-                                });
+                                try {
+                                    await tx.priceAlert.create({
+                                        data: {
+                                            materialId: material.id,
+                                            providerId: provider.id,
+                                            oldPrice: lastSeenPriceRecordInThisInvoice.price,
+                                            newPrice: currentItemUnitPrice,
+                                            percentage: percentageChangeDecimal,
+                                            status: "PENDING",
+                                            effectiveDate: effectiveItemDate,
+                                            invoiceId: invoice.id,
+                                        },
+                                    });
+                                } catch (alertError) {
+                                    // Manejar error de constraint único para alertas intra-factura
+                                    if (typeof alertError === 'object' && alertError !== null && 'code' in alertError &&
+                                        (alertError as { code: string }).code === 'P2002') {
+                                        console.log(`[Invoice ${invoice.invoiceCode}][Material '${material.name}'] Intra-invoice price alert already exists (caught constraint violation). Skipping duplicate creation.`);
+                                        // No incrementar alertsCounter en este caso
+                                        alertsCounter--; // Compensar el incremento que viene después
+                                    } else {
+                                        throw alertError;
+                                    }
+                                }
                                 alertsCounter++;
                                 console.log(`[Invoice ${invoice.invoiceCode}][Material '${material.name}'] INTRA-INVOICE Price alert created. Old (from item ${lastSeenPriceRecordInThisInvoice.invoiceItemId} in this invoice): ${lastSeenPriceRecordInThisInvoice.price}, New (current item): ${currentItemUnitPrice}, Change: ${percentageChangeDecimal.toFixed(2)}%, Effective Date: ${effectiveItemDate.toISOString()}`);
                             }
@@ -1326,6 +1427,7 @@ export interface ManualInvoiceData {
     issueDate: string;
     items: Array<{
         materialName: string;
+        materialCode?: string;
         quantity: number;
         unitPrice: number;
         totalPrice: number;
@@ -1389,7 +1491,7 @@ export async function createManualInvoice(data: ManualInvoiceData): Promise<Crea
                 }
 
                 // Find or create material
-                const material = await findOrCreateMaterialTx(tx, itemData.materialName, undefined, provider.type);
+                const material = await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialCode, provider.type);
 
                 // Create invoice item
                 const invoiceItem = await tx.invoiceItem.create({
@@ -1439,19 +1541,29 @@ export async function createManualInvoice(data: ManualInvoiceData): Promise<Crea
 
                             // Only create alert if change is significant (>5%)
                             if (percentageChange.abs().gte(5)) {
-                                await tx.priceAlert.create({
-                                    data: {
-                                        materialId: material.id,
-                                        providerId: provider.id,
-                                        oldPrice: lastPrice,
-                                        newPrice: currentPrice,
-                                        percentage: percentageChange,
-                                        status: "PENDING",
-                                        effectiveDate: currentInvoiceIssueDate,
-                                        invoiceId: invoice.id,
-                                    },
-                                });
-                                alertsCounter++;
+                                try {
+                                    await tx.priceAlert.create({
+                                        data: {
+                                            materialId: material.id,
+                                            providerId: provider.id,
+                                            oldPrice: lastPrice,
+                                            newPrice: currentPrice,
+                                            percentage: percentageChange,
+                                            status: "PENDING",
+                                            effectiveDate: currentInvoiceIssueDate,
+                                            invoiceId: invoice.id,
+                                        },
+                                    });
+                                    alertsCounter++;
+                                } catch (alertError) {
+                                    // Manejar error de constraint único en facturas manuales
+                                    if (typeof alertError === 'object' && alertError !== null && 'code' in alertError &&
+                                        (alertError as { code: string }).code === 'P2002') {
+                                        console.log(`[Manual Invoice ${invoice.invoiceCode}][Material '${material.name}'] Price alert already exists (caught constraint violation). Skipping duplicate creation.`);
+                                    } else {
+                                        throw alertError;
+                                    }
+                                }
                             }
                         }
                     }
