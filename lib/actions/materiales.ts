@@ -32,6 +32,7 @@ export async function getMaterials() {
 const CreateMaterialSchema = z.object({
     code: z.string().min(1, 'El código es obligatorio.').max(50, 'El código no puede exceder los 50 caracteres.'),
     name: z.string().min(3, 'El nombre debe tener al menos 3 caracteres.').max(100, 'El nombre no puede exceder los 100 caracteres.'),
+    referenceCode: z.string().max(50, 'La referencia no puede exceder los 50 caracteres.').optional().or(z.literal('')),
     description: z.string().max(500, 'La descripción no puede exceder los 500 caracteres.').optional().or(z.literal('')),
 })
 
@@ -48,6 +49,7 @@ export type MaterialFormState = {
     errors?: {
         code?: string[]
         name?: string[]
+        referenceCode?: string[]
         description?: string[]
     }
 }
@@ -68,7 +70,7 @@ export async function createMaterial(
         }
     }
 
-    const { code, name, description } = validatedFields.data
+    const { code, name, description, referenceCode } = validatedFields.data
 
     try {
         // Check if code already exists
@@ -88,6 +90,7 @@ export async function createMaterial(
                 code,
                 name,
                 description: description || null,
+                referenceCode: referenceCode || null,
             },
         })
 
@@ -140,7 +143,7 @@ export async function updateMaterial(
         };
     }
 
-    const { id, code, name, description } = validatedFields.data;
+    const { id, code, name, description, referenceCode } = validatedFields.data;
 
     try {
         // Optional: Check if the new code (if changeable) conflicts with another existing material, excluding the current one.
@@ -164,6 +167,7 @@ export async function updateMaterial(
                 code,
                 name,
                 description: description || null,
+                referenceCode: referenceCode || null,
             },
         });
 

@@ -64,11 +64,11 @@ export function EditMaterialDialog({ materialId, children }: EditMaterialDialogP
 
     // Show toast based on form submission state
     useEffect(() => {
-        if (state.message && !state.errors?.code && !state.errors?.name && !state.errors?.description) {
+        if (state.message && !state.errors?.code && !state.errors?.name && !state.errors?.description && !state.errors?.referenceCode) {
             // Success message
             toast({ title: 'Éxito', description: state.message })
             setIsOpen(false) // Close dialog on success
-        } else if (state.message && (state.errors?.code || state.errors?.name || state.errors?.description)) {
+        } else if (state.message && (state.errors?.code || state.errors?.name || state.errors?.description || state.errors?.referenceCode)) {
             // Validation or other error message
             toast({ title: 'Error de Validación', description: state.message, variant: 'destructive' })
         }
@@ -130,6 +130,23 @@ export function EditMaterialDialog({ materialId, children }: EditMaterialDialogP
                                 {state.errors?.name && (
                                     <p id="name-error" className="col-span-4 text-sm text-destructive text-right">
                                         {state.errors.name.join(', ')}
+                                    </p>
+                                )}
+                            </div>
+                            <div className="grid grid-cols-4 items-center gap-4">
+                                <Label htmlFor="referenceCode" className="text-right">
+                                    Ref. Proveedor
+                                </Label>
+                                <Input
+                                    id="referenceCode"
+                                    name="referenceCode"
+                                    defaultValue={materialData.referenceCode || ''}
+                                    className="col-span-3"
+                                    aria-describedby="referenceCode-error"
+                                />
+                                {state.errors?.referenceCode && (
+                                    <p id="referenceCode-error" className="col-span-4 text-sm text-destructive text-right">
+                                        {state.errors.referenceCode.join(', ')}
                                     </p>
                                 )}
                             </div>

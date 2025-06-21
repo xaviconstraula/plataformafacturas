@@ -63,6 +63,12 @@ export default async function MaterialDetailPage({ params }: MaterialDetailPageP
                     <h1 className="text-3xl font-bold">{material.name}</h1>
                     <div className="flex items-center gap-4 text-muted-foreground">
                         <span>Código: {material.code}</span>
+                        {material.referenceCode && (
+                            <>
+                                <span>•</span>
+                                <span>Ref. Proveedor: {material.referenceCode}</span>
+                            </>
+                        )}
                         {material.category && (
                             <>
                                 <span>•</span>
