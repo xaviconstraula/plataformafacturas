@@ -337,9 +337,9 @@ PHONE NUMBER:
 
 INVOICE: Extract code, issue date (ISO), total amount
 
-LINE ITEMS (extract ALL items from all pages):
-- materialName: Use descriptive name if available, otherwise "CODE: [code]"
-- materialCode: Extract product reference code if visible (e.g., 6806520030). Look in columns labeled "Código", "Ref", "Art", "Material", or within item descriptions.
+LINE ITEMS (extract ALL items from all pages and make sure it's actually a material, not "Albarán" or similar)
+- materialName: Use descriptive name.
+- materialCode: Extract the product reference code ONLY IF it is clearly visible and directly associated with the material name in a column like "Código", "Ref.", "Artículo", or "Referencia". It is often an alphanumeric string. If no such code is clearly present for an item, this field MUST BE NULL. Do not invent or guess a code.
 - isMaterial: true for physical items, false for services/fees/taxes
 - quantity, unitPrice, totalPrice (2 decimals)
 - itemDate: ISO format if different from invoice date
@@ -375,7 +375,7 @@ JSON format:
         console.log(`Calling OpenAI API for file: ${file.name} with ${imageUrls.length} page images.`);
 
         const apiCallResponse = await openai.chat.completions.create({
-            model: "gpt-4o",
+            model: "gpt-4.1",
             temperature: 0.1,
             messages: [
                 {
@@ -587,16 +587,7 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
     let material: Material | null = null;
 
     // Priorizar el código extraído del PDF por OpenAI
-    let finalCode: string | null = null;
-
-    if (materialCode) {
-        // Si OpenAI extrajo un código del PDF, usarlo directamente
-        finalCode = normalizeMaterialCode(materialCode);
-    } else {
-        // Solo si no hay código del PDF, intentar extraer del nombre con patrones básicos
-        const extracted = extractMaterialCode(materialName);
-        finalCode = extracted ? normalizeMaterialCode(extracted) : null;
-    }
+    const finalCode: string | null = materialCode ? normalizeMaterialCode(materialCode) : null;
 
     // Buscar primero por código exacto
     if (finalCode) {

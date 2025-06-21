@@ -9,6 +9,7 @@ function processWorkOrderSearch(workOrder: string): string {
 export interface MaterialAnalytics {
     materialId: string;
     materialCode: string;
+    referenceCode?: string;
     materialName: string;
     category?: string;
     unit?: string;
@@ -80,6 +81,7 @@ export interface GetMaterialAnalyticsParams {
     category?: string;
     workOrder?: string;
     supplierId?: string;
+    materialSearch?: string;
     startDate?: Date;
     endDate?: Date;
     sortBy?: 'quantity' | 'cost' | 'lastPurchase' | 'name';
@@ -93,6 +95,15 @@ export async function getMaterialAnalytics(params: GetMaterialAnalyticsParams = 
         ...(params.category ? { material: { category: { contains: params.category, mode: 'insensitive' } } } : {}),
         ...(params.workOrder ? { workOrder: { contains: processWorkOrderSearch(params.workOrder), mode: 'insensitive' } } : {}),
         ...(params.supplierId ? { invoice: { providerId: params.supplierId } } : {}),
+        ...(params.materialSearch ? {
+            material: {
+                OR: [
+                    { name: { contains: params.materialSearch, mode: 'insensitive' } },
+                    { code: { contains: params.materialSearch, mode: 'insensitive' } },
+                    { referenceCode: { contains: params.materialSearch, mode: 'insensitive' } },
+                ]
+            }
+        } : {}),
         ...(params.startDate || params.endDate ? {
             itemDate: {
                 ...(params.startDate ? { gte: params.startDate } : {}),
@@ -188,6 +199,7 @@ export async function getMaterialAnalytics(params: GetMaterialAnalyticsParams = 
         analytics.push({
             materialId,
             materialCode: material.code,
+            referenceCode: material.referenceCode || undefined,
             materialName: material.name,
             category: material.category || undefined,
             unit: material.unit || undefined,
@@ -464,4 +476,4 @@ export async function exportInvoiceData(params: GetMaterialAnalyticsParams & Get
         exportDate: new Date(),
         filters: params
     };
-} 
+}

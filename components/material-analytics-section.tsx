@@ -55,42 +55,6 @@ export function MaterialAnalyticsSection({
 
     // Apply filters and sorting to material analytics
     const filteredMaterials = materialAnalytics
-        .filter(material => {
-            // Basic filters
-            if (filters.materialSearch && !material.materialName.toLowerCase().includes(filters.materialSearch.toLowerCase()) &&
-                !material.materialCode?.toLowerCase().includes(filters.materialSearch.toLowerCase())) return false
-
-            if (filters.category && filters.category !== 'all' && !material.category?.toLowerCase().includes(filters.category.toLowerCase())) return false
-
-            if (filters.supplierId && filters.supplierId !== 'all' && !material.topSuppliers.some(s => s.supplierId === filters.supplierId)) return false
-
-            if (filters.workOrder && !material.workOrders.some(wo => wo.toLowerCase().includes(filters.workOrder!.toLowerCase()))) return false
-
-            // Advanced filters
-            if (filters.minUnitPrice !== undefined && material.averageUnitPrice < filters.minUnitPrice) return false
-            if (filters.maxUnitPrice !== undefined && material.averageUnitPrice > filters.maxUnitPrice) return false
-
-            if (filters.minTotalCost !== undefined && material.totalCost < filters.minTotalCost) return false
-            if (filters.maxTotalCost !== undefined && material.totalCost > filters.maxTotalCost) return false
-
-            if (filters.minQuantity !== undefined && material.totalQuantity < filters.minQuantity) return false
-            if (filters.maxQuantity !== undefined && material.totalQuantity > filters.maxQuantity) return false
-
-            // Date filters (if we have lastPurchaseDate in the analytics)
-            if (filters.startDate && material.lastPurchaseDate) {
-                const materialDate = new Date(material.lastPurchaseDate)
-                const startDate = new Date(filters.startDate)
-                if (materialDate < startDate) return false
-            }
-
-            if (filters.endDate && material.lastPurchaseDate) {
-                const materialDate = new Date(material.lastPurchaseDate)
-                const endDate = new Date(filters.endDate)
-                if (materialDate > endDate) return false
-            }
-
-            return true
-        })
         .sort((a, b) => {
             let aValue: number, bValue: number
             switch (sortBy) {

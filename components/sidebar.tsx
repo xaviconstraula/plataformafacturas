@@ -112,7 +112,7 @@ export default function Sidebar() {
                   "flex items-center rounded-md px-3 py-2 text-sm font-medium",
                   pathname === item.href
                     ? "bg-primary text-primary-foreground"
-                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                    : " hover:bg-muted hover:text-foreground",
                 )}
               >
                 <item.icon className="mr-3 h-5 w-5" />

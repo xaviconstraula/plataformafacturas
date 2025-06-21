@@ -13,15 +13,17 @@ export function WelcomeBanner() {
     if (!isVisible) return null
 
     return (
-        <Card className="bg-gradient-to-r from-blue-50 to-indigo-50 border-blue-200">
+        <Card className="border-border bg-card">
             <CardHeader className="pb-4">
                 <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                        <div className="h-8 w-8 rounded-full bg-blue-600 flex items-center justify-center">
-                            <HelpCircle className="h-4 w-4 text-white" />
+                    <div className="flex items-center gap-3">
+                        <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary">
+                            <HelpCircle className="h-5 w-5 text-primary-foreground" />
                         </div>
                         <div>
-                            <CardTitle className="text-lg">¡Bienvenido al Sistema de Gestión de Facturas!</CardTitle>
+                            <CardTitle className="text-lg font-nexa-bold">
+                                ¡Bienvenido al Sistema de Gestión de Facturas!
+                            </CardTitle>
                             <CardDescription>
                                 Administra tus facturas, proveedores y obtén insights valiosos sobre tus compras
                             </CardDescription>
@@ -37,11 +39,11 @@ export function WelcomeBanner() {
                     </Button>
                 </div>
             </CardHeader>
-            <CardContent className="space-y-4">
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <CardContent className="space-y-6 pt-2">
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                     <div className="flex items-start gap-3">
-                        <div className="p-2 rounded-lg bg-blue-100">
-                            <FileText className="h-4 w-4 text-blue-600" />
+                        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
+                            <FileText className="h-4 w-4 text-primary" />
                         </div>
                         <div>
                             <h4 className="font-medium text-sm">Gestiona Facturas</h4>
@@ -52,8 +54,8 @@ export function WelcomeBanner() {
                     </div>
 
                     <div className="flex items-start gap-3">
-                        <div className="p-2 rounded-lg bg-green-100">
-                            <BarChart3 className="h-4 w-4 text-green-600" />
+                        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
+                            <BarChart3 className="h-4 w-4 text-primary" />
                         </div>
                         <div>
                             <h4 className="font-medium text-sm">Analiza Gastos</h4>
@@ -64,8 +66,8 @@ export function WelcomeBanner() {
                     </div>
 
                     <div className="flex items-start gap-3">
-                        <div className="p-2 rounded-lg bg-orange-100">
-                            <AlertTriangle className="h-4 w-4 text-orange-600" />
+                        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-destructive/10">
+                            <AlertTriangle className="h-4 w-4 text-destructive" />
                         </div>
                         <div>
                             <h4 className="font-medium text-sm">Recibe Alertas</h4>
@@ -83,7 +85,7 @@ export function WelcomeBanner() {
                     <span className="text-xs text-muted-foreground">
                         ¿Necesitas ayuda? Haz clic en el ícono de ayuda (?) en cualquier página o visita el
                     </span>
-                    <Link href="/ayuda" className="text-xs text-blue-600 hover:underline font-medium">
+                    <Link href="/ayuda" className="text-sm font-medium text-primary hover:underline">
                         Manual de Uso
                     </Link>
                 </div>
