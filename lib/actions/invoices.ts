@@ -311,6 +311,7 @@ async function callPdfExtractAPI(file: File): Promise<CallPdfExtractAPIResponse>
 
         // Enhanced prompt with better CIF and phone extraction instructions
         const potentialCifs = textData.cifNumbers.length > 0 ? `\n\nPOTENTIAL CIF/NIF/NIE FOUND IN TEXT: ${textData.cifNumbers.join(', ')}` : '';
+        console.log(`Potential CIFs: ${textData.cifNumbers.join(', ')}`);
         const potentialPhones = textData.phoneNumbers.length > 0 ? `\nPOTENTIAL PHONES FOUND IN TEXT: ${textData.phoneNumbers.join(', ')}` : '';
 
         const promptText = `Extract invoice data from these images (consolidate all pages into a single invoice). Only extract visible data, use null for missing optional fields.
@@ -345,7 +346,7 @@ LINE ITEMS (extract ALL items from all pages and make sure it's actually a mater
 - isMaterial: true for physical items, false for services/fees/taxes
 - quantity, unitPrice, totalPrice (2 decimals)
 - itemDate: ISO format if different from invoice date
-- workOrder: Find simple 3-5 digit OT number (e.g., "Obra: 4077" → "OT-4077"). Avoid complex refs like "38600-OT-4077-1427". Apply globally to all items.
+- workOrder: Find simple 3-5 digit OT number (e.g., "Obra: 4077" → "OT-4077"). Avoid complex refs like "38600-OT-4077-1427". If no OT or work order is present, set this field to null. It is possible and valid for this field to be missing.
 - description, lineNumber
 
 JSON format:
@@ -459,88 +460,77 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
     }
 
     try {
-        // First, try to find existing provider by CIF
-        let provider = await tx.provider.findUnique({
+        let existingProvider: Provider | null = null;
+        let matchType = '';
+
+        // Strategy 1: Find by exact CIF match
+        existingProvider = await tx.provider.findUnique({
             where: { cif },
         });
 
-        if (provider) {
-            console.log(`Found existing provider by CIF ${cif}: ${provider.name}`);
-            // Update existing provider with the most recent data
-            provider = await tx.provider.update({
-                where: { cif },
+        if (existingProvider) {
+            matchType = 'exact CIF';
+        } else {
+            // Strategy 2: Find by exact name match (case insensitive)
+            existingProvider = await tx.provider.findFirst({
+                where: {
+                    name: {
+                        equals: name,
+                        mode: 'insensitive'
+                    }
+                },
+            });
+
+            if (existingProvider) {
+                matchType = 'exact name';
+            } else if (phone) {
+                // Strategy 3: Find by phone number
+                existingProvider = await tx.provider.findFirst({
+                    where: { phone: phone },
+                });
+
+                if (existingProvider) {
+                    matchType = 'phone number';
+                } else {
+                    // Strategy 4: Find by similar name
+                    const allProviders = await tx.provider.findMany();
+
+                    for (const candidate of allProviders) {
+                        if (areProviderNamesSimilar(name, candidate.name)) {
+                            existingProvider = candidate;
+                            matchType = 'similar name';
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // If we found an existing provider, update it with the latest information
+        if (existingProvider) {
+            console.log(`Found existing provider by ${matchType}: "${existingProvider.name}" (CIF: ${existingProvider.cif}) -> updating with new data: "${name}" (CIF: ${cif})`);
+
+            const updatedProvider = await tx.provider.update({
+                where: { id: existingProvider.id },
                 data: {
                     name, // Always update name to keep it current
-                    email: email || provider.email, // Keep new email if provided, otherwise keep existing
-                    phone: phone || provider.phone, // Keep new phone if provided, otherwise keep existing
-                    address: address || provider.address, // Keep new address if provided, otherwise keep existing
+                    cif, // Update CIF in case AI extracted a corrected version
+                    email: email || existingProvider.email, // Keep new email if provided, otherwise keep existing
+                    phone: phone || existingProvider.phone, // Keep new phone if provided, otherwise keep existing
+                    address: address || existingProvider.address, // Keep new address if provided, otherwise keep existing
                     type: providerType, // Update type if needed
                 }
             });
-            console.log(`Updated existing provider with CIF ${cif}: ${provider.name} -> ${name}`);
-            return provider;
+
+            console.log(`Updated existing provider found by ${matchType}: ${updatedProvider.name} (CIF: ${updatedProvider.cif})`);
+            return updatedProvider;
         }
 
-        // If not found by CIF, check by phone number (duplicate detection)
-        if (phone) {
-            provider = await tx.provider.findFirst({
-                where: { phone: phone },
-            });
-
-            if (provider) {
-                console.log(`Found existing provider by phone number: ${phone}. Updating CIF from ${provider.cif} to ${cif}`);
-                // Update the existing provider with the new CIF and other data
-                provider = await tx.provider.update({
-                    where: { id: provider.id },
-                    data: {
-                        cif, // Update CIF to the new one
-                        name, // Update name to keep it current
-                        email: email || provider.email,
-                        phone: phone || provider.phone,
-                        address: address || provider.address,
-                        type: providerType,
-                    }
-                });
-                console.log(`Updated existing provider found by phone: ${provider.name} (New CIF: ${cif})`);
-                return provider;
-            }
-        }
-
-        // Check by similar name (new feature)
-        const providersWithSimilarNames = await tx.provider.findMany({
-            select: { id: true, name: true, cif: true, phone: true, email: true, address: true, type: true }
-        });
-
-        for (const existingProvider of providersWithSimilarNames) {
-            if (areProviderNamesSimilar(name, existingProvider.name)) {
-                console.warn(`Found provider with similar name: "${existingProvider.name}" vs "${name}". CIFs: ${existingProvider.cif} vs ${cif}`);
-
-                // If the existing provider doesn't have a CIF and the new one does, update it
-                if (!existingProvider.cif && cif) {
-                    provider = await tx.provider.update({
-                        where: { id: existingProvider.id },
-                        data: {
-                            cif,
-                            name, // Update to the new name
-                            email: email || existingProvider.email,
-                            phone: phone || existingProvider.phone,
-                            address: address || existingProvider.address,
-                            type: providerType,
-                        }
-                    });
-                    console.log(`Updated existing provider with similar name and added CIF: ${provider.name} (CIF: ${cif})`);
-                    return provider;
-                }
-
-                // If both have CIFs but they're different, log a warning but create a new provider
-                if (existingProvider.cif && existingProvider.cif !== cif) {
-                    console.warn(`Similar provider names but different CIFs: "${existingProvider.name}" (${existingProvider.cif}) vs "${name}" (${cif}). Creating new provider.`);
-                }
-            }
-        }
+        // No existing provider found, create a new one
+        console.log(`No existing provider found for name: "${name}", CIF: "${cif}", phone: "${phone}". Creating new provider.`);
 
         // Use upsert to handle race conditions when creating new providers
-        provider = await tx.provider.upsert({
+        const newProvider = await tx.provider.upsert({
             where: { cif },
             update: {
                 name,
@@ -559,8 +549,8 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
             },
         });
 
-        console.log(`Created or found provider: ${name} (CIF: ${cif})`);
-        return provider;
+        console.log(`Created new provider: ${name} (CIF: ${cif})`);
+        return newProvider;
 
     } catch (error) {
         // Handle unique constraint violations that might still occur due to race conditions
@@ -828,7 +818,7 @@ async function processInvoiceItemTx(
                                 invoiceId,
                             },
                         });
-                        console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Price alert created. Old: ${previousPrice}, New: ${currentUnitPriceDecimal}, Change: ${percentageChangeDecimal.toFixed(2)}%, Effective Date: ${effectiveDate.toISOString()}`);
+
                     } catch (alertError) {
                         // Manejar error de constraint único
                         if (typeof alertError === 'object' && alertError !== null && 'code' in alertError &&
@@ -839,14 +829,8 @@ async function processInvoiceItemTx(
                             throw alertError;
                         }
                     }
-                } else {
-                    console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Price alert already exists for effective date ${effectiveDate.toISOString()}. Skipping duplicate creation.`);
                 }
-            } else {
-                console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Price (${currentUnitPriceDecimal}) is unchanged compared to previous invoice item dated ${previousInvoiceItemRecord.itemDate.toISOString()}.`);
             }
-        } else {
-            console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] No chronologically prior invoice item found for material ${createdMaterial.id} / provider ${providerId} before ${effectiveDate.toISOString()}. This is treated as the first price recording for alert purposes.`);
         }
 
         // Update MaterialProvider to reflect the price from the item with the LATEST date

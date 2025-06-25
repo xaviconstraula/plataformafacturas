@@ -42,7 +42,7 @@ model Provider {
 // Modelo para Facturas
 model Invoice {
   id          String        @id @default(cuid())
-  invoiceCode String        @unique // Código único de factura
+  invoiceCode String // Código de factura (único por proveedor)
   providerId  String
   provider    Provider      @relation(fields: [providerId], references: [id], onDelete: Cascade)
   issueDate   DateTime
@@ -54,8 +54,10 @@ model Invoice {
   items       InvoiceItem[]
   alerts      PriceAlert[]
 
+  @@unique([invoiceCode, providerId]) // Código único por proveedor
   @@index([providerId])
   @@index([issueDate])
+  @@index([invoiceCode])
 }
 
 // Modelo para Materiales
