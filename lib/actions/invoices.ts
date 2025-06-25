@@ -557,18 +557,95 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
         if (typeof error === 'object' && error !== null && 'code' in error &&
             (error as { code: string }).code === 'P2002') {
 
-            console.log(`Race condition detected for provider CIF ${cif}, retrying with find operation...`);
+            console.log(`Race condition detected for provider CIF ${cif}, performing comprehensive search...`);
 
-            // If we hit a unique constraint, the provider was created by another transaction
-            // Just find and return it
-            const existingProvider = await tx.provider.findUnique({
+            // P2002 means a unique constraint was violated, likely the CIF
+            // Another transaction might have created a provider with this CIF or a similar one
+            // Do a comprehensive search to find the existing provider
+
+            // 1. Try exact CIF match first
+            let existingProvider = await tx.provider.findUnique({
                 where: { cif },
             });
 
             if (existingProvider) {
-                console.log(`Retrieved provider after race condition: ${existingProvider.name} (CIF: ${cif})`);
+                console.log(`Found provider after race condition by exact CIF: ${existingProvider.name} (CIF: ${cif})`);
                 return existingProvider;
             }
+
+            // 2. If not found by CIF, search by name (another transaction might have created with different CIF)
+            existingProvider = await tx.provider.findFirst({
+                where: {
+                    name: {
+                        equals: name,
+                        mode: 'insensitive'
+                    }
+                },
+            });
+
+            if (existingProvider) {
+                console.log(`Found provider after race condition by name: ${existingProvider.name} (CIF: ${existingProvider.cif}) - updating with new CIF: ${cif}`);
+                // Update the existing provider with the new CIF if needed
+                const updatedProvider = await tx.provider.update({
+                    where: { id: existingProvider.id },
+                    data: {
+                        cif, // Update with the CIF from current transaction
+                        email: email || existingProvider.email,
+                        phone: phone || existingProvider.phone,
+                        address: address || existingProvider.address,
+                        type: providerType,
+                    }
+                });
+                return updatedProvider;
+            }
+
+            // 3. Search by phone if available
+            if (phone) {
+                existingProvider = await tx.provider.findFirst({
+                    where: { phone: phone },
+                });
+
+                if (existingProvider) {
+                    console.log(`Found provider after race condition by phone: ${existingProvider.name} (CIF: ${existingProvider.cif}) - updating with new CIF: ${cif}`);
+                    const updatedProvider = await tx.provider.update({
+                        where: { id: existingProvider.id },
+                        data: {
+                            cif,
+                            name,
+                            email: email || existingProvider.email,
+                            phone: phone || existingProvider.phone,
+                            address: address || existingProvider.address,
+                            type: providerType,
+                        }
+                    });
+                    return updatedProvider;
+                }
+            }
+
+            // 4. Search by similar name as last resort
+            const allProviders = await tx.provider.findMany();
+            for (const candidate of allProviders) {
+                if (areProviderNamesSimilar(name, candidate.name)) {
+                    console.log(`Found provider after race condition by similar name: ${candidate.name} (CIF: ${candidate.cif}) - updating with new data`);
+                    const updatedProvider = await tx.provider.update({
+                        where: { id: candidate.id },
+                        data: {
+                            cif,
+                            name,
+                            email: email || candidate.email,
+                            phone: phone || candidate.phone,
+                            address: address || candidate.address,
+                            type: providerType,
+                        }
+                    });
+                    return updatedProvider;
+                }
+            }
+
+            // If we still haven't found anything, the race condition might have resolved
+            // Try one more time to create the provider
+            console.log(`No existing provider found after race condition, attempting final creation for ${name} (CIF: ${cif})`);
+            throw error; // Re-throw to let the caller handle it
         }
 
         // Re-throw other errors
@@ -1143,7 +1220,7 @@ export async function createInvoiceFromFiles(
     })));
 
     // 4. Process database operations with controlled concurrency
-    const DB_CONCURRENCY_LIMIT = 2; // Reduced from 3 to minimize race conditions
+    const DB_CONCURRENCY_LIMIT = 1; // Set to 1 to ensure sequential provider processing and minimize race conditions
     const dbResults: CreateInvoiceResult[] = [];
 
     for (let i = 0; i < processableItems.length; i += DB_CONCURRENCY_LIMIT) {
@@ -1155,233 +1232,264 @@ export async function createInvoiceFromFiles(
                 return { success: false, message: "No extracted data", fileName: fileName };
             }
 
-            try {
-                console.log(`Starting database transaction for sorted invoice from file: ${fileName}, invoice code: ${extractedData.invoiceCode}, issue date: ${extractedData.issueDate}`);
-                const operationResult: TransactionOperationResult = await prisma.$transaction(async (tx) => {
-                    const provider = await findOrCreateProviderTx(tx, extractedData.provider);
+            // Retry mechanism for handling provider race conditions during concurrent processing
+            const maxRetries = 3;
+            let lastError: unknown = null;
 
-                    const existingInvoice = await tx.invoice.findFirst({
-                        where: {
-                            invoiceCode: extractedData.invoiceCode,
-                            providerId: provider.id
+            for (let attempt = 1; attempt <= maxRetries; attempt++) {
+                try {
+                    console.log(`Starting database transaction for sorted invoice from file: ${fileName}, invoice code: ${extractedData.invoiceCode}, issue date: ${extractedData.issueDate} (attempt ${attempt}/${maxRetries})`);
+                    const operationResult: TransactionOperationResult = await prisma.$transaction(async (tx) => {
+                        const provider = await findOrCreateProviderTx(tx, extractedData.provider);
+
+                        const existingInvoice = await tx.invoice.findFirst({
+                            where: {
+                                invoiceCode: extractedData.invoiceCode,
+                                providerId: provider.id
+                            }
+                        });
+
+                        if (existingInvoice) {
+                            console.log(`Invoice ${extractedData.invoiceCode} from provider ${provider.name} (file: ${fileName}) already exists. Skipping creation.`);
+                            return {
+                                success: true,
+                                message: `Invoice ${extractedData.invoiceCode} from provider ${provider.name} already exists.`,
+                                invoiceId: existingInvoice.id,
+                                alertsCreated: 0,
+                                isExisting: true
+                            };
                         }
-                    });
 
-                    if (existingInvoice) {
-                        console.log(`Invoice ${extractedData.invoiceCode} from provider ${provider.name} (file: ${fileName}) already exists. Skipping creation.`);
+                        const invoice = await tx.invoice.create({
+                            data: {
+                                invoiceCode: extractedData.invoiceCode,
+                                providerId: provider.id,
+                                issueDate: new Date(extractedData.issueDate),
+                                totalAmount: new Prisma.Decimal(extractedData.totalAmount.toFixed(2)),
+                                status: "PROCESSED",
+                            },
+                        });
+
+                        let alertsCounter = 0;
+                        const currentInvoiceIssueDate = new Date(extractedData.issueDate);
+                        const intraInvoiceMaterialPriceHistory = new Map<string, { price: Prisma.Decimal; date: Date; invoiceItemId: string }>();
+
+                        for (const itemData of extractedData.items) {
+                            if (!itemData.materialName) {
+                                console.warn(`Skipping item due to missing material name in invoice ${invoice.invoiceCode} from file ${fileName}`);
+                                continue;
+                            }
+
+                            if (typeof itemData.quantity !== 'number' || isNaN(itemData.quantity)) {
+                                console.warn(`Skipping item due to invalid or missing quantity in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}, Quantity: ${itemData.quantity}`);
+                                continue;
+                            }
+
+                            if (typeof itemData.unitPrice !== 'number' || isNaN(itemData.unitPrice)) {
+                                console.warn(`Missing or invalid unit price for item in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}. Defaulting to 0.`);
+                                itemData.unitPrice = 0;
+                            }
+                            if (typeof itemData.totalPrice !== 'number' || isNaN(itemData.totalPrice)) {
+                                console.warn(`Missing or invalid total price for item in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}. Defaulting to 0.`);
+                                itemData.totalPrice = 0;
+                            }
+
+                            const isMaterialItem = typeof itemData.isMaterial === 'boolean' ? itemData.isMaterial : true;
+
+                            if (!isMaterialItem) {
+                                console.log(`[Invoice ${invoice.invoiceCode}][Item: ${itemData.materialName}] Marked as non-material. Creating InvoiceItem only.`);
+                                const quantityDecimal = new Prisma.Decimal(itemData.quantity.toFixed(2));
+                                const currentUnitPriceDecimal = new Prisma.Decimal(itemData.unitPrice.toFixed(2));
+                                const totalPriceDecimal = new Prisma.Decimal(itemData.totalPrice.toFixed(2));
+                                const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
+
+                                await tx.invoiceItem.create({
+                                    data: {
+                                        invoiceId: invoice.id,
+                                        materialId: (await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialCode, provider.type)).id,
+                                        quantity: quantityDecimal,
+                                        unitPrice: currentUnitPriceDecimal,
+                                        totalPrice: totalPriceDecimal,
+                                        itemDate: effectiveItemDate,
+                                        workOrder: itemData.workOrder || null,
+                                    },
+                                });
+                                console.log(`[Invoice ${invoice.invoiceCode}] Non-material item "${itemData.materialName}" added to invoice items. No price alert/MaterialProvider update.`);
+                                continue;
+                            }
+
+                            let material: Material;
+                            try {
+                                material = await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialCode, provider.type);
+                            } catch (materialError) {
+                                console.error(`Error creating/finding material '${itemData.materialName}' in invoice ${invoice.invoiceCode}:`, materialError);
+                                throw new Error(`Failed to process material '${itemData.materialName}': ${materialError instanceof Error ? materialError.message : 'Unknown error'}`);
+                            }
+                            const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
+                            const currentItemUnitPrice = new Prisma.Decimal(itemData.unitPrice.toFixed(2));
+
+                            const lastSeenPriceRecordInThisInvoice = intraInvoiceMaterialPriceHistory.get(material.id);
+
+                            if (lastSeenPriceRecordInThisInvoice) {
+                                if (effectiveItemDate.getTime() >= lastSeenPriceRecordInThisInvoice.date.getTime() &&
+                                    !currentItemUnitPrice.equals(lastSeenPriceRecordInThisInvoice.price)) {
+
+                                    const priceDiff = currentItemUnitPrice.minus(lastSeenPriceRecordInThisInvoice.price);
+                                    let percentageChangeDecimal: Prisma.Decimal;
+                                    if (!lastSeenPriceRecordInThisInvoice.price.isZero()) {
+                                        percentageChangeDecimal = priceDiff.dividedBy(lastSeenPriceRecordInThisInvoice.price).times(100);
+                                    } else {
+                                        percentageChangeDecimal = new Prisma.Decimal(currentItemUnitPrice.isPositive() ? 9999 : -9999);
+                                    }
+
+                                    try {
+                                        await tx.priceAlert.create({
+                                            data: {
+                                                materialId: material.id,
+                                                providerId: provider.id,
+                                                oldPrice: lastSeenPriceRecordInThisInvoice.price,
+                                                newPrice: currentItemUnitPrice,
+                                                percentage: percentageChangeDecimal,
+                                                status: "PENDING",
+                                                effectiveDate: effectiveItemDate,
+                                                invoiceId: invoice.id,
+                                            },
+                                        });
+                                    } catch (alertError) {
+                                        // Manejar error de constraint único para alertas intra-factura
+                                        if (typeof alertError === 'object' && alertError !== null && 'code' in alertError &&
+                                            (alertError as { code: string }).code === 'P2002') {
+                                            console.log(`[Invoice ${invoice.invoiceCode}][Material '${material.name}'] Intra-invoice price alert already exists (caught constraint violation). Skipping duplicate creation.`);
+                                            // No incrementar alertsCounter en este caso
+                                            alertsCounter--; // Compensar el incremento que viene después
+                                        } else {
+                                            throw alertError;
+                                        }
+                                    }
+                                    alertsCounter++;
+                                    console.log(`[Invoice ${invoice.invoiceCode}][Material '${material.name}'] INTRA-INVOICE Price alert created. Old (from item ${lastSeenPriceRecordInThisInvoice.invoiceItemId} in this invoice): ${lastSeenPriceRecordInThisInvoice.price}, New (current item): ${currentItemUnitPrice}, Change: ${percentageChangeDecimal.toFixed(2)}%, Effective Date: ${effectiveItemDate.toISOString()}`);
+                                }
+                            }
+
+                            const { invoiceItem, alert: interInvoiceAlert } = await processInvoiceItemTx(
+                                tx,
+                                itemData,
+                                invoice.id,
+                                currentInvoiceIssueDate,
+                                provider.id,
+                                material,
+                                isMaterialItem
+                            );
+
+                            if (interInvoiceAlert) {
+                                alertsCounter++;
+                            }
+
+                            if (isMaterialItem) {
+                                intraInvoiceMaterialPriceHistory.set(material.id, {
+                                    price: invoiceItem.unitPrice,
+                                    date: invoiceItem.itemDate,
+                                    invoiceItemId: invoiceItem.id
+                                });
+                            }
+                        }
+                        console.log(`Successfully created invoice ${invoice.invoiceCode} from file: ${fileName}. Total alerts for this invoice: ${alertsCounter}`);
                         return {
                             success: true,
-                            message: `Invoice ${extractedData.invoiceCode} from provider ${provider.name} already exists.`,
-                            invoiceId: existingInvoice.id,
-                            alertsCreated: 0,
-                            isExisting: true
+                            message: `Invoice ${invoice.invoiceCode} created successfully.`,
+                            invoiceId: invoice.id,
+                            alertsCreated: alertsCounter,
+                            isExisting: false
+                        };
+                    });
+
+                    // Success! Return the result
+                    if (operationResult.isExisting) {
+                        return {
+                            success: true,
+                            message: operationResult.message,
+                            invoiceId: operationResult.invoiceId,
+                            fileName: fileName
+                        };
+                    } else {
+                        return {
+                            success: operationResult.success,
+                            message: operationResult.message,
+                            invoiceId: operationResult.invoiceId,
+                            alertsCreated: operationResult.alertsCreated,
+                            fileName: fileName
                         };
                     }
 
-                    const invoice = await tx.invoice.create({
-                        data: {
-                            invoiceCode: extractedData.invoiceCode,
-                            providerId: provider.id,
-                            issueDate: new Date(extractedData.issueDate),
-                            totalAmount: new Prisma.Decimal(extractedData.totalAmount.toFixed(2)),
-                            status: "PROCESSED",
-                        },
-                    });
+                } catch (error) {
+                    lastError = error;
+                    console.error(`Error processing sorted invoice from ${fileName} (attempt ${attempt}/${maxRetries}):`, error);
 
-                    let alertsCounter = 0;
-                    const currentInvoiceIssueDate = new Date(extractedData.issueDate);
-                    const intraInvoiceMaterialPriceHistory = new Map<string, { price: Prisma.Decimal; date: Date; invoiceItemId: string }>();
+                    // Check if this error is worth retrying
+                    const isRetryableError = typeof error === 'object' && error !== null && 'code' in error &&
+                        (error as { code: string }).code === 'P2002'; // Unique constraint violation
 
-                    for (const itemData of extractedData.items) {
-                        if (!itemData.materialName) {
-                            console.warn(`Skipping item due to missing material name in invoice ${invoice.invoiceCode} from file ${fileName}`);
-                            continue;
-                        }
+                    const isBlockedProviderError = error instanceof Error &&
+                        (error as Error & { isBlockedProvider?: boolean }).isBlockedProvider;
 
-                        if (typeof itemData.quantity !== 'number' || isNaN(itemData.quantity)) {
-                            console.warn(`Skipping item due to invalid or missing quantity in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}, Quantity: ${itemData.quantity}`);
-                            continue;
-                        }
-
-                        if (typeof itemData.unitPrice !== 'number' || isNaN(itemData.unitPrice)) {
-                            console.warn(`Missing or invalid unit price for item in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}. Defaulting to 0.`);
-                            itemData.unitPrice = 0;
-                        }
-                        if (typeof itemData.totalPrice !== 'number' || isNaN(itemData.totalPrice)) {
-                            console.warn(`Missing or invalid total price for item in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}. Defaulting to 0.`);
-                            itemData.totalPrice = 0;
-                        }
-
-                        const isMaterialItem = typeof itemData.isMaterial === 'boolean' ? itemData.isMaterial : true;
-
-                        if (!isMaterialItem) {
-                            console.log(`[Invoice ${invoice.invoiceCode}][Item: ${itemData.materialName}] Marked as non-material. Creating InvoiceItem only.`);
-                            const quantityDecimal = new Prisma.Decimal(itemData.quantity.toFixed(2));
-                            const currentUnitPriceDecimal = new Prisma.Decimal(itemData.unitPrice.toFixed(2));
-                            const totalPriceDecimal = new Prisma.Decimal(itemData.totalPrice.toFixed(2));
-                            const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
-
-                            await tx.invoiceItem.create({
-                                data: {
-                                    invoiceId: invoice.id,
-                                    materialId: (await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialCode, provider.type)).id,
-                                    quantity: quantityDecimal,
-                                    unitPrice: currentUnitPriceDecimal,
-                                    totalPrice: totalPriceDecimal,
-                                    itemDate: effectiveItemDate,
-                                    workOrder: itemData.workOrder || null,
-                                },
-                            });
-                            console.log(`[Invoice ${invoice.invoiceCode}] Non-material item "${itemData.materialName}" added to invoice items. No price alert/MaterialProvider update.`);
-                            continue;
-                        }
-
-                        let material: Material;
-                        try {
-                            material = await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialCode, provider.type);
-                        } catch (materialError) {
-                            console.error(`Error creating/finding material '${itemData.materialName}' in invoice ${invoice.invoiceCode}:`, materialError);
-                            throw new Error(`Failed to process material '${itemData.materialName}': ${materialError instanceof Error ? materialError.message : 'Unknown error'}`);
-                        }
-                        const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
-                        const currentItemUnitPrice = new Prisma.Decimal(itemData.unitPrice.toFixed(2));
-
-                        const lastSeenPriceRecordInThisInvoice = intraInvoiceMaterialPriceHistory.get(material.id);
-
-                        if (lastSeenPriceRecordInThisInvoice) {
-                            if (effectiveItemDate.getTime() >= lastSeenPriceRecordInThisInvoice.date.getTime() &&
-                                !currentItemUnitPrice.equals(lastSeenPriceRecordInThisInvoice.price)) {
-
-                                const priceDiff = currentItemUnitPrice.minus(lastSeenPriceRecordInThisInvoice.price);
-                                let percentageChangeDecimal: Prisma.Decimal;
-                                if (!lastSeenPriceRecordInThisInvoice.price.isZero()) {
-                                    percentageChangeDecimal = priceDiff.dividedBy(lastSeenPriceRecordInThisInvoice.price).times(100);
-                                } else {
-                                    percentageChangeDecimal = new Prisma.Decimal(currentItemUnitPrice.isPositive() ? 9999 : -9999);
-                                }
-
-                                try {
-                                    await tx.priceAlert.create({
-                                        data: {
-                                            materialId: material.id,
-                                            providerId: provider.id,
-                                            oldPrice: lastSeenPriceRecordInThisInvoice.price,
-                                            newPrice: currentItemUnitPrice,
-                                            percentage: percentageChangeDecimal,
-                                            status: "PENDING",
-                                            effectiveDate: effectiveItemDate,
-                                            invoiceId: invoice.id,
-                                        },
-                                    });
-                                } catch (alertError) {
-                                    // Manejar error de constraint único para alertas intra-factura
-                                    if (typeof alertError === 'object' && alertError !== null && 'code' in alertError &&
-                                        (alertError as { code: string }).code === 'P2002') {
-                                        console.log(`[Invoice ${invoice.invoiceCode}][Material '${material.name}'] Intra-invoice price alert already exists (caught constraint violation). Skipping duplicate creation.`);
-                                        // No incrementar alertsCounter en este caso
-                                        alertsCounter--; // Compensar el incremento que viene después
-                                    } else {
-                                        throw alertError;
-                                    }
-                                }
-                                alertsCounter++;
-                                console.log(`[Invoice ${invoice.invoiceCode}][Material '${material.name}'] INTRA-INVOICE Price alert created. Old (from item ${lastSeenPriceRecordInThisInvoice.invoiceItemId} in this invoice): ${lastSeenPriceRecordInThisInvoice.price}, New (current item): ${currentItemUnitPrice}, Change: ${percentageChangeDecimal.toFixed(2)}%, Effective Date: ${effectiveItemDate.toISOString()}`);
-                            }
-                        }
-
-                        const { invoiceItem, alert: interInvoiceAlert } = await processInvoiceItemTx(
-                            tx,
-                            itemData,
-                            invoice.id,
-                            currentInvoiceIssueDate,
-                            provider.id,
-                            material,
-                            isMaterialItem
-                        );
-
-                        if (interInvoiceAlert) {
-                            alertsCounter++;
-                        }
-
-                        if (isMaterialItem) {
-                            intraInvoiceMaterialPriceHistory.set(material.id, {
-                                price: invoiceItem.unitPrice,
-                                date: invoiceItem.itemDate,
-                                invoiceItemId: invoiceItem.id
-                            });
-                        }
+                    // Don't retry for blocked providers or on last attempt
+                    if (isBlockedProviderError || attempt === maxRetries || !isRetryableError) {
+                        break; // Exit retry loop
                     }
-                    console.log(`Successfully created invoice ${invoice.invoiceCode} from file: ${fileName}. Total alerts for this invoice: ${alertsCounter}`);
-                    return {
-                        success: true,
-                        message: `Invoice ${invoice.invoiceCode} created successfully.`,
-                        invoiceId: invoice.id,
-                        alertsCreated: alertsCounter,
-                        isExisting: false
-                    };
-                });
 
-                if (operationResult.isExisting) {
-                    return {
-                        success: true,
-                        message: operationResult.message,
-                        invoiceId: operationResult.invoiceId,
-                        fileName: fileName
-                    };
-                } else {
-                    return {
-                        success: operationResult.success,
-                        message: operationResult.message,
-                        invoiceId: operationResult.invoiceId,
-                        alertsCreated: operationResult.alertsCreated,
-                        fileName: fileName
-                    };
+                    // Add a small delay before retrying to reduce race conditions
+                    const delay = attempt * 100 + Math.random() * 100; // 100-200ms, 200-300ms, etc.
+                    console.log(`Will retry after ${delay.toFixed(0)}ms delay...`);
+                    await new Promise(resolve => setTimeout(resolve, delay));
                 }
-            } catch (error) {
-                console.error(`Error processing sorted invoice from ${fileName}:`, error);
-                const baseMessage = `Failed to create invoice from ${fileName}`;
-                let specificMessage = "An unexpected error occurred.";
-                let isBlockedProvider = false;
-
-                if (error instanceof Error) {
-                    specificMessage = error.message;
-
-                    // Check if this is a blocked provider error
-                    if ((error as Error & { isBlockedProvider?: boolean }).isBlockedProvider) {
-                        isBlockedProvider = true;
-                        specificMessage = `Provider is blocked: ${specificMessage}`;
-                        console.warn(`Blocked provider detected in file ${fileName}: ${specificMessage}`);
-                    } else if (specificMessage.includes('Failed to process material')) {
-                        specificMessage = `Material processing error: ${specificMessage}`;
-                    } else if (specificMessage.includes('after 10 attempts due to code conflicts')) {
-                        specificMessage = `Unable to create unique material code. This may indicate a data consistency issue.`;
-                    } else if (specificMessage.includes('Provider') && specificMessage.includes('is blocked')) {
-                        isBlockedProvider = true;
-                        specificMessage = `This provider is not allowed for processing.`;
-                    }
-                }
-
-                const isPrismaP2002Error = (e: unknown): e is { code: string; meta?: { target?: string[] } } => {
-                    return typeof e === 'object' && e !== null && 'code' in e && (e as { code: unknown }).code === 'P2002';
-                };
-
-                if (isPrismaP2002Error(error)) {
-                    if (error.meta && error.meta.target) {
-                        if (error.meta.target.includes('invoiceCode') && extractedData) {
-                            console.warn(`Duplicate invoice code '${extractedData.invoiceCode}' for file: ${fileName}`);
-                            specificMessage = `An invoice with code '${extractedData.invoiceCode}' already exists.`;
-                        } else if (error.meta.target.includes('code')) {
-                            specificMessage = `A material with this code already exists. This is usually handled automatically, but a race condition may have occurred.`;
-                        }
-                    }
-                }
-                return {
-                    success: false,
-                    message: isBlockedProvider ? specificMessage : `${baseMessage}: ${specificMessage}`,
-                    fileName: fileName,
-                    isBlockedProvider
-                };
             }
+
+            // If we get here, all retries failed
+            const baseMessage = `Failed to create invoice from ${fileName}`;
+            let specificMessage = "An unexpected error occurred.";
+            let isBlockedProvider = false;
+
+            if (lastError instanceof Error) {
+                specificMessage = lastError.message;
+
+                // Check if this is a blocked provider error
+                if ((lastError as Error & { isBlockedProvider?: boolean }).isBlockedProvider) {
+                    isBlockedProvider = true;
+                    specificMessage = `Provider is blocked: ${specificMessage}`;
+                    console.warn(`Blocked provider detected in file ${fileName}: ${specificMessage}`);
+                } else if (specificMessage.includes('Failed to process material')) {
+                    specificMessage = `Material processing error: ${specificMessage}`;
+                } else if (specificMessage.includes('after 10 attempts due to code conflicts')) {
+                    specificMessage = `Unable to create unique material code. This may indicate a data consistency issue.`;
+                } else if (specificMessage.includes('Provider') && specificMessage.includes('is blocked')) {
+                    isBlockedProvider = true;
+                    specificMessage = `This provider is not allowed for processing.`;
+                }
+            }
+
+            const isPrismaP2002Error = (e: unknown): e is { code: string; meta?: { target?: string[] } } => {
+                return typeof e === 'object' && e !== null && 'code' in e && (e as { code: unknown }).code === 'P2002';
+            };
+
+            if (isPrismaP2002Error(lastError)) {
+                if (lastError.meta && lastError.meta.target) {
+                    if (lastError.meta.target.includes('invoiceCode') && extractedData) {
+                        console.warn(`Duplicate invoice code '${extractedData.invoiceCode}' for file: ${fileName} (after ${maxRetries} retries)`);
+                        specificMessage = `An invoice with code '${extractedData.invoiceCode}' already exists.`;
+                    } else if (lastError.meta.target.includes('code')) {
+                        specificMessage = `A material with this code already exists. Race condition persisted after ${maxRetries} retries.`;
+                    } else if (lastError.meta.target.includes('cif')) {
+                        specificMessage = `Provider CIF constraint conflict persisted after ${maxRetries} retries. This may indicate a provider consolidation issue.`;
+                    }
+                }
+            }
+
+            return {
+                success: false,
+                message: isBlockedProvider ? specificMessage : `${baseMessage}: ${specificMessage}`,
+                fileName: fileName,
+                isBlockedProvider
+            };
         });
 
         const chunkResults = await Promise.all(chunkPromises);
