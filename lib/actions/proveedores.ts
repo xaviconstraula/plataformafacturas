@@ -165,6 +165,7 @@ export async function deleteProviderAction(providerId: string) {
 export async function editProviderAction(providerId: string, data: {
     name: string;
     type: ProviderType;
+    cif: string;
     email?: string | null;
     phone?: string | null;
     address?: string | null;
@@ -174,11 +175,24 @@ export async function editProviderAction(providerId: string, data: {
     }
 
     try {
+        // Check if CIF already exists for a different provider
+        const existingProvider = await prisma.provider.findUnique({
+            where: { cif: data.cif },
+        })
+
+        if (existingProvider && existingProvider.id !== providerId) {
+            return {
+                success: false,
+                message: "Este CIF ya está registrado por otro proveedor."
+            };
+        }
+
         await prisma.provider.update({
             where: { id: providerId },
             data: {
                 name: data.name,
                 type: data.type,
+                cif: data.cif,
                 email: data.email,
                 phone: data.phone,
                 address: data.address,
@@ -192,6 +206,9 @@ export async function editProviderAction(providerId: string, data: {
         if (error instanceof Error) {
             if ('code' in error && error.code === 'P2025') {
                 return { success: false, message: "El proveedor no existe." };
+            }
+            if ('code' in error && error.code === 'P2003') {
+                return { success: false, message: "Error: Violación de restricción única (CIF duplicado)." };
             }
         }
         return { success: false, message: "Error al actualizar el proveedor." };
