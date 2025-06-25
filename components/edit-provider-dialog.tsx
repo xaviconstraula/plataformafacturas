@@ -29,6 +29,7 @@ interface EditProviderDialogProps {
     initialData: {
         name: string
         type: ProviderType
+        cif: string
         email: string | null
         phone: string | null
         address: string | null
@@ -97,6 +98,16 @@ export function EditProviderDialog({ providerId, initialData, children }: EditPr
                                     <SelectItem value="MACHINERY_RENTAL">Alquiler de Maquinaria</SelectItem>
                                 </SelectContent>
                             </Select>
+                        </div>
+                        <div className="grid gap-2">
+                            <Label htmlFor="cif">CIF</Label>
+                            <Input
+                                id="cif"
+                                value={formData.cif}
+                                onChange={(e) => setFormData({ ...formData, cif: e.target.value })}
+                                placeholder="Número de Identificación Fiscal"
+                                required
+                            />
                         </div>
                         <div className="grid gap-2">
                             <Label htmlFor="email">Email</Label>

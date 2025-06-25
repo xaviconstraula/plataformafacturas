@@ -281,6 +281,7 @@ export function SupplierAnalyticsSection({
                                             initialData={{
                                                 name: supplier.supplierName,
                                                 type: supplier.supplierType,
+                                                cif: supplier.supplierCif,
                                                 email: supplier.email,
                                                 phone: supplier.phone,
                                                 address: supplier.address,
