@@ -346,7 +346,7 @@ LINE ITEMS (extract ALL items from all pages and make sure it's actually a mater
 - isMaterial: true for physical items, false for services/fees/taxes
 - quantity, unitPrice, totalPrice (2 decimals)
 - itemDate: ISO format if different from invoice date
-- workOrder: Find simple 3-5 digit OT number (e.g., "Obra: 4077" → "OT-4077"). Avoid complex refs like "38600-OT-4077-1427". If no OT or work order is present, set this field to null. It is possible and valid for this field to be missing.
+- workOrder: Find simple 3-5 digit OT number (e.g., "Obra: 4077" → "OT-4077"). Avoid complex refs like "38600-OT-4077-1427". If no OT or work order is present, set this field to null. It is possible and valid for this field to be missing. If you cannot identify it clearly, set it to null, do not make it up.
 - description, lineNumber
 
 JSON format:
