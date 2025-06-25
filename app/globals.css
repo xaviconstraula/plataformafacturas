@@ -6,7 +6,7 @@
   
   /* Colores corporativos Constraula */
   /* Verde Constraula #CDDE00 */
-  --constraula-green: oklch(0.86 0.15 92);
+  --constraula-green: #CDDE00;
   /* Negro #000000 */  
   --constraula-black: oklch(0 0 0);
   /* Gris #9EABAA */
