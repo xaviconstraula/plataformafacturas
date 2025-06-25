@@ -7,6 +7,7 @@ import { NewInvoiceButton } from "@/components/new-invoice-button"
 import { HelpTooltip, helpContent } from "@/components/help-tooltip"
 import { exportInvoiceData } from "@/lib/actions/analytics"
 import { prisma } from "@/lib/db"
+import { InvoiceNotifications } from "@/components/invoice-notifications"
 
 interface InvoicesPageProps {
   searchParams: Promise<{
@@ -78,6 +79,8 @@ export default async function InvoicesPage({ searchParams }: InvoicesPageProps) 
 
   return (
     <div className="flex flex-col gap-6">
+      <InvoiceNotifications />
+
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">Facturas</h1>
         <div className="flex items-center gap-2">

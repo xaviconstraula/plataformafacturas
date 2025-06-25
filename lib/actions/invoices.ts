@@ -28,6 +28,7 @@ export interface CreateInvoiceResult {
     invoiceId?: string;
     alertsCreated?: number;
     fileName?: string;
+    isBlockedProvider?: boolean;
 }
 
 // Type for items after initial extraction and validation, before sorting
@@ -322,6 +323,7 @@ CRITICAL NUMBER ACCURACY:
 PROVIDER (Invoice Issuer - NOT the client):
 - Find company at TOP of invoice, labeled "Vendedor/Proveedor/Emisor"
 - Extract: name, tax ID, email, phone, address
+- Make sure you don't extract the client's info, but the provider's. For example, constraula or sorigué are never the provider.
 
 TAX ID (CIF/NIF/NIE) - EXTREMELY IMPORTANT:
 - CIF format: Letter + exactly 8 digits (e.g., A12345678)
@@ -446,7 +448,9 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
 
     // Check if provider is blocked
     if (isBlockedProvider(name)) {
-        throw new Error(`Provider '${name}' is blocked and cannot be processed.`);
+        const error = new Error(`Provider '${name}' is blocked and cannot be processed.`);
+        (error as Error & { isBlockedProvider: boolean }).isBlockedProvider = true;
+        throw error;
     }
 
     // Ensure CIF is available for provider unification
@@ -1353,15 +1357,22 @@ export async function createInvoiceFromFiles(
                 console.error(`Error processing sorted invoice from ${fileName}:`, error);
                 const baseMessage = `Failed to create invoice from ${fileName}`;
                 let specificMessage = "An unexpected error occurred.";
+                let isBlockedProvider = false;
 
                 if (error instanceof Error) {
                     specificMessage = error.message;
 
-                    if (specificMessage.includes('Failed to process material')) {
+                    // Check if this is a blocked provider error
+                    if ((error as Error & { isBlockedProvider?: boolean }).isBlockedProvider) {
+                        isBlockedProvider = true;
+                        specificMessage = `Provider is blocked: ${specificMessage}`;
+                        console.warn(`Blocked provider detected in file ${fileName}: ${specificMessage}`);
+                    } else if (specificMessage.includes('Failed to process material')) {
                         specificMessage = `Material processing error: ${specificMessage}`;
                     } else if (specificMessage.includes('after 10 attempts due to code conflicts')) {
                         specificMessage = `Unable to create unique material code. This may indicate a data consistency issue.`;
                     } else if (specificMessage.includes('Provider') && specificMessage.includes('is blocked')) {
+                        isBlockedProvider = true;
                         specificMessage = `This provider is not allowed for processing.`;
                     }
                 }
@@ -1380,7 +1391,12 @@ export async function createInvoiceFromFiles(
                         }
                     }
                 }
-                return { success: false, message: `${baseMessage}: ${specificMessage}`, fileName: fileName };
+                return {
+                    success: false,
+                    message: isBlockedProvider ? specificMessage : `${baseMessage}: ${specificMessage}`,
+                    fileName: fileName,
+                    isBlockedProvider
+                };
             }
         });
 
@@ -1602,9 +1618,15 @@ export async function createManualInvoice(data: ManualInvoiceData): Promise<Crea
         console.error("Error creating manual invoice:", error);
 
         let errorMessage = "An unexpected error occurred.";
+        let isBlockedProvider = false;
 
         if (error instanceof Error) {
             errorMessage = error.message;
+
+            // Check if this is a blocked provider error
+            if ((error as Error & { isBlockedProvider?: boolean }).isBlockedProvider) {
+                isBlockedProvider = true;
+            }
         }
 
         // Handle specific Prisma errors
@@ -1618,6 +1640,7 @@ export async function createManualInvoice(data: ManualInvoiceData): Promise<Crea
         return {
             success: false,
             message: errorMessage,
+            isBlockedProvider,
         };
     }
 } 

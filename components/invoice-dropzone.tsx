@@ -101,6 +101,24 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
             const { overallSuccess, results } = await createInvoiceFromFiles(formData);
             operationResults = results;
 
+            // Check for blocked providers and emit custom events
+            results.forEach((result: CreateInvoiceResult) => {
+                if (result.isBlockedProvider) {
+                    // Extract provider name from the message
+                    const providerNameMatch = result.message.match(/Provider '(.+?)' is blocked/);
+                    const providerName = providerNameMatch ? providerNameMatch[1] : 'Unknown';
+
+                    // Emit custom event for blocked provider
+                    const event = new CustomEvent('blockedProvider', {
+                        detail: {
+                            providerName,
+                            fileName: result.fileName || 'Unknown file'
+                        }
+                    });
+                    window.dispatchEvent(event);
+                }
+            });
+
             // Individual toasts removed from here, will be handled by parent via onProcessingComplete
             // results.forEach((result: CreateInvoiceResult) => {
             //     if (result.success) {

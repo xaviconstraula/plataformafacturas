@@ -132,9 +132,23 @@ export function InvoiceUploadForm() {
           router.push("/facturas")
         }, 1500)
       } else {
-        toast.error("Error", {
-          description: result.message
-        })
+        if (result.isBlockedProvider) {
+          // Emit custom event for blocked provider
+          const providerNameMatch = result.message.match(/Provider '(.+?)' is blocked/);
+          const providerName = providerNameMatch ? providerNameMatch[1] : invoiceData.provider.name;
+
+          const event = new CustomEvent('blockedProvider', {
+            detail: {
+              providerName,
+              fileName: 'Manual Entry'
+            }
+          });
+          window.dispatchEvent(event);
+        } else {
+          toast.error("Error", {
+            description: result.message
+          })
+        }
       }
     } catch (error: unknown) {
       console.error("Error al crear la factura:", error)
@@ -147,14 +161,22 @@ export function InvoiceUploadForm() {
   }
 
   function handlePdfProcessingComplete(results: CreateInvoiceResult[]) {
+    // Handle blocked providers - events are already emitted by InvoiceDropzone
+
     // Show results and redirect
     const successfulUploads = results.filter(r => r.success && !r.message.includes("already exists")).length;
+    const blockedProviders = results.filter(r => r.isBlockedProvider).length;
 
     if (successfulUploads > 0) {
       toast.success(`Facturas procesadas exitosamente: ${successfulUploads}`)
       setTimeout(() => {
         router.push("/facturas")
       }, 1500)
+    } else if (blockedProviders > 0 && successfulUploads === 0) {
+      // If only blocked providers and no successful uploads, show info
+      toast.info("Procesamiento completado", {
+        description: `${blockedProviders} archivo(s) con proveedores bloqueados`
+      })
     }
   }
 

@@ -27,9 +27,12 @@ export function NewInvoiceButton() {
         if (results) {
             results.forEach(result => {
                 if (!result.success) {
-                    toast.error(result.message, {
-                        description: result.fileName ? `File: ${result.fileName}` : undefined,
-                    });
+                    // Don't show toast for blocked providers here since it's handled by the notification component
+                    if (!result.isBlockedProvider) {
+                        toast.error(result.message, {
+                            description: result.fileName ? `File: ${result.fileName}` : undefined,
+                        });
+                    }
                 } else if (result.message.includes("already exists")) {
                     toast.info(result.message, {
                         description: result.fileName ? `File: ${result.fileName}` : undefined,
