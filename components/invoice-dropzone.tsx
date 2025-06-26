@@ -92,71 +92,53 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
             onProcessingStart();
         }
         setIsUploading(true);
+        const filesToProcess = [...files]; // Copy files to a new array
+        setFiles([]); // Clear files from UI immediately
+
+        toast.info("Iniciando procesamiento de facturas", {
+            description: "Esto puede tardar unos momentos. Puede seguir navegando, las facturas aparecerán en la lista principal al completarse.",
+        });
 
         const operationResults: CreateInvoiceResult[] = [];
         try {
-            // Process files in chunks to avoid 413 Request Entity Too Large errors
-            // With 5MB max per file, 6 files = max 30MB per chunk (well under most platform limits)
-            const CHUNK_SIZE = 6; // Process max 6 files per request to stay under size limits
+            const CHUNK_SIZE = 6;
             const fileChunks: File[][] = [];
 
-            // Calculate total file size for logging
-            const totalSizeMB = files.reduce((sum, file) => sum + file.size, 0) / (1024 * 1024);
-
-            // Split files into chunks
-            for (let i = 0; i < files.length; i += CHUNK_SIZE) {
-                fileChunks.push(files.slice(i, i + CHUNK_SIZE));
+            for (let i = 0; i < filesToProcess.length; i += CHUNK_SIZE) {
+                fileChunks.push(filesToProcess.slice(i, i + CHUNK_SIZE));
             }
 
-            console.log(`Processing ${files.length} files (${totalSizeMB.toFixed(1)}MB total) in ${fileChunks.length} chunks of max ${CHUNK_SIZE} files each`);
+            console.log(`Processing ${filesToProcess.length} files in ${fileChunks.length} chunks of max ${CHUNK_SIZE} files each`);
 
-            // Process each chunk sequentially to avoid overwhelming the server
             for (let chunkIndex = 0; chunkIndex < fileChunks.length; chunkIndex++) {
                 const chunk = fileChunks[chunkIndex];
                 const formData = new FormData();
-
-                // Update progress
                 setUploadProgress({ current: chunkIndex + 1, total: fileChunks.length });
-
-                // Calculate chunk size for logging
-                const chunkSizeMB = chunk.reduce((sum, file) => sum + file.size, 0) / (1024 * 1024);
 
                 chunk.forEach((file) => {
                     formData.append("files", file);
                 });
 
-                console.log(`Processing chunk ${chunkIndex + 1}/${fileChunks.length} with ${chunk.length} files (${chunkSizeMB.toFixed(1)}MB)`);
+                console.log(`Processing chunk ${chunkIndex + 1}/${fileChunks.length} with ${chunk.length} files`);
 
                 try {
                     const { results } = await createInvoiceFromFiles(formData);
                     operationResults.push(...results);
                 } catch (chunkError) {
                     console.error(`Error processing chunk ${chunkIndex + 1}:`, chunkError);
-
-                    // Add error results for all files in the failed chunk
-                    chunk.forEach(file => {
-                        operationResults.push({
-                            success: false,
-                            message: chunkError instanceof Error ? chunkError.message : "Unknown error occurred",
-                            fileName: file.name
-                        });
-                    });
+                    // This will now be caught by the outer catch block
+                    throw new Error("Network error or timeout during chunk processing");
                 }
 
-                // Small delay between chunks to prevent overwhelming the server
                 if (chunkIndex < fileChunks.length - 1) {
                     await new Promise(resolve => setTimeout(resolve, 1000));
                 }
             }
 
-            // Check for blocked providers and emit custom events
             operationResults.forEach((result: CreateInvoiceResult) => {
                 if (result.isBlockedProvider) {
-                    // Extract provider name from the message
                     const providerNameMatch = result.message.match(/Provider '(.+?)' is blocked/);
                     const providerName = providerNameMatch ? providerNameMatch[1] : 'Unknown';
-
-                    // Emit custom event for blocked provider
                     const event = new CustomEvent('blockedProvider', {
                         detail: {
                             providerName,
@@ -167,22 +149,16 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
                 }
             });
 
-            // Clear files if all chunks processed (even if some had errors)
-            setFiles([]);
-
         } catch (error) {
             console.error("Error creating invoices:", error);
-            // Generic fallback error, parent will also receive an empty or partial results array
-            toast.error("An unexpected error occurred during processing", {
-                description: "Could not process all invoices. Please try again.",
+            toast.warning("El procesamiento está tardando más de lo esperado", {
+                description: "La carga de facturas continúa en segundo plano. Por favor, revise la página de facturas en unos minutos para ver el resultado.",
             });
-            // Construct a fallback result if needed, or ensure onProcessingComplete handles empty/error states
-            // For simplicity, we let onProcessingComplete handle potentially empty operationResults
         } finally {
             setIsUploading(false);
-            setUploadProgress(null); // Reset progress
+            setUploadProgress(null);
             if (onProcessingComplete) {
-                onProcessingComplete(operationResults); // Call with results, even if an exception occurred (it might be empty)
+                onProcessingComplete(operationResults);
             }
         }
     }

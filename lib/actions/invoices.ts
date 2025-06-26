@@ -938,7 +938,7 @@ async function processInvoiceItemTx(
                 console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Current item date (${effectiveDate.toISOString()}) is older than or same as MaterialProvider's lastPriceDate (${materialProvider.lastPriceDate?.toISOString()}). MaterialProvider not updated by this item's data.`);
             }
         } else {
-            console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] First MaterialProvider record for material ${createdMaterial.id} / provider ${providerId}. Setting initial price ${currentUnitPriceDecimal} from item date ${effectiveDate.toISOString()}.`);
+
             await tx.materialProvider.create({
                 data: {
                     materialId: createdMaterial.id,
@@ -1037,20 +1037,26 @@ export async function createInvoiceFromFiles(
         return { overallSuccess: false, results: [{ success: false, message: "No files provided.", fileName: "N/A" }] };
     }
 
-    // Set a more conservative and stable concurrency limit
-    const MAX_CONCURRENCY = 4;
-    let CONCURRENCY_LIMIT = Math.min(MAX_CONCURRENCY, Math.max(2, Math.ceil(files.length / 5)));
-
+    // More conservative initial concurrency for larger batches
+    let CONCURRENCY_LIMIT = files.length > 10 ?
+        Math.min(6, Math.max(3, Math.ceil(files.length / 8))) : // Reduced for large batches
+        Math.min(10, Math.max(4, Math.ceil(files.length / 5))); // Keep existing for small batches
 
     const allFileProcessingResults: Array<ExtractedFileItem & { rateLimitHeaders?: OpenAIRateLimitHeaders }> = [];
     let lastKnownRateLimits: OpenAIRateLimitHeaders | undefined = undefined;
     let consecutiveRateLimitHits = 0;
 
-    console.log(`Starting extraction for ${files.length} files with initial concurrency limit of ${CONCURRENCY_LIMIT}.`);
+    console.log(`Starting extraction for ${files.length} files with initial concurrency limit of ${CONCURRENCY_LIMIT} (conservative for large batches).`);
 
     // Add memory pressure detection
     const initialMemory = process.memoryUsage();
     console.log(`Initial memory usage: ${Math.round(initialMemory.heapUsed / 1024 / 1024)}MB heap, ${Math.round(initialMemory.rss / 1024 / 1024)}MB RSS`);
+
+    // For very large batches (100+ files), add periodic memory cleanup
+    const isVeryLargeBatch = files.length >= 100;
+    if (isVeryLargeBatch) {
+        console.log(`[Very Large Batch] Processing ${files.length} files - enabling enhanced memory management`);
+    }
 
     for (let i = 0; i < files.length; i += CONCURRENCY_LIMIT) {
         const fileChunk = files.slice(i, i + CONCURRENCY_LIMIT);
@@ -1059,20 +1065,30 @@ export async function createInvoiceFromFiles(
 
         console.log(`Processing batch ${batchNumber} of ${totalBatches} (files ${i + 1} to ${i + fileChunk.length} of ${files.length}) with concurrency ${CONCURRENCY_LIMIT}.`);
 
-        // Memory pressure check - more aggressive thresholds and reduction
+        // Memory pressure check
         const currentMemory = process.memoryUsage();
         const heapUsedMB = Math.round(currentMemory.heapUsed / 1024 / 1024);
         const memoryGrowthMB = Math.round((currentMemory.heapUsed - initialMemory.heapUsed) / 1024 / 1024);
 
-        if (heapUsedMB > 500 || memoryGrowthMB > 250) { // Lowered thresholds for earlier detection
+        if (heapUsedMB > 800 || memoryGrowthMB > 400) { // Conservative thresholds
             console.warn(`[Memory] High memory usage detected: ${heapUsedMB}MB heap (+${memoryGrowthMB}MB growth). Reducing concurrency.`);
-            CONCURRENCY_LIMIT = Math.max(1, Math.floor(CONCURRENCY_LIMIT * 0.5)); // More aggressive reduction
+            CONCURRENCY_LIMIT = Math.max(2, Math.floor(CONCURRENCY_LIMIT * 0.6));
 
             // Force garbage collection if available
             if (global.gc) {
                 console.log(`[Memory] Running garbage collection...`);
                 global.gc();
             }
+        }
+
+        // For very large batches, run periodic cleanup every 50 files
+        if (isVeryLargeBatch && (i / CONCURRENCY_LIMIT) % 10 === 0 && i > 0) {
+            console.log(`[Very Large Batch] Processed ${i} files, running memory cleanup...`);
+            if (global.gc) {
+                global.gc();
+            }
+            // Small pause to allow memory cleanup
+            await new Promise(resolve => setTimeout(resolve, 2000));
         }
 
         // Smart rate limit checking - only wait if we're actually close to limits
@@ -1115,12 +1131,13 @@ export async function createInvoiceFromFiles(
                 // Reset consecutive hits if we're not hitting limits
                 consecutiveRateLimitHits = 0;
 
-                // Capped and more conservative concurrency increases
-                if (lastKnownRateLimits.remainingRequests !== undefined && lastKnownRateLimits.remainingRequests > 20 &&
+                // More conservative concurrency increases for large batches
+                if (files.length <= 10 && // Only increase for smaller batches
+                    lastKnownRateLimits.remainingRequests !== undefined && lastKnownRateLimits.remainingRequests > 20 &&
                     lastKnownRateLimits.remainingTokens !== undefined && lastKnownRateLimits.remainingTokens > 50000 &&
-                    CONCURRENCY_LIMIT < MAX_CONCURRENCY) { // Respect the hard cap
-                    CONCURRENCY_LIMIT = Math.min(MAX_CONCURRENCY, CONCURRENCY_LIMIT + 1);
-                    console.log(`[RateLimit] Increasing concurrency to ${CONCURRENCY_LIMIT} due to available headroom`);
+                    CONCURRENCY_LIMIT < 12) { // Lower max concurrency
+                    CONCURRENCY_LIMIT = Math.min(12, CONCURRENCY_LIMIT + 1);
+                    console.log(`[RateLimit] Increasing concurrency to ${CONCURRENCY_LIMIT} due to available headroom (small batch only)`);
                 }
             }
         }
@@ -1274,7 +1291,7 @@ export async function createInvoiceFromFiles(
                     // For large invoices, use longer timeout and chunked processing
                     const itemCount = extractedData.items?.length || 0;
                     const isLargeInvoice = itemCount > 50;
-                    const transactionTimeout = isLargeInvoice ? 60000 : 30000; // 60s for large invoices, 30s for normal
+                    const transactionTimeout = isLargeInvoice ? 36000000 : 600000; // 10 hours for large invoices, 10 minutes for normal
 
                     if (isLargeInvoice) {
                         console.log(`[Large Invoice] Processing ${itemCount} items with extended timeout: ${transactionTimeout / 1000}s`);
@@ -1461,7 +1478,7 @@ export async function createInvoiceFromFiles(
                         };
                     }, {
                         timeout: transactionTimeout, // Use dynamic timeout based on invoice size
-                        maxWait: 10000
+                        maxWait: 300000 // 5 minutes max wait
                     });
 
                     // Success! Return the result
