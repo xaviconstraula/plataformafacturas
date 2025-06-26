@@ -32,6 +32,12 @@ export function BatchProgressBanner() {
                     const completedBatch = newlyCompletedBatches[0]
                     const currentBatch = batches.find(b => b.id === completedBatch.id)
 
+                    console.log('Batch completed detected:', {
+                        batchId: completedBatch.id,
+                        status: currentBatch?.status,
+                        successfulFiles: currentBatch?.successfulFiles
+                    });
+
                     if (currentBatch?.status === 'COMPLETED') {
                         toast.success("Procesamiento completado", {
                             description: `${currentBatch.successfulFiles} facturas procesadas exitosamente. Recargando página...`
@@ -44,12 +50,18 @@ export function BatchProgressBanner() {
 
                     // Reload page immediately to show the new invoices
                     setTimeout(() => {
+                        console.log('Reloading page after batch completion...');
                         window.location.reload()
                     }, 1000) // Reduced from 2000ms to 1000ms
                 }
 
-                setActiveBatches(batches)
-                previousBatchesRef.current = batches
+                // Only show batches that are actually active (not completed)
+                const activeBatchesOnly = batches.filter(batch =>
+                    batch.status === 'PENDING' || batch.status === 'PROCESSING'
+                );
+
+                setActiveBatches(activeBatchesOnly)
+                previousBatchesRef.current = batches // Keep all batches for completion detection
             } catch (error) {
                 console.error("Error fetching batch progress:", error)
             } finally {

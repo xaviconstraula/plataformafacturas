@@ -68,11 +68,27 @@ export async function updateBatchProgress(
 
 // Get active batch processing records
 export async function getActiveBatches(): Promise<BatchProgressInfo[]> {
+    // Include recently completed batches (within last 2 minutes) so we can detect completion
+    const twoMinutesAgo = new Date();
+    twoMinutesAgo.setMinutes(twoMinutesAgo.getMinutes() - 2);
+
     const batches = await prisma.batchProcessing.findMany({
         where: {
-            status: {
-                in: ['PENDING', 'PROCESSING']
-            }
+            OR: [
+                {
+                    status: {
+                        in: ['PENDING', 'PROCESSING']
+                    }
+                },
+                {
+                    status: {
+                        in: ['COMPLETED', 'FAILED']
+                    },
+                    completedAt: {
+                        gte: twoMinutesAgo
+                    }
+                }
+            ]
         },
         orderBy: {
             createdAt: 'desc'
