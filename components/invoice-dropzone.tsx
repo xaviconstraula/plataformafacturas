@@ -96,44 +96,29 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
         setFiles([]); // Clear files from UI immediately
 
         toast.info("Iniciando procesamiento de facturas", {
-            description: "Esto puede tardar unos momentos. Puede seguir navegando, las facturas aparecerán en la lista principal al completarse.",
+            description: "Las facturas se procesarán en segundo plano. Por favor, revise la página de facturas en unos minutos para ver el resultado.",
         });
 
+        // Give a small delay to allow modal to close before reloading
+        setTimeout(() => {
+            window.location.reload();
+        }, 500);
+
         const operationResults: CreateInvoiceResult[] = [];
+        let batchId: string | undefined;
+
         try {
-            const CHUNK_SIZE = 6;
-            const fileChunks: File[][] = [];
+            // Process all files in a single call to maintain batch integrity
+            const formData = new FormData();
+            filesToProcess.forEach((file) => {
+                formData.append("files", file);
+            });
 
-            for (let i = 0; i < filesToProcess.length; i += CHUNK_SIZE) {
-                fileChunks.push(filesToProcess.slice(i, i + CHUNK_SIZE));
-            }
+            console.log(`Processing ${filesToProcess.length} files in a single batch`);
 
-            console.log(`Processing ${filesToProcess.length} files in ${fileChunks.length} chunks of max ${CHUNK_SIZE} files each`);
-
-            for (let chunkIndex = 0; chunkIndex < fileChunks.length; chunkIndex++) {
-                const chunk = fileChunks[chunkIndex];
-                const formData = new FormData();
-                setUploadProgress({ current: chunkIndex + 1, total: fileChunks.length });
-
-                chunk.forEach((file) => {
-                    formData.append("files", file);
-                });
-
-                console.log(`Processing chunk ${chunkIndex + 1}/${fileChunks.length} with ${chunk.length} files`);
-
-                try {
-                    const { results } = await createInvoiceFromFiles(formData);
-                    operationResults.push(...results);
-                } catch (chunkError) {
-                    console.error(`Error processing chunk ${chunkIndex + 1}:`, chunkError);
-                    // This will now be caught by the outer catch block
-                    throw new Error("Network error or timeout during chunk processing");
-                }
-
-                if (chunkIndex < fileChunks.length - 1) {
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                }
-            }
+            const { results, batchId: returnedBatchId } = await createInvoiceFromFiles(formData);
+            batchId = returnedBatchId;
+            operationResults.push(...results);
 
             operationResults.forEach((result: CreateInvoiceResult) => {
                 if (result.isBlockedProvider) {
@@ -154,6 +139,17 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
             toast.warning("El procesamiento está tardando más de lo esperado", {
                 description: "La carga de facturas continúa en segundo plano. Por favor, revise la página de facturas en unos minutos para ver el resultado.",
             });
+
+            // Even if there's an error, we still want to pass the batch ID if we have it
+            // so the user can track progress
+            if (batchId) {
+                operationResults.push({
+                    success: false,
+                    message: "Processing timeout - continuing in background",
+                    batchId: batchId,
+                    fileName: "Batch Processing"
+                });
+            }
         } finally {
             setIsUploading(false);
             setUploadProgress(null);

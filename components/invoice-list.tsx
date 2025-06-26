@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button"
 import { ChevronLeftIcon, ChevronRightIcon, EyeIcon } from "lucide-react"
 import { formatCurrency } from "@/lib/utils"
 import { DeleteInvoiceButton } from "./delete-invoice-button"
+import { BatchProgressBanner } from "./batch-progress-banner"
 import { ProviderType } from "@/generated/prisma"
 
 interface InvoiceListProps {
@@ -67,6 +68,9 @@ export function InvoiceList({ invoices, totalPages, currentPage, pageSize, total
 
   return (
     <div className="space-y-4">
+      {/* Batch Progress Banner */}
+      <BatchProgressBanner />
+
       <div className="rounded-md border">
         <Table>
           <TableHeader>

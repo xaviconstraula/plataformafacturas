@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Button } from '@/components/ui/button'
 import {
     Dialog,
@@ -18,6 +18,20 @@ import type { CreateInvoiceResult } from '@/lib/actions/invoices'
 export function NewInvoiceButton() {
     const [isOpen, setIsOpen] = useState(false)
     const [isProcessing, setIsProcessing] = useState(false)
+
+    // Listen for custom event to close modal
+    useEffect(() => {
+        const handleCloseModal = () => {
+            setIsOpen(false);
+            setIsProcessing(false);
+        };
+
+        window.addEventListener('closeInvoiceModal', handleCloseModal);
+
+        return () => {
+            window.removeEventListener('closeInvoiceModal', handleCloseModal);
+        };
+    }, []);
 
     // This function will be called by InvoiceDropzone when its internal processing is done.
     function handleInvoiceProcessingCompletion(results?: CreateInvoiceResult[]) {
@@ -73,6 +87,7 @@ export function NewInvoiceButton() {
     // Called when processing starts in InvoiceDropzone
     function handleInvoiceProcessingStart() {
         setIsProcessing(true)
+        setIsOpen(false) // Close modal immediately when processing starts
     }
 
     return (

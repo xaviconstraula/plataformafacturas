@@ -2,12 +2,130 @@
 
 import { prisma } from "@/lib/db";
 import { type ExtractedPdfData, type ExtractedPdfItemData } from "@/lib/types/pdf";
-import { Prisma, type Provider, type Material, type Invoice, type InvoiceItem, type PriceAlert, type MaterialProvider } from "@/generated/prisma";
+import { Prisma, type Provider, type Material, type Invoice, type InvoiceItem, type PriceAlert, type MaterialProvider, BatchStatus } from "@/generated/prisma";
 import { revalidatePath } from "next/cache";
 import { pdfToPng } from "pdf-to-png-converter";
 import pdfParse from "pdf-parse";
 import OpenAI from "openai";
 import { extractMaterialCode, normalizeMaterialCode, areMaterialCodesSimilar, generateStandardMaterialCode, areMaterialNamesSimilar } from "@/lib/utils";
+
+// Batch Processing Types and Functions
+export interface BatchProgressInfo {
+    id: string;
+    status: BatchStatus;
+    totalFiles: number;
+    processedFiles: number;
+    successfulFiles: number;
+    failedFiles: number;
+    blockedFiles: number;
+    currentFile?: string;
+    estimatedCompletion?: Date;
+    startedAt?: Date;
+    completedAt?: Date;
+    errors?: string[]; // Array of error messages
+}
+
+// Create a new batch processing record
+export async function createBatchProcessing(totalFiles: number): Promise<string> {
+    const batch = await prisma.batchProcessing.create({
+        data: {
+            totalFiles,
+            status: 'PENDING',
+        },
+    });
+    return batch.id;
+}
+
+// Update batch processing progress
+export async function updateBatchProgress(
+    batchId: string,
+    updates: Partial<{
+        status: BatchStatus;
+        processedFiles: number;
+        successfulFiles: number;
+        failedFiles: number;
+        blockedFiles: number;
+        currentFile: string;
+        estimatedCompletion: Date;
+        startedAt: Date;
+        completedAt: Date;
+        errors: string[];
+    }>
+): Promise<void> {
+    await prisma.batchProcessing.update({
+        where: { id: batchId },
+        data: {
+            ...updates,
+            updatedAt: new Date(),
+        },
+    });
+
+    // Revalidate paths when batch status changes
+    if (updates.status) {
+        revalidatePath("/facturas");
+    }
+}
+
+// Get active batch processing records
+export async function getActiveBatches(): Promise<BatchProgressInfo[]> {
+    const batches = await prisma.batchProcessing.findMany({
+        where: {
+            status: {
+                in: ['PENDING', 'PROCESSING']
+            }
+        },
+        orderBy: {
+            createdAt: 'desc'
+        },
+    });
+
+    return batches.map(batch => ({
+        id: batch.id,
+        status: batch.status,
+        totalFiles: batch.totalFiles,
+        processedFiles: batch.processedFiles,
+        successfulFiles: batch.successfulFiles,
+        failedFiles: batch.failedFiles,
+        blockedFiles: batch.blockedFiles,
+        currentFile: batch.currentFile || undefined,
+        estimatedCompletion: batch.estimatedCompletion || undefined,
+        startedAt: batch.startedAt || undefined,
+        completedAt: batch.completedAt || undefined,
+        errors: batch.errors ? JSON.parse(JSON.stringify(batch.errors)) : undefined,
+    }));
+}
+
+// Clean up old batch processing records (older than 7 days)
+export async function cleanupOldBatches(): Promise<void> {
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+    try {
+        const result = await prisma.batchProcessing.deleteMany({
+            where: {
+                AND: [
+                    {
+                        status: {
+                            in: ['COMPLETED', 'FAILED', 'CANCELLED']
+                        }
+                    },
+                    {
+                        createdAt: {
+                            lt: sevenDaysAgo
+                        }
+                    }
+                ]
+            }
+        });
+
+        if (result.count > 0) {
+            console.log(`Cleaned up ${result.count} old batch processing records`);
+        }
+    } catch (error) {
+        console.error("Error cleaning up old batch records:", error);
+        // Don't throw - this is a maintenance task that shouldn't affect main processing
+    }
+}
 
 // Ensure we have the OpenAI API key
 const openaiApiKey = process.env.OPENAI_API_KEY;
@@ -29,6 +147,7 @@ export interface CreateInvoiceResult {
     alertsCreated?: number;
     fileName?: string;
     isBlockedProvider?: boolean;
+    batchId?: string; // Add batch ID to results
 }
 
 // Type for items after initial extraction and validation, before sorting
@@ -653,6 +772,61 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
     }
 }
 
+// Optimized material finding function that uses cache when available
+async function findOrCreateMaterialTxWithCache(
+    tx: Prisma.TransactionClient,
+    materialName: string,
+    materialCode?: string,
+    providerType?: string,
+    materialCache?: Map<string, { id: string; name: string; code: string; referenceCode: string | null; category: string | null }>
+): Promise<Material> {
+    const normalizedName = materialName.trim();
+
+    // Priorizar el código extraído del PDF por OpenAI
+    const finalCode: string | null = materialCode ? normalizeMaterialCode(materialCode) : null;
+
+    // Try cache first if available
+    if (materialCache) {
+        // Search by code first
+        if (finalCode) {
+            const cachedByCode = materialCache.get(`code:${finalCode}`);
+            if (cachedByCode) {
+                console.log(`Found material in cache by code: "${finalCode}" -> "${cachedByCode.name}"`);
+                return await tx.material.findUnique({ where: { id: cachedByCode.id } }) as Material;
+            }
+
+            const cachedByRef = materialCache.get(`ref:${finalCode}`);
+            if (cachedByRef) {
+                console.log(`Found material in cache by reference code: "${finalCode}" -> "${cachedByRef.name}"`);
+                return await tx.material.findUnique({ where: { id: cachedByRef.id } }) as Material;
+            }
+        }
+
+        // Search by name
+        const cachedByName = materialCache.get(`name:${normalizedName.toLowerCase()}`);
+        if (cachedByName) {
+            console.log(`Found material in cache by name: "${normalizedName}" -> "${cachedByName.name}"`);
+            return await tx.material.findUnique({ where: { id: cachedByName.id } }) as Material;
+        }
+
+        // Check for similar codes in cache if finalCode is long enough
+        if (finalCode && finalCode.length >= 6) {
+            for (const [key, cachedMaterial] of materialCache.entries()) {
+                if (key.startsWith('code:') || key.startsWith('ref:')) {
+                    const cacheCode = key.substring(key.indexOf(':') + 1);
+                    if (areMaterialCodesSimilar(finalCode, cacheCode)) {
+                        console.log(`Found material in cache with similar code: "${cacheCode}" vs "${finalCode}" for material "${materialName}"`);
+                        return await tx.material.findUnique({ where: { id: cachedMaterial.id } }) as Material;
+                    }
+                }
+            }
+        }
+    }
+
+    // Fall back to original database lookup logic
+    return await findOrCreateMaterialTx(tx, materialName, materialCode, providerType);
+}
+
 async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName: string, materialCode?: string, providerType?: string): Promise<Material> {
     const normalizedName = materialName.trim();
     let material: Material | null = null;
@@ -1031,11 +1205,21 @@ async function callPdfExtractAPIWithRetry(file: File, maxRetries: number = 3): P
 
 export async function createInvoiceFromFiles(
     formDataWithFiles: FormData
-): Promise<{ overallSuccess: boolean; results: CreateInvoiceResult[] }> {
+): Promise<{ overallSuccess: boolean; results: CreateInvoiceResult[]; batchId: string }> {
     const files = formDataWithFiles.getAll("files") as File[];
     if (!files || files.length === 0) {
-        return { overallSuccess: false, results: [{ success: false, message: "No files provided.", fileName: "N/A" }] };
+        throw new Error("No files provided.");
     }
+
+    // Create batch processing record
+    const batchId = await createBatchProcessing(files.length);
+    console.log(`Created batch processing record: ${batchId} for ${files.length} files`);
+
+    // Start batch processing
+    await updateBatchProgress(batchId, {
+        status: 'PROCESSING',
+        startedAt: new Date(),
+    });
 
     // More conservative initial concurrency for larger batches
     let CONCURRENCY_LIMIT = files.length > 10 ?
@@ -1058,12 +1242,26 @@ export async function createInvoiceFromFiles(
         console.log(`[Very Large Batch] Processing ${files.length} files - enabling enhanced memory management`);
     }
 
+    const batchErrors: string[] = [];
+
     for (let i = 0; i < files.length; i += CONCURRENCY_LIMIT) {
         const fileChunk = files.slice(i, i + CONCURRENCY_LIMIT);
         const batchNumber = Math.floor(i / CONCURRENCY_LIMIT) + 1;
         const totalBatches = Math.ceil(files.length / CONCURRENCY_LIMIT);
 
         console.log(`Processing batch ${batchNumber} of ${totalBatches} (files ${i + 1} to ${i + fileChunk.length} of ${files.length}) with concurrency ${CONCURRENCY_LIMIT}.`);
+
+        // Update batch progress
+        const currentFileIndex = i + 1;
+        const estimatedTimePerFile = 30; // seconds
+        const remainingFiles = files.length - currentFileIndex;
+        const estimatedCompletion = new Date(Date.now() + (remainingFiles * estimatedTimePerFile * 1000));
+
+        await updateBatchProgress(batchId, {
+            processedFiles: i,
+            currentFile: fileChunk.length > 0 ? fileChunk[0].name : undefined,
+            estimatedCompletion,
+        });
 
         // Memory pressure check
         const currentMemory = process.memoryUsage();
@@ -1262,8 +1460,70 @@ export async function createInvoiceFromFiles(
         date: p.extractedData?.issueDate
     })));
 
-    // 4. Process database operations with controlled concurrency
-    const DB_CONCURRENCY_LIMIT = 1; // Set to 1 to ensure sequential provider processing and minimize race conditions
+    // 4. Pre-process providers to reduce race conditions and improve performance
+    console.log("Pre-processing providers to optimize database operations...");
+    const uniqueProviders = new Map<string, ExtractedPdfData['provider']>();
+
+    for (const item of processableItems) {
+        if (item.extractedData?.provider?.cif) {
+            const key = item.extractedData.provider.cif;
+            if (!uniqueProviders.has(key)) {
+                uniqueProviders.set(key, item.extractedData.provider);
+            }
+        }
+    }
+
+    // Pre-create/find providers to avoid race conditions during invoice processing
+    const providerCache = new Map<string, string>(); // CIF -> Provider ID
+    for (const [cif, providerData] of uniqueProviders.entries()) {
+        try {
+            const provider = await prisma.$transaction(async (tx) => {
+                return await findOrCreateProviderTx(tx, providerData);
+            });
+            providerCache.set(cif, provider.id);
+            console.log(`Pre-processed provider: ${provider.name} (${cif})`);
+        } catch (error) {
+            console.error(`Failed to pre-process provider ${providerData.name} (${cif}):`, error);
+            // Continue with other providers, individual invoice processing will handle this error
+        }
+    }
+
+    // Pre-load common materials to reduce database queries during processing
+    console.log("Pre-loading existing materials for faster lookup...");
+    const existingMaterials = await prisma.material.findMany({
+        select: {
+            id: true,
+            name: true,
+            code: true,
+            referenceCode: true,
+            category: true
+        },
+        take: 1000, // Limit to most recent/common materials to avoid memory issues
+        orderBy: { updatedAt: 'desc' }
+    });
+
+    const materialCache = new Map<string, { id: string; name: string; code: string; referenceCode: string | null; category: string | null }>();
+
+    // Cache by name (normalized)
+    for (const material of existingMaterials) {
+        const normalizedName = material.name.toLowerCase().trim();
+        materialCache.set(`name:${normalizedName}`, material);
+
+        // Cache by code if available
+        if (material.code) {
+            materialCache.set(`code:${material.code}`, material);
+        }
+
+        // Cache by reference code if available
+        if (material.referenceCode) {
+            materialCache.set(`ref:${material.referenceCode}`, material);
+        }
+    }
+
+    console.log(`Pre-loaded ${existingMaterials.length} materials for faster processing`);
+
+    // 5. Process database operations with optimized concurrency
+    const DB_CONCURRENCY_LIMIT = Math.min(3, Math.max(1, Math.ceil(processableItems.length / 10))); // Optimized concurrency: 1-3 based on batch size
     const dbResults: CreateInvoiceResult[] = [];
 
     // Circuit breaker for catastrophic failures
@@ -1280,25 +1540,49 @@ export async function createInvoiceFromFiles(
                 return { success: false, message: "No extracted data", fileName: fileName };
             }
 
+            // Update batch progress
+            await updateBatchProgress(batchId, {
+                currentFile: fileName,
+            });
+
             // Retry mechanism for handling provider race conditions during concurrent processing
             const maxRetries = 3;
             let lastError: unknown = null;
 
             for (let attempt = 1; attempt <= maxRetries; attempt++) {
                 try {
-                    console.log(`Starting database transaction for sorted invoice from file: ${fileName}, invoice code: ${extractedData.invoiceCode}, issue date: ${extractedData.issueDate} (attempt ${attempt}/${maxRetries})`);
+                    console.log(`Starting optimized database transaction for sorted invoice from file: ${fileName}, invoice code: ${extractedData.invoiceCode}, issue date: ${extractedData.issueDate} (attempt ${attempt}/${maxRetries})`);
 
-                    // For large invoices, use longer timeout and chunked processing
+                    // For large invoices, use longer timeout and optimized processing
                     const itemCount = extractedData.items?.length || 0;
                     const isLargeInvoice = itemCount > 50;
-                    const transactionTimeout = isLargeInvoice ? 36000000 : 600000; // 10 hours for large invoices, 10 minutes for normal
+                    const isVeryLargeInvoice = itemCount > 200;
+
+                    // Adaptive timeout based on item count
+                    const baseTimeout = isVeryLargeInvoice ? 1800000 : isLargeInvoice ? 900000 : 300000; // 30min/15min/5min
+                    const transactionTimeout = Math.min(baseTimeout, 1800000); // Cap at 30 minutes
 
                     if (isLargeInvoice) {
-                        console.log(`[Large Invoice] Processing ${itemCount} items with extended timeout: ${transactionTimeout / 1000}s`);
+                        console.log(`[Large Invoice] Processing ${itemCount} items with optimized timeout: ${transactionTimeout / 1000}s (cached lookups enabled)`);
                     }
 
                     const operationResult: TransactionOperationResult = await prisma.$transaction(async (tx) => {
-                        const provider = await findOrCreateProviderTx(tx, extractedData.provider);
+                        // Use cached provider if available, otherwise fall back to findOrCreateProviderTx
+                        let provider;
+                        const cachedProviderId = extractedData.provider.cif ? providerCache.get(extractedData.provider.cif) : undefined;
+
+                        if (cachedProviderId) {
+                            provider = await tx.provider.findUnique({
+                                where: { id: cachedProviderId }
+                            });
+
+                            if (!provider) {
+                                // Cache miss, fall back to findOrCreateProviderTx
+                                provider = await findOrCreateProviderTx(tx, extractedData.provider);
+                            }
+                        } else {
+                            provider = await findOrCreateProviderTx(tx, extractedData.provider);
+                        }
 
                         const existingInvoice = await tx.invoice.findFirst({
                             where: {
@@ -1332,20 +1616,22 @@ export async function createInvoiceFromFiles(
                         const currentInvoiceIssueDate = new Date(extractedData.issueDate);
                         const intraInvoiceMaterialPriceHistory = new Map<string, { price: Prisma.Decimal; date: Date; invoiceItemId: string }>();
 
-                        // Process items in smaller chunks for very large invoices to avoid timeouts
-                        const ITEM_CHUNK_SIZE = isLargeInvoice ? 25 : 999; // Process in chunks of 25 for large invoices
+                        // Process items in optimized chunks for performance
+                        const ITEM_CHUNK_SIZE = isVeryLargeInvoice ? 15 : isLargeInvoice ? 30 : 999; // Smaller chunks for very large invoices
                         const itemChunks = [];
                         for (let i = 0; i < extractedData.items.length; i += ITEM_CHUNK_SIZE) {
                             itemChunks.push(extractedData.items.slice(i, i + ITEM_CHUNK_SIZE));
                         }
 
+                        console.log(`[Invoice ${invoice.invoiceCode}] Processing ${extractedData.items.length} items in ${itemChunks.length} chunk(s) (chunk size: ${ITEM_CHUNK_SIZE})`);
+
                         for (let chunkIndex = 0; chunkIndex < itemChunks.length; chunkIndex++) {
                             const itemChunk = itemChunks[chunkIndex];
 
                             if (isLargeInvoice && chunkIndex > 0) {
-                                console.log(`[Large Invoice] Processing chunk ${chunkIndex + 1}/${itemChunks.length} (${itemChunk.length} items)`);
-                                // Small delay between chunks to prevent overwhelming the database
-                                await new Promise(resolve => setTimeout(resolve, 100));
+                                console.log(`[Large Invoice] Processing chunk ${chunkIndex + 1}/${itemChunks.length} (${itemChunk.length} items) - using cached lookups`);
+                                // Minimal delay between chunks for very large invoices
+                                await new Promise(resolve => setTimeout(resolve, isVeryLargeInvoice ? 50 : 100));
                             }
 
                             for (const itemData of itemChunk) {
@@ -1380,7 +1666,7 @@ export async function createInvoiceFromFiles(
                                     await tx.invoiceItem.create({
                                         data: {
                                             invoiceId: invoice.id,
-                                            materialId: (await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialCode, provider.type)).id,
+                                            materialId: (await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache)).id,
                                             quantity: quantityDecimal,
                                             unitPrice: currentUnitPriceDecimal,
                                             totalPrice: totalPriceDecimal,
@@ -1394,7 +1680,7 @@ export async function createInvoiceFromFiles(
 
                                 let material: Material;
                                 try {
-                                    material = await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialCode, provider.type);
+                                    material = await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache);
                                 } catch (materialError) {
                                     console.error(`Error creating/finding material '${itemData.materialName}' in invoice ${invoice.invoiceCode}:`, materialError);
                                     throw new Error(`Failed to process material '${itemData.materialName}': ${materialError instanceof Error ? materialError.message : 'Unknown error'}`);
@@ -1648,8 +1934,47 @@ export async function createInvoiceFromFiles(
     // Combine extraction errors with database results
     finalResults.push(...dbResults);
 
-    const overallSuccess = finalResults.every(r => r.success);
-    const newlyCreatedInvoices = finalResults.filter(r => r.success && r.invoiceId && !r.message.includes("already exists"));
+    // Add batch ID to all results
+    const finalResultsWithBatch = finalResults.map(result => ({
+        ...result,
+        batchId
+    }));
+
+    // Calculate final batch statistics
+    const successfulInvoices = finalResultsWithBatch.filter(r => r.success && !r.message.includes("already exists"));
+    const failedInvoices = finalResultsWithBatch.filter(r => !r.success && !r.isBlockedProvider);
+    const blockedInvoices = finalResultsWithBatch.filter(r => r.isBlockedProvider);
+
+    // Update final batch status
+    const overallSuccess = finalResultsWithBatch.every(r => r.success);
+    const finalStatus: BatchStatus = circuitBreakerTripped ? 'FAILED' :
+        overallSuccess ? 'COMPLETED' : 'COMPLETED'; // Still completed even with some failures
+
+    await updateBatchProgress(batchId, {
+        status: finalStatus,
+        processedFiles: files.length,
+        successfulFiles: successfulInvoices.length,
+        failedFiles: failedInvoices.length,
+        blockedFiles: blockedInvoices.length,
+        completedAt: new Date(),
+        errors: batchErrors.length > 0 ? batchErrors : undefined,
+    });
+
+    // Performance summary
+    const batchRecord = await prisma.batchProcessing.findUnique({
+        where: { id: batchId },
+        select: { createdAt: true }
+    });
+    const processingTimeMs = batchRecord ? Date.now() - batchRecord.createdAt.getTime() : null;
+
+    const avgTimePerFile = processingTimeMs ? (processingTimeMs / files.length / 1000).toFixed(2) : 'N/A';
+    const totalAlerts = finalResultsWithBatch.reduce((sum, r) => sum + (r.alertsCreated || 0), 0);
+
+    console.log(`Batch ${batchId} completed in ${processingTimeMs ? (processingTimeMs / 1000).toFixed(2) : 'N/A'}s (avg: ${avgTimePerFile}s/file)`);
+    console.log(`Results: ${successfulInvoices.length} successful, ${failedInvoices.length} failed, ${blockedInvoices.length} blocked, ${totalAlerts} alerts created`);
+    console.log(`Optimizations: ${providerCache.size} providers pre-cached, ${existingMaterials.length} materials pre-loaded`);
+
+    const newlyCreatedInvoices = finalResultsWithBatch.filter(r => r.success && r.invoiceId && !r.message.includes("already exists"));
 
     if (newlyCreatedInvoices.length > 0) {
         revalidatePath("/facturas");
@@ -1660,7 +1985,14 @@ export async function createInvoiceFromFiles(
         }
     }
 
-    return { overallSuccess, results: finalResults };
+    // Clean up old batch records as maintenance (non-blocking)
+    if (Math.random() < 0.1) { // Only run cleanup 10% of the time to reduce overhead
+        cleanupOldBatches().catch(error => {
+            console.error("Background cleanup failed:", error);
+        });
+    }
+
+    return { overallSuccess, results: finalResultsWithBatch, batchId };
 }
 
 // Manual invoice creation function for form submissions

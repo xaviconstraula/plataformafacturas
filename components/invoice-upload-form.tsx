@@ -17,6 +17,10 @@ import { toast } from "sonner"
 import { Trash2, Plus } from "lucide-react"
 import { createManualInvoice, type CreateInvoiceResult } from "@/lib/actions/invoices"
 
+interface InvoiceUploadFormProps {
+  onClose?: () => void; // Optional callback to close parent modal
+}
+
 // Enhanced schema that matches the real database structure
 const invoiceItemSchema = z.object({
   materialName: z.string().min(2, {
@@ -62,7 +66,7 @@ const formSchema = z.object({
 
 type FormData = z.infer<typeof formSchema>
 
-export function InvoiceUploadForm() {
+export function InvoiceUploadForm({ onClose }: InvoiceUploadFormProps = {}) {
   const router = useRouter()
   const [activeTab, setActiveTab] = useState("upload")
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -126,8 +130,18 @@ export function InvoiceUploadForm() {
           description: result.message
         })
 
-        // Clear form and redirect
+        // Clear form and close modal if available
         form.reset()
+
+        // Close modal immediately if we have a callback
+        if (onClose) {
+          onClose();
+        }
+
+        // Also emit a custom event to close any modal that might be open
+        const closeModalEvent = new CustomEvent('closeInvoiceModal');
+        window.dispatchEvent(closeModalEvent);
+
         setTimeout(() => {
           router.push("/facturas")
         }, 1500)
@@ -166,17 +180,41 @@ export function InvoiceUploadForm() {
     // Show results and redirect
     const successfulUploads = results.filter(r => r.success && !r.message.includes("already exists")).length;
     const blockedProviders = results.filter(r => r.isBlockedProvider).length;
+    const batchId = results.length > 0 ? results[0].batchId : undefined;
 
-    if (successfulUploads > 0) {
-      toast.success(`Facturas procesadas exitosamente: ${successfulUploads}`)
+    // Close modal immediately if we have a callback
+    if (onClose) {
+      onClose();
+    }
+
+    // Also emit a custom event to close any modal that might be open
+    const closeModalEvent = new CustomEvent('closeInvoiceModal');
+    window.dispatchEvent(closeModalEvent);
+
+    if (successfulUploads > 0 || batchId) {
+      // If we have a batch ID, processing has started
+      if (batchId) {
+        toast.success("Procesamiento iniciado", {
+          description: `Las facturas están siendo procesadas. Recargando página para mostrar el progreso...`
+        });
+      } else {
+        toast.success(`Facturas procesadas exitosamente: ${successfulUploads}`);
+      }
+
+      // Reload the page immediately to show the batch progress
       setTimeout(() => {
-        router.push("/facturas")
-      }, 1500)
+        window.location.reload();
+      }, 1000) // 1 second delay
     } else if (blockedProviders > 0 && successfulUploads === 0) {
       // If only blocked providers and no successful uploads, show info
       toast.info("Procesamiento completado", {
         description: `${blockedProviders} archivo(s) con proveedores bloqueados`
       })
+
+      // Still reload to invoices page
+      setTimeout(() => {
+        window.location.reload();
+      }, 1000)
     }
   }
 

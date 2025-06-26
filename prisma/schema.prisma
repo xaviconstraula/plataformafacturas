@@ -21,6 +21,15 @@ enum AlertStatus {
   REJECTED
 }
 
+// Enum for batch processing status
+enum BatchStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
 // Modelo para Proveedores
 model Provider {
   id         String             @id @default(cuid())
@@ -187,4 +196,35 @@ model ProductGroup {
 
   @@index([category])
   @@index([standardizedName])
+}
+
+// Modelo para seguimiento de procesamiento por lotes
+model BatchProcessing {
+  id              String      @id @default(cuid())
+  status          BatchStatus @default(PENDING)
+  totalFiles      Int
+  processedFiles  Int         @default(0)
+  successfulFiles Int         @default(0)
+  failedFiles     Int         @default(0)
+  blockedFiles    Int         @default(0) // Files with blocked providers
+
+  // Progress tracking
+  currentFile         String? // Current file being processed
+  estimatedCompletion DateTime? // Estimated completion time
+
+  // Error tracking
+  errors Json? // Array of error messages
+
+  // Timestamps
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  // Optional user tracking if you implement authentication
+  userId String? // For multi-user systems
+
+  @@index([status])
+  @@index([createdAt])
+  @@index([userId])
 }
