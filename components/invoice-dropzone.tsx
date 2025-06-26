@@ -108,6 +108,12 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
             batchId = await createBatchProcessing(filesToProcess.length);
             console.log(`Created batch record immediately: ${batchId} for ${filesToProcess.length} files`);
 
+            // Dispatch custom event to immediately refresh the batch progress banner
+            const batchCreatedEvent = new CustomEvent('batchCreated', {
+                detail: { batchId, totalFiles: filesToProcess.length }
+            });
+            window.dispatchEvent(batchCreatedEvent);
+
             // Now process all files in a single call
             const formData = new FormData();
             filesToProcess.forEach((file) => {

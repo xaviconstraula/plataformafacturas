@@ -69,10 +69,21 @@ export function BatchProgressBanner() {
             }
         }
 
+        // Listen for custom event to immediately refresh when a new batch is created
+        const handleBatchCreated = () => {
+            console.log('Batch created event received, refreshing immediately...');
+            fetchBatches();
+        };
+
+        window.addEventListener('batchCreated', handleBatchCreated);
+
         fetchBatches()
         const interval = setInterval(fetchBatches, 3000) // Poll every 3 seconds instead of 5
 
-        return () => clearInterval(interval)
+        return () => {
+            clearInterval(interval)
+            window.removeEventListener('batchCreated', handleBatchCreated);
+        }
     }, [])
 
     if (isLoading) {
