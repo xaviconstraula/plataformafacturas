@@ -191,20 +191,17 @@ export function InvoiceUploadForm({ onClose }: InvoiceUploadFormProps = {}) {
     const closeModalEvent = new CustomEvent('closeInvoiceModal');
     window.dispatchEvent(closeModalEvent);
 
-    if (successfulUploads > 0 || batchId) {
-      // If we have a batch ID, processing has started
-      if (batchId) {
-        toast.success("Procesamiento iniciado", {
-          description: `Las facturas están siendo procesadas. Recargando página para mostrar el progreso...`
-        });
-      } else {
-        toast.success(`Facturas procesadas exitosamente: ${successfulUploads}`);
-      }
-
-      // Reload the page immediately to show the batch progress
+    if (batchId) {
+      // If we have a batch ID, processing has started - let BatchProgressBanner handle the reload
+      toast.success("Procesamiento iniciado", {
+        description: `Las facturas están siendo procesadas. La página se actualizará automáticamente cuando esté listo.`
+      });
+    } else if (successfulUploads > 0) {
+      // Direct processing without batch - reload immediately
+      toast.success(`Facturas procesadas exitosamente: ${successfulUploads}`);
       setTimeout(() => {
         window.location.reload();
-      }, 1000) // 1 second delay
+      }, 1000)
     } else if (blockedProviders > 0 && successfulUploads === 0) {
       // If only blocked providers and no successful uploads, show info
       toast.info("Procesamiento completado", {

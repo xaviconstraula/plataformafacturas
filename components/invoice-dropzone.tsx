@@ -96,13 +96,8 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
         setFiles([]); // Clear files from UI immediately
 
         toast.info("Iniciando procesamiento de facturas", {
-            description: "Las facturas se procesarán en segundo plano. Por favor, revise la página de facturas en unos minutos para ver el resultado.",
+            description: "Las facturas se procesarán en segundo plano. La página se actualizará automáticamente para mostrar el progreso.",
         });
-
-        // Give a small delay to allow modal to close before reloading
-        setTimeout(() => {
-            window.location.reload();
-        }, 500);
 
         const operationResults: CreateInvoiceResult[] = [];
         let batchId: string | undefined;
@@ -137,7 +132,7 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
         } catch (error) {
             console.error("Error creating invoices:", error);
             toast.warning("El procesamiento está tardando más de lo esperado", {
-                description: "La carga de facturas continúa en segundo plano. Por favor, revise la página de facturas en unos minutos para ver el resultado.",
+                description: "La carga de facturas continúa en segundo plano. La página se actualizará automáticamente cuando esté listo.",
             });
 
             // Even if there's an error, we still want to pass the batch ID if we have it
