@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "next lint",
     "prisma:seed": "tsx prisma/seed.ts",
-    "deploy": "sudo git pull origin main && sudo npm install && sudo npx prisma db push && sudo npm run build && pm2 restart invoice-management"
+    "deploy": "sudo git pull origin main && sudo npm install && sudo npx prisma db push && sudo npm run build && pm2 restart ctboxapp"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.0.1",
