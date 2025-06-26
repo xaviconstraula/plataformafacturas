@@ -1227,9 +1227,18 @@ export async function createInvoiceFromFiles(
         throw new Error("No files provided.");
     }
 
-    // Create batch processing record
-    const batchId = await createBatchProcessing(files.length);
-    console.log(`Created batch processing record: ${batchId} for ${files.length} files`);
+    // Check if an existing batch ID was provided, otherwise create a new one
+    const existingBatchId = formDataWithFiles.get("existingBatchId") as string | null;
+    let batchId: string;
+
+    if (existingBatchId) {
+        batchId = existingBatchId;
+        console.log(`Using existing batch processing record: ${batchId} for ${files.length} files`);
+    } else {
+        // Create new batch processing record (fallback for backward compatibility)
+        batchId = await createBatchProcessing(files.length);
+        console.log(`Created new batch processing record: ${batchId} for ${files.length} files`);
+    }
 
     // Start batch processing
     await updateBatchProgress(batchId, {

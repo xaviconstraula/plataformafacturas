@@ -103,16 +103,21 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
         let batchId: string | undefined;
 
         try {
-            // Process all files in a single call to maintain batch integrity
+            // First, create the batch record immediately so the banner shows right away
+            const { createBatchProcessing } = await import('@/lib/actions/invoices');
+            batchId = await createBatchProcessing(filesToProcess.length);
+            console.log(`Created batch record immediately: ${batchId} for ${filesToProcess.length} files`);
+
+            // Now process all files in a single call
             const formData = new FormData();
             filesToProcess.forEach((file) => {
                 formData.append("files", file);
             });
+            formData.append("existingBatchId", batchId); // Pass the existing batch ID
 
-            console.log(`Processing ${filesToProcess.length} files in a single batch`);
+            console.log(`Processing ${filesToProcess.length} files with existing batch ID: ${batchId}`);
 
-            const { results, batchId: returnedBatchId } = await createInvoiceFromFiles(formData);
-            batchId = returnedBatchId;
+            const { results } = await createInvoiceFromFiles(formData);
             operationResults.push(...results);
 
             operationResults.forEach((result: CreateInvoiceResult) => {
