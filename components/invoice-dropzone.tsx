@@ -18,6 +18,7 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
     const [files, setFiles] = useState<File[]>([])
     const [isUploading, setIsUploading] = useState(false)
     const [loadingStep, setLoadingStep] = useState<'processing' | 'analyzing'>('processing');
+    const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number } | null>(null);
 
     useEffect(() => {
         let timerId: ReturnType<typeof setTimeout> | undefined;
@@ -91,18 +92,65 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
             onProcessingStart();
         }
         setIsUploading(true);
-        const formData = new FormData();
-        files.forEach((file) => {
-            formData.append("files", file);
-        });
 
-        let operationResults: CreateInvoiceResult[] = [];
+        const operationResults: CreateInvoiceResult[] = [];
         try {
-            const { overallSuccess, results } = await createInvoiceFromFiles(formData);
-            operationResults = results;
+            // Process files in chunks to avoid 413 Request Entity Too Large errors
+            // With 5MB max per file, 6 files = max 30MB per chunk (well under most platform limits)
+            const CHUNK_SIZE = 6; // Process max 6 files per request to stay under size limits
+            const fileChunks: File[][] = [];
+
+            // Calculate total file size for logging
+            const totalSizeMB = files.reduce((sum, file) => sum + file.size, 0) / (1024 * 1024);
+
+            // Split files into chunks
+            for (let i = 0; i < files.length; i += CHUNK_SIZE) {
+                fileChunks.push(files.slice(i, i + CHUNK_SIZE));
+            }
+
+            console.log(`Processing ${files.length} files (${totalSizeMB.toFixed(1)}MB total) in ${fileChunks.length} chunks of max ${CHUNK_SIZE} files each`);
+
+            // Process each chunk sequentially to avoid overwhelming the server
+            for (let chunkIndex = 0; chunkIndex < fileChunks.length; chunkIndex++) {
+                const chunk = fileChunks[chunkIndex];
+                const formData = new FormData();
+
+                // Update progress
+                setUploadProgress({ current: chunkIndex + 1, total: fileChunks.length });
+
+                // Calculate chunk size for logging
+                const chunkSizeMB = chunk.reduce((sum, file) => sum + file.size, 0) / (1024 * 1024);
+
+                chunk.forEach((file) => {
+                    formData.append("files", file);
+                });
+
+                console.log(`Processing chunk ${chunkIndex + 1}/${fileChunks.length} with ${chunk.length} files (${chunkSizeMB.toFixed(1)}MB)`);
+
+                try {
+                    const { results } = await createInvoiceFromFiles(formData);
+                    operationResults.push(...results);
+                } catch (chunkError) {
+                    console.error(`Error processing chunk ${chunkIndex + 1}:`, chunkError);
+
+                    // Add error results for all files in the failed chunk
+                    chunk.forEach(file => {
+                        operationResults.push({
+                            success: false,
+                            message: chunkError instanceof Error ? chunkError.message : "Unknown error occurred",
+                            fileName: file.name
+                        });
+                    });
+                }
+
+                // Small delay between chunks to prevent overwhelming the server
+                if (chunkIndex < fileChunks.length - 1) {
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                }
+            }
 
             // Check for blocked providers and emit custom events
-            results.forEach((result: CreateInvoiceResult) => {
+            operationResults.forEach((result: CreateInvoiceResult) => {
                 if (result.isBlockedProvider) {
                     // Extract provider name from the message
                     const providerNameMatch = result.message.match(/Provider '(.+?)' is blocked/);
@@ -119,28 +167,8 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
                 }
             });
 
-            // Individual toasts removed from here, will be handled by parent via onProcessingComplete
-            // results.forEach((result: CreateInvoiceResult) => {
-            //     if (result.success) {
-            //         let description = result.message;
-            //         if (result.alertsCreated && result.alertsCreated > 0) {
-            //             description += ` ${result.alertsCreated} price alert(s) generated.`;
-            //         }
-            //         toast.success(`File: ${result.fileName}`, {
-            //             description: description,
-            //         });
-            //     } else {
-            //         toast.error(`File: ${result.fileName}`, {
-            //             description: result.message,
-            //         });
-            //     }
-            // });
-
-            if (overallSuccess) {
-                setFiles([]); // Clear files after successful processing of all
-            }
-            // If not overallSuccess, files are kept for the user to see which ones might have failed.
-            // Parent component will show specific error messages.
+            // Clear files if all chunks processed (even if some had errors)
+            setFiles([]);
 
         } catch (error) {
             console.error("Error creating invoices:", error);
@@ -152,6 +180,7 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
             // For simplicity, we let onProcessingComplete handle potentially empty operationResults
         } finally {
             setIsUploading(false);
+            setUploadProgress(null); // Reset progress
             if (onProcessingComplete) {
                 onProcessingComplete(operationResults); // Call with results, even if an exception occurred (it might be empty)
             }
@@ -237,7 +266,12 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
                                     )}
                                 >
                                     <Loader2Icon className="h-4 w-4 animate-spin" />
-                                    <span>Procesando...</span>
+                                    <span>
+                                        {uploadProgress ?
+                                            `Procesando lote ${uploadProgress.current}/${uploadProgress.total}...` :
+                                            'Procesando...'
+                                        }
+                                    </span>
                                 </div>
 
                                 {/* Analyzing Step */}
@@ -248,7 +282,12 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
                                     )}
                                 >
                                     <BotIcon className="h-4 w-4 animate-pulse" />
-                                    <span>Analizando...</span>
+                                    <span>
+                                        {uploadProgress ?
+                                            `Analizando lote ${uploadProgress.current}/${uploadProgress.total}...` :
+                                            'Analizando...'
+                                        }
+                                    </span>
                                 </div>
                             </div>
                         ) : (

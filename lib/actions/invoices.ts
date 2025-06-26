@@ -1037,13 +1037,20 @@ export async function createInvoiceFromFiles(
         return { overallSuccess: false, results: [{ success: false, message: "No files provided.", fileName: "N/A" }] };
     }
 
-    // Dynamic concurrency based on file count and rate limits
-    let CONCURRENCY_LIMIT = Math.min(12, Math.max(4, Math.ceil(files.length / 5))); // Start between 4-12 based on file count
+    // More conservative initial concurrency for larger batches
+    let CONCURRENCY_LIMIT = files.length > 10 ?
+        Math.min(6, Math.max(3, Math.ceil(files.length / 8))) : // Reduced for large batches
+        Math.min(10, Math.max(4, Math.ceil(files.length / 5))); // Keep existing for small batches
+
     const allFileProcessingResults: Array<ExtractedFileItem & { rateLimitHeaders?: OpenAIRateLimitHeaders }> = [];
     let lastKnownRateLimits: OpenAIRateLimitHeaders | undefined = undefined;
     let consecutiveRateLimitHits = 0;
 
-    console.log(`Starting extraction for ${files.length} files with initial concurrency limit of ${CONCURRENCY_LIMIT}.`);
+    console.log(`Starting extraction for ${files.length} files with initial concurrency limit of ${CONCURRENCY_LIMIT} (conservative for large batches).`);
+
+    // Add memory pressure detection
+    const initialMemory = process.memoryUsage();
+    console.log(`Initial memory usage: ${Math.round(initialMemory.heapUsed / 1024 / 1024)}MB heap, ${Math.round(initialMemory.rss / 1024 / 1024)}MB RSS`);
 
     for (let i = 0; i < files.length; i += CONCURRENCY_LIMIT) {
         const fileChunk = files.slice(i, i + CONCURRENCY_LIMIT);
@@ -1052,49 +1059,69 @@ export async function createInvoiceFromFiles(
 
         console.log(`Processing batch ${batchNumber} of ${totalBatches} (files ${i + 1} to ${i + fileChunk.length} of ${files.length}) with concurrency ${CONCURRENCY_LIMIT}.`);
 
+        // Memory pressure check
+        const currentMemory = process.memoryUsage();
+        const heapUsedMB = Math.round(currentMemory.heapUsed / 1024 / 1024);
+        const memoryGrowthMB = Math.round((currentMemory.heapUsed - initialMemory.heapUsed) / 1024 / 1024);
+
+        if (heapUsedMB > 800 || memoryGrowthMB > 400) { // Conservative thresholds
+            console.warn(`[Memory] High memory usage detected: ${heapUsedMB}MB heap (+${memoryGrowthMB}MB growth). Reducing concurrency.`);
+            CONCURRENCY_LIMIT = Math.max(2, Math.floor(CONCURRENCY_LIMIT * 0.6));
+
+            // Force garbage collection if available
+            if (global.gc) {
+                console.log(`[Memory] Running garbage collection...`);
+                global.gc();
+            }
+        }
+
         // Smart rate limit checking - only wait if we're actually close to limits
         if (lastKnownRateLimits) {
             let shouldWait = false;
             let waitTimeMs = 0;
             let waitReason = "";
 
-            // More aggressive thresholds - only wait when very close to limits
-            if (lastKnownRateLimits.remainingRequests !== undefined && lastKnownRateLimits.remainingRequests < 2) {
+            // More conservative thresholds for large batches
+            const requestThreshold = files.length > 10 ? 5 : 2; // Higher threshold for large batches
+            const tokenThreshold = files.length > 10 ? 15000 : 5000; // Conservative token estimation
+
+            if (lastKnownRateLimits.remainingRequests !== undefined && lastKnownRateLimits.remainingRequests < requestThreshold) {
                 shouldWait = true;
                 waitTimeMs = Math.max(waitTimeMs, lastKnownRateLimits.resetRequestsTimeMs || 60000);
                 waitReason += " requests";
             }
 
-            // More realistic token estimation (most invoices use 4000-6000 tokens)
-            const estimatedTokensNeeded = fileChunk.length * 5000; // Reduced from 8000
-            if (lastKnownRateLimits.remainingTokens !== undefined && lastKnownRateLimits.remainingTokens < estimatedTokensNeeded * 0.8) {
+            const estimatedTokensNeeded = fileChunk.length * 5000;
+            if (lastKnownRateLimits.remainingTokens !== undefined && lastKnownRateLimits.remainingTokens < estimatedTokensNeeded + tokenThreshold) {
                 shouldWait = true;
                 waitTimeMs = Math.max(waitTimeMs, lastKnownRateLimits.resetTokensTimeMs || 60000);
                 waitReason += " tokens";
             }
 
             if (shouldWait) {
-                // Adaptive waiting - don't wait for full reset, use partial wait
-                const adaptiveWaitTime = Math.min(waitTimeMs, 30000 + (consecutiveRateLimitHits * 5000)); // Cap at 30s + penalty
-                console.warn(`[RateLimit] Close to limits (${waitReason.trim()}). Requests: ${lastKnownRateLimits.remainingRequests}, Tokens: ${lastKnownRateLimits.remainingTokens}. Waiting ${adaptiveWaitTime / 1000}s (adaptive).`);
+                // More conservative waiting for large batches
+                const baseWaitTime = files.length > 10 ? 15000 : 10000; // Start with longer wait for large batches
+                const adaptiveWaitTime = Math.min(waitTimeMs, baseWaitTime + (consecutiveRateLimitHits * 8000)); // Longer penalties
+                console.warn(`[RateLimit] Close to limits (${waitReason.trim()}). Requests: ${lastKnownRateLimits.remainingRequests}, Tokens: ${lastKnownRateLimits.remainingTokens}. Waiting ${adaptiveWaitTime / 1000}s (conservative for large batch).`);
                 await new Promise(resolve => setTimeout(resolve, adaptiveWaitTime));
                 consecutiveRateLimitHits++;
 
-                // Reduce concurrency if we're hitting limits repeatedly
-                if (consecutiveRateLimitHits >= 2 && CONCURRENCY_LIMIT > 3) {
-                    CONCURRENCY_LIMIT = Math.max(3, Math.floor(CONCURRENCY_LIMIT * 0.7));
-                    console.log(`[RateLimit] Reducing concurrency to ${CONCURRENCY_LIMIT} due to repeated limits`);
+                // More aggressive concurrency reduction for large batches
+                if (consecutiveRateLimitHits >= 2 && CONCURRENCY_LIMIT > 2) {
+                    CONCURRENCY_LIMIT = Math.max(2, Math.floor(CONCURRENCY_LIMIT * 0.6)); // More aggressive reduction
+                    console.log(`[RateLimit] Reducing concurrency to ${CONCURRENCY_LIMIT} due to repeated limits (large batch mode)`);
                 }
             } else {
                 // Reset consecutive hits if we're not hitting limits
                 consecutiveRateLimitHits = 0;
 
-                // Increase concurrency if we have plenty of headroom
-                if (lastKnownRateLimits.remainingRequests !== undefined && lastKnownRateLimits.remainingRequests > 20 &&
+                // More conservative concurrency increases for large batches
+                if (files.length <= 10 && // Only increase for smaller batches
+                    lastKnownRateLimits.remainingRequests !== undefined && lastKnownRateLimits.remainingRequests > 20 &&
                     lastKnownRateLimits.remainingTokens !== undefined && lastKnownRateLimits.remainingTokens > 50000 &&
-                    CONCURRENCY_LIMIT < 15) {
-                    CONCURRENCY_LIMIT = Math.min(15, CONCURRENCY_LIMIT + 1);
-                    console.log(`[RateLimit] Increasing concurrency to ${CONCURRENCY_LIMIT} due to available headroom`);
+                    CONCURRENCY_LIMIT < 12) { // Lower max concurrency
+                    CONCURRENCY_LIMIT = Math.min(12, CONCURRENCY_LIMIT + 1);
+                    console.log(`[RateLimit] Increasing concurrency to ${CONCURRENCY_LIMIT} due to available headroom (small batch only)`);
                 }
             }
         }
@@ -1223,6 +1250,11 @@ export async function createInvoiceFromFiles(
     const DB_CONCURRENCY_LIMIT = 1; // Set to 1 to ensure sequential provider processing and minimize race conditions
     const dbResults: CreateInvoiceResult[] = [];
 
+    // Circuit breaker for catastrophic failures
+    let consecutiveFailures = 0;
+    const MAX_CONSECUTIVE_FAILURES = 5;
+    let circuitBreakerTripped = false;
+
     for (let i = 0; i < processableItems.length; i += DB_CONCURRENCY_LIMIT) {
         const chunk = processableItems.slice(i, i + DB_CONCURRENCY_LIMIT);
 
@@ -1239,6 +1271,16 @@ export async function createInvoiceFromFiles(
             for (let attempt = 1; attempt <= maxRetries; attempt++) {
                 try {
                     console.log(`Starting database transaction for sorted invoice from file: ${fileName}, invoice code: ${extractedData.invoiceCode}, issue date: ${extractedData.issueDate} (attempt ${attempt}/${maxRetries})`);
+
+                    // For large invoices, use longer timeout and chunked processing
+                    const itemCount = extractedData.items?.length || 0;
+                    const isLargeInvoice = itemCount > 50;
+                    const transactionTimeout = isLargeInvoice ? 60000 : 30000; // 60s for large invoices, 30s for normal
+
+                    if (isLargeInvoice) {
+                        console.log(`[Large Invoice] Processing ${itemCount} items with extended timeout: ${transactionTimeout / 1000}s`);
+                    }
+
                     const operationResult: TransactionOperationResult = await prisma.$transaction(async (tx) => {
                         const provider = await findOrCreateProviderTx(tx, extractedData.provider);
 
@@ -1274,123 +1316,140 @@ export async function createInvoiceFromFiles(
                         const currentInvoiceIssueDate = new Date(extractedData.issueDate);
                         const intraInvoiceMaterialPriceHistory = new Map<string, { price: Prisma.Decimal; date: Date; invoiceItemId: string }>();
 
-                        for (const itemData of extractedData.items) {
-                            if (!itemData.materialName) {
-                                console.warn(`Skipping item due to missing material name in invoice ${invoice.invoiceCode} from file ${fileName}`);
-                                continue;
+                        // Process items in smaller chunks for very large invoices to avoid timeouts
+                        const ITEM_CHUNK_SIZE = isLargeInvoice ? 25 : 999; // Process in chunks of 25 for large invoices
+                        const itemChunks = [];
+                        for (let i = 0; i < extractedData.items.length; i += ITEM_CHUNK_SIZE) {
+                            itemChunks.push(extractedData.items.slice(i, i + ITEM_CHUNK_SIZE));
+                        }
+
+                        for (let chunkIndex = 0; chunkIndex < itemChunks.length; chunkIndex++) {
+                            const itemChunk = itemChunks[chunkIndex];
+
+                            if (isLargeInvoice && chunkIndex > 0) {
+                                console.log(`[Large Invoice] Processing chunk ${chunkIndex + 1}/${itemChunks.length} (${itemChunk.length} items)`);
+                                // Small delay between chunks to prevent overwhelming the database
+                                await new Promise(resolve => setTimeout(resolve, 100));
                             }
 
-                            if (typeof itemData.quantity !== 'number' || isNaN(itemData.quantity)) {
-                                console.warn(`Skipping item due to invalid or missing quantity in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}, Quantity: ${itemData.quantity}`);
-                                continue;
-                            }
-
-                            if (typeof itemData.unitPrice !== 'number' || isNaN(itemData.unitPrice)) {
-                                console.warn(`Missing or invalid unit price for item in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}. Defaulting to 0.`);
-                                itemData.unitPrice = 0;
-                            }
-                            if (typeof itemData.totalPrice !== 'number' || isNaN(itemData.totalPrice)) {
-                                console.warn(`Missing or invalid total price for item in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}. Defaulting to 0.`);
-                                itemData.totalPrice = 0;
-                            }
-
-                            const isMaterialItem = typeof itemData.isMaterial === 'boolean' ? itemData.isMaterial : true;
-
-                            if (!isMaterialItem) {
-                                console.log(`[Invoice ${invoice.invoiceCode}][Item: ${itemData.materialName}] Marked as non-material. Creating InvoiceItem only.`);
-                                const quantityDecimal = new Prisma.Decimal(itemData.quantity.toFixed(2));
-                                const currentUnitPriceDecimal = new Prisma.Decimal(itemData.unitPrice.toFixed(2));
-                                const totalPriceDecimal = new Prisma.Decimal(itemData.totalPrice.toFixed(2));
-                                const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
-
-                                await tx.invoiceItem.create({
-                                    data: {
-                                        invoiceId: invoice.id,
-                                        materialId: (await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialCode, provider.type)).id,
-                                        quantity: quantityDecimal,
-                                        unitPrice: currentUnitPriceDecimal,
-                                        totalPrice: totalPriceDecimal,
-                                        itemDate: effectiveItemDate,
-                                        workOrder: itemData.workOrder || null,
-                                    },
-                                });
-                                console.log(`[Invoice ${invoice.invoiceCode}] Non-material item "${itemData.materialName}" added to invoice items. No price alert/MaterialProvider update.`);
-                                continue;
-                            }
-
-                            let material: Material;
-                            try {
-                                material = await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialCode, provider.type);
-                            } catch (materialError) {
-                                console.error(`Error creating/finding material '${itemData.materialName}' in invoice ${invoice.invoiceCode}:`, materialError);
-                                throw new Error(`Failed to process material '${itemData.materialName}': ${materialError instanceof Error ? materialError.message : 'Unknown error'}`);
-                            }
-                            const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
-                            const currentItemUnitPrice = new Prisma.Decimal(itemData.unitPrice.toFixed(2));
-
-                            const lastSeenPriceRecordInThisInvoice = intraInvoiceMaterialPriceHistory.get(material.id);
-
-                            if (lastSeenPriceRecordInThisInvoice) {
-                                if (effectiveItemDate.getTime() >= lastSeenPriceRecordInThisInvoice.date.getTime() &&
-                                    !currentItemUnitPrice.equals(lastSeenPriceRecordInThisInvoice.price)) {
-
-                                    const priceDiff = currentItemUnitPrice.minus(lastSeenPriceRecordInThisInvoice.price);
-                                    let percentageChangeDecimal: Prisma.Decimal;
-                                    if (!lastSeenPriceRecordInThisInvoice.price.isZero()) {
-                                        percentageChangeDecimal = priceDiff.dividedBy(lastSeenPriceRecordInThisInvoice.price).times(100);
-                                    } else {
-                                        percentageChangeDecimal = new Prisma.Decimal(currentItemUnitPrice.isPositive() ? 9999 : -9999);
-                                    }
-
-                                    try {
-                                        await tx.priceAlert.create({
-                                            data: {
-                                                materialId: material.id,
-                                                providerId: provider.id,
-                                                oldPrice: lastSeenPriceRecordInThisInvoice.price,
-                                                newPrice: currentItemUnitPrice,
-                                                percentage: percentageChangeDecimal,
-                                                status: "PENDING",
-                                                effectiveDate: effectiveItemDate,
-                                                invoiceId: invoice.id,
-                                            },
-                                        });
-                                    } catch (alertError) {
-                                        // Manejar error de constraint único para alertas intra-factura
-                                        if (typeof alertError === 'object' && alertError !== null && 'code' in alertError &&
-                                            (alertError as { code: string }).code === 'P2002') {
-                                            console.log(`[Invoice ${invoice.invoiceCode}][Material '${material.name}'] Intra-invoice price alert already exists (caught constraint violation). Skipping duplicate creation.`);
-                                            // No incrementar alertsCounter en este caso
-                                            alertsCounter--; // Compensar el incremento que viene después
-                                        } else {
-                                            throw alertError;
-                                        }
-                                    }
-                                    alertsCounter++;
-                                    console.log(`[Invoice ${invoice.invoiceCode}][Material '${material.name}'] INTRA-INVOICE Price alert created. Old (from item ${lastSeenPriceRecordInThisInvoice.invoiceItemId} in this invoice): ${lastSeenPriceRecordInThisInvoice.price}, New (current item): ${currentItemUnitPrice}, Change: ${percentageChangeDecimal.toFixed(2)}%, Effective Date: ${effectiveItemDate.toISOString()}`);
+                            for (const itemData of itemChunk) {
+                                if (!itemData.materialName) {
+                                    console.warn(`Skipping item due to missing material name in invoice ${invoice.invoiceCode} from file ${fileName}`);
+                                    continue;
                                 }
-                            }
 
-                            const { invoiceItem, alert: interInvoiceAlert } = await processInvoiceItemTx(
-                                tx,
-                                itemData,
-                                invoice.id,
-                                currentInvoiceIssueDate,
-                                provider.id,
-                                material,
-                                isMaterialItem
-                            );
+                                if (typeof itemData.quantity !== 'number' || isNaN(itemData.quantity)) {
+                                    console.warn(`Skipping item due to invalid or missing quantity in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}, Quantity: ${itemData.quantity}`);
+                                    continue;
+                                }
 
-                            if (interInvoiceAlert) {
-                                alertsCounter++;
-                            }
+                                if (typeof itemData.unitPrice !== 'number' || isNaN(itemData.unitPrice)) {
+                                    console.warn(`Missing or invalid unit price for item in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}. Defaulting to 0.`);
+                                    itemData.unitPrice = 0;
+                                }
+                                if (typeof itemData.totalPrice !== 'number' || isNaN(itemData.totalPrice)) {
+                                    console.warn(`Missing or invalid total price for item in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}. Defaulting to 0.`);
+                                    itemData.totalPrice = 0;
+                                }
 
-                            if (isMaterialItem) {
-                                intraInvoiceMaterialPriceHistory.set(material.id, {
-                                    price: invoiceItem.unitPrice,
-                                    date: invoiceItem.itemDate,
-                                    invoiceItemId: invoiceItem.id
-                                });
+                                const isMaterialItem = typeof itemData.isMaterial === 'boolean' ? itemData.isMaterial : true;
+
+                                if (!isMaterialItem) {
+                                    console.log(`[Invoice ${invoice.invoiceCode}][Item: ${itemData.materialName}] Marked as non-material. Creating InvoiceItem only.`);
+                                    const quantityDecimal = new Prisma.Decimal(itemData.quantity.toFixed(2));
+                                    const currentUnitPriceDecimal = new Prisma.Decimal(itemData.unitPrice.toFixed(2));
+                                    const totalPriceDecimal = new Prisma.Decimal(itemData.totalPrice.toFixed(2));
+                                    const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
+
+                                    await tx.invoiceItem.create({
+                                        data: {
+                                            invoiceId: invoice.id,
+                                            materialId: (await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialCode, provider.type)).id,
+                                            quantity: quantityDecimal,
+                                            unitPrice: currentUnitPriceDecimal,
+                                            totalPrice: totalPriceDecimal,
+                                            itemDate: effectiveItemDate,
+                                            workOrder: itemData.workOrder || null,
+                                        },
+                                    });
+                                    console.log(`[Invoice ${invoice.invoiceCode}] Non-material item "${itemData.materialName}" added to invoice items. No price alert/MaterialProvider update.`);
+                                    continue;
+                                }
+
+                                let material: Material;
+                                try {
+                                    material = await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialCode, provider.type);
+                                } catch (materialError) {
+                                    console.error(`Error creating/finding material '${itemData.materialName}' in invoice ${invoice.invoiceCode}:`, materialError);
+                                    throw new Error(`Failed to process material '${itemData.materialName}': ${materialError instanceof Error ? materialError.message : 'Unknown error'}`);
+                                }
+                                const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
+                                const currentItemUnitPrice = new Prisma.Decimal(itemData.unitPrice.toFixed(2));
+
+                                const lastSeenPriceRecordInThisInvoice = intraInvoiceMaterialPriceHistory.get(material.id);
+
+                                if (lastSeenPriceRecordInThisInvoice) {
+                                    if (effectiveItemDate.getTime() >= lastSeenPriceRecordInThisInvoice.date.getTime() &&
+                                        !currentItemUnitPrice.equals(lastSeenPriceRecordInThisInvoice.price)) {
+
+                                        const priceDiff = currentItemUnitPrice.minus(lastSeenPriceRecordInThisInvoice.price);
+                                        let percentageChangeDecimal: Prisma.Decimal;
+                                        if (!lastSeenPriceRecordInThisInvoice.price.isZero()) {
+                                            percentageChangeDecimal = priceDiff.dividedBy(lastSeenPriceRecordInThisInvoice.price).times(100);
+                                        } else {
+                                            percentageChangeDecimal = new Prisma.Decimal(currentItemUnitPrice.isPositive() ? 9999 : -9999);
+                                        }
+
+                                        try {
+                                            await tx.priceAlert.create({
+                                                data: {
+                                                    materialId: material.id,
+                                                    providerId: provider.id,
+                                                    oldPrice: lastSeenPriceRecordInThisInvoice.price,
+                                                    newPrice: currentItemUnitPrice,
+                                                    percentage: percentageChangeDecimal,
+                                                    status: "PENDING",
+                                                    effectiveDate: effectiveItemDate,
+                                                    invoiceId: invoice.id,
+                                                },
+                                            });
+                                        } catch (alertError) {
+                                            // Manejar error de constraint único para alertas intra-factura
+                                            if (typeof alertError === 'object' && alertError !== null && 'code' in alertError &&
+                                                (alertError as { code: string }).code === 'P2002') {
+                                                console.log(`[Invoice ${invoice.invoiceCode}][Material '${material.name}'] Intra-invoice price alert already exists (caught constraint violation). Skipping duplicate creation.`);
+                                                // No incrementar alertsCounter en este caso
+                                                alertsCounter--; // Compensar el incremento que viene después
+                                            } else {
+                                                throw alertError;
+                                            }
+                                        }
+                                        alertsCounter++;
+                                        console.log(`[Invoice ${invoice.invoiceCode}][Material '${material.name}'] INTRA-INVOICE Price alert created. Old (from item ${lastSeenPriceRecordInThisInvoice.invoiceItemId} in this invoice): ${lastSeenPriceRecordInThisInvoice.price}, New (current item): ${currentItemUnitPrice}, Change: ${percentageChangeDecimal.toFixed(2)}%, Effective Date: ${effectiveItemDate.toISOString()}`);
+                                    }
+                                }
+
+                                const { invoiceItem, alert: interInvoiceAlert } = await processInvoiceItemTx(
+                                    tx,
+                                    itemData,
+                                    invoice.id,
+                                    currentInvoiceIssueDate,
+                                    provider.id,
+                                    material,
+                                    isMaterialItem
+                                );
+
+                                if (interInvoiceAlert) {
+                                    alertsCounter++;
+                                }
+
+                                if (isMaterialItem) {
+                                    intraInvoiceMaterialPriceHistory.set(material.id, {
+                                        price: invoiceItem.unitPrice,
+                                        date: invoiceItem.itemDate,
+                                        invoiceItemId: invoiceItem.id
+                                    });
+                                }
                             }
                         }
                         console.log(`Successfully created invoice ${invoice.invoiceCode} from file: ${fileName}. Total alerts for this invoice: ${alertsCounter}`);
@@ -1401,6 +1460,9 @@ export async function createInvoiceFromFiles(
                             alertsCreated: alertsCounter,
                             isExisting: false
                         };
+                    }, {
+                        timeout: transactionTimeout, // Use dynamic timeout based on invoice size
+                        maxWait: 10000
                     });
 
                     // Success! Return the result
@@ -1425,6 +1487,25 @@ export async function createInvoiceFromFiles(
                     lastError = error;
                     console.error(`Error processing sorted invoice from ${fileName} (attempt ${attempt}/${maxRetries}):`, error);
 
+                    // Check for memory-related errors
+                    const isMemoryError = error instanceof Error && (
+                        error.message.includes('out of memory') ||
+                        error.message.includes('ENOMEM') ||
+                        error.message.includes('heap') ||
+                        error.message.includes('JavaScript heap out of memory')
+                    );
+
+                    // Check for timeout errors
+                    const isTimeoutError = error instanceof Error && (
+                        error.message.includes('timeout') ||
+                        error.message.includes('ETIMEDOUT') ||
+                        error.message.includes('Connection timeout')
+                    );
+
+                    // Check for database connection errors
+                    const isConnectionError = typeof error === 'object' && error !== null && 'code' in error &&
+                        ['P1000', 'P1001', 'P1002', 'P1008', 'P1009', 'P1010'].includes((error as { code: string }).code);
+
                     // Check if this error is worth retrying
                     const isRetryableError = typeof error === 'object' && error !== null && 'code' in error &&
                         (error as { code: string }).code === 'P2002'; // Unique constraint violation
@@ -1432,8 +1513,36 @@ export async function createInvoiceFromFiles(
                     const isBlockedProviderError = error instanceof Error &&
                         (error as Error & { isBlockedProvider?: boolean }).isBlockedProvider;
 
-                    // Don't retry for blocked providers or on last attempt
-                    if (isBlockedProviderError || attempt === maxRetries || !isRetryableError) {
+                    // Special handling for memory errors
+                    if (isMemoryError) {
+                        console.error(`[Memory Error] Memory exhaustion detected for ${fileName}. This file will be skipped.`);
+                        if (global.gc) {
+                            console.log(`[Memory Error] Running emergency garbage collection...`);
+                            global.gc();
+                        }
+                        break; // Don't retry memory errors
+                    }
+
+                    // Special handling for timeout errors - retry with longer timeout
+                    if (isTimeoutError && attempt < maxRetries) {
+                        console.warn(`[Timeout] Transaction timeout for ${fileName}, will retry with longer timeout...`);
+                        const delay = attempt * 2000 + Math.random() * 1000; // 2-3s, 4-5s delays
+                        console.log(`Will retry after ${delay.toFixed(0)}ms delay...`);
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        continue;
+                    }
+
+                    // Special handling for connection errors - longer retry delays
+                    if (isConnectionError && attempt < maxRetries) {
+                        console.warn(`[Connection] Database connection error for ${fileName}, will retry...`);
+                        const delay = attempt * 5000 + Math.random() * 2000; // 5-7s, 10-12s delays
+                        console.log(`Will retry after ${delay.toFixed(0)}ms delay...`);
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        continue;
+                    }
+
+                    // Don't retry for blocked providers, memory errors, or on last attempt
+                    if (isBlockedProviderError || isMemoryError || attempt === maxRetries || (!isRetryableError && !isTimeoutError && !isConnectionError)) {
                         break; // Exit retry loop
                     }
 
@@ -1494,6 +1603,30 @@ export async function createInvoiceFromFiles(
 
         const chunkResults = await Promise.all(chunkPromises);
         dbResults.push(...chunkResults);
+
+        // Update circuit breaker state
+        const failuresInChunk = chunkResults.filter(r => !r.success && !r.isBlockedProvider).length;
+        if (failuresInChunk > 0) {
+            consecutiveFailures += failuresInChunk;
+            if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+                circuitBreakerTripped = true;
+                console.error(`[Circuit Breaker] ${consecutiveFailures} consecutive failures detected. Stopping further processing to prevent system overload.`);
+
+                // Mark remaining items as failed
+                const remainingItems = processableItems.slice(i + DB_CONCURRENCY_LIMIT);
+                for (const item of remainingItems) {
+                    dbResults.push({
+                        success: false,
+                        message: `Processing stopped due to circuit breaker (${consecutiveFailures} consecutive failures)`,
+                        fileName: item.fileName
+                    });
+                }
+                break;
+            }
+        } else {
+            // Reset counter on successful batch
+            consecutiveFailures = 0;
+        }
     }
 
     // Combine extraction errors with database results
