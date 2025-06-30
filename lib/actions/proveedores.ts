@@ -215,5 +215,147 @@ export async function editProviderAction(providerId: string, data: {
     }
 }
 
+/**
+ * Fusiona dos proveedores combinando todas las relaciones (facturas, materiales, alertas…)
+ * sobre el proveedor destino y elimina el proveedor origen.
+ * @param sourceProviderId  ID del proveedor que se desea fusionar (se eliminará)
+ * @param targetProviderId  ID del proveedor que se mantiene y recibirá todos los registros
+ */
+export async function mergeProvidersAction(sourceProviderId: string, targetProviderId: string) {
+    if (!sourceProviderId || !targetProviderId) {
+        return { success: false, message: "Debes indicar proveedor origen y destino." }
+    }
+
+    if (sourceProviderId === targetProviderId) {
+        return { success: false, message: "El proveedor origen y destino no pueden ser el mismo." }
+    }
+
+    try {
+        await prisma.$transaction(async (tx) => {
+            /* Validaciones previas: comprobar facturas y alertas duplicadas */
+            const sourceInvoices = await tx.invoice.findMany({
+                where: { providerId: sourceProviderId },
+                select: { id: true, invoiceCode: true }
+            })
+
+            const duplicateInvoiceCodes = await tx.invoice.findMany({
+                where: {
+                    providerId: targetProviderId,
+                    invoiceCode: { in: sourceInvoices.map(i => i.invoiceCode) }
+                },
+                select: { invoiceCode: true }
+            })
+
+            if (duplicateInvoiceCodes.length > 0) {
+                throw new Error(`Se encontraron códigos de factura duplicados: ${duplicateInvoiceCodes.map(d => d.invoiceCode).join(', ')}`)
+            }
+
+            const sourceAlerts = await tx.priceAlert.findMany({
+                where: { providerId: sourceProviderId },
+                select: { id: true, materialId: true, effectiveDate: true }
+            })
+
+            for (const alert of sourceAlerts) {
+                const exists = await tx.priceAlert.findFirst({
+                    where: {
+                        providerId: targetProviderId,
+                        materialId: alert.materialId,
+                        effectiveDate: alert.effectiveDate
+                    },
+                    select: { id: true }
+                })
+                if (exists) {
+                    // Eliminar alerta duplicada del origen para evitar conflicto
+                    await tx.priceAlert.delete({ where: { id: alert.id } })
+                }
+            }
+
+            /* 1. Actualizar facturas */
+            await tx.invoice.updateMany({
+                where: { providerId: sourceProviderId },
+                data: { providerId: targetProviderId },
+            })
+
+            /* 2. Actualizar alertas de precio */
+            await tx.priceAlert.updateMany({
+                where: { providerId: sourceProviderId },
+                data: { providerId: targetProviderId },
+            })
+
+            /* 3. Fusionar registros MaterialProvider manejando posibles duplicados */
+            const sourceMaterialProviders = await tx.materialProvider.findMany({
+                where: { providerId: sourceProviderId },
+            })
+
+            for (const mp of sourceMaterialProviders) {
+                const existing = await tx.materialProvider.findUnique({
+                    where: {
+                        materialId_providerId: {
+                            materialId: mp.materialId,
+                            providerId: targetProviderId,
+                        },
+                    },
+                })
+
+                if (existing) {
+                    // Si ya existe un registro para este material + proveedor destino, decidir si se actualiza el precio
+                    if (
+                        mp.lastPriceDate &&
+                        (!existing.lastPriceDate || mp.lastPriceDate > existing.lastPriceDate)
+                    ) {
+                        await tx.materialProvider.update({
+                            where: { id: existing.id },
+                            data: {
+                                lastPrice: mp.lastPrice,
+                                lastPriceDate: mp.lastPriceDate,
+                            },
+                        })
+                    }
+                    // Eliminar el registro duplicado del proveedor origen
+                    await tx.materialProvider.delete({ where: { id: mp.id } })
+                } else {
+                    // No existe duplicado; simplemente actualizamos el providerId
+                    await tx.materialProvider.update({
+                        where: { id: mp.id },
+                        data: { providerId: targetProviderId },
+                    })
+                }
+            }
+
+            /* 4. Transferir información de contacto faltante del proveedor origen al destino */
+            const [sourceProvider, targetProvider] = await Promise.all([
+                tx.provider.findUnique({ where: { id: sourceProviderId } }),
+                tx.provider.findUnique({ where: { id: targetProviderId } }),
+            ])
+
+            if (sourceProvider && targetProvider) {
+                const dataToUpdate: Record<string, unknown> = {}
+
+                if (!targetProvider.email && sourceProvider.email) dataToUpdate.email = sourceProvider.email
+                if (!targetProvider.phone && sourceProvider.phone) dataToUpdate.phone = sourceProvider.phone
+                if (!targetProvider.address && sourceProvider.address) dataToUpdate.address = sourceProvider.address
+
+                if (Object.keys(dataToUpdate).length > 0) {
+                    await tx.provider.update({
+                        where: { id: targetProviderId },
+                        data: dataToUpdate,
+                    })
+                }
+            }
+
+            /* 5. Eliminar el proveedor origen */
+            await tx.provider.delete({ where: { id: sourceProviderId } })
+        })
+
+        // Revalidate list and both detail pages
+        revalidatePath('/proveedores')
+        revalidatePath(`/proveedores/${targetProviderId}`)
+        return { success: true, message: 'Proveedores fusionados correctamente.' }
+    } catch (error) {
+        console.error('Error merging providers:', error)
+        return { success: false, message: 'Error al fusionar proveedores.' }
+    }
+}
+
 
 

@@ -2,6 +2,7 @@ import { Suspense } from "react"
 import { getSupplierAnalytics } from "@/lib/actions/analytics"
 import { NewSupplierButton } from "@/components/new-supplier-button"
 import { ExcelExportButton } from "@/components/excel-export-button"
+import { MergeProvidersDialog } from "@/components/merge-providers-dialog"
 import { SupplierAnalyticsSection } from "@/components/supplier-analytics-section"
 import { HelpTooltip, helpContent } from "@/components/help-tooltip"
 import { prisma } from "@/lib/db"
@@ -62,6 +63,7 @@ export default async function SuppliersPage() {
             content={helpContent.proveedores.content}
           />
           <ExcelExportButton />
+          <MergeProvidersDialog providers={data.supplierAnalytics.map(s => ({ id: s.supplierId, name: s.supplierName, cif: s.supplierCif }))} />
           <NewSupplierButton />
         </div>
       </div>
