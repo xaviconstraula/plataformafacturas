@@ -598,13 +598,23 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
         let existingProvider: Provider | null = null;
         let matchType = '';
 
-        // Strategy 1: Find by exact CIF match
-        existingProvider = await tx.provider.findUnique({
-            where: { cif },
-        });
+        // Strategy 1: Encontrar por CIF exacto o alias
+        // 1a. Buscar directamente en Provider
+        existingProvider = await tx.provider.findUnique({ where: { cif } });
+
+        // 1b. Si no existe, buscar alias
+        if (!existingProvider) {
+            const alias = await tx.providerAlias.findUnique({ where: { cif } });
+            if (alias) {
+                existingProvider = await tx.provider.findUnique({ where: { id: alias.providerId } });
+                if (existingProvider) {
+                    matchType = 'CIF alias';
+                }
+            }
+        }
 
         if (existingProvider) {
-            matchType = 'exact CIF';
+            if (!matchType) matchType = 'exact CIF';
         } else {
             // Strategy 2: Find by exact name match (case insensitive)
             existingProvider = await tx.provider.findFirst({

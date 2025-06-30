@@ -32,18 +32,19 @@ enum BatchStatus {
 
 // Modelo para Proveedores
 model Provider {
-  id         String             @id @default(cuid())
-  name       String
-  type       ProviderType
-  cif        String             @unique // Número de Identificación Fiscal
-  email      String?
-  phone      String?
-  address    String?
-  createdAt  DateTime           @default(now())
-  updatedAt  DateTime           @updatedAt
-  invoices   Invoice[]
-  materials  MaterialProvider[]
-  PriceAlert PriceAlert[]
+  id            String             @id @default(cuid())
+  name          String
+  type          ProviderType
+  cif           String             @unique // Número de Identificación Fiscal
+  email         String?
+  phone         String?
+  address       String?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+  invoices      Invoice[]
+  materials     MaterialProvider[]
+  PriceAlert    PriceAlert[]
+  ProviderAlias ProviderAlias[]
 
   @@index([type])
 }
@@ -227,4 +228,14 @@ model BatchProcessing {
   @@index([status])
   @@index([createdAt])
   @@index([userId])
+}
+
+/// Tabla para mapear CIFs antiguos a proveedores existentes tras una fusión
+model ProviderAlias {
+  id         String   @id @default(cuid())
+  cif        String   @unique
+  provider   Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  providerId String
+
+  @@index([providerId])
 }

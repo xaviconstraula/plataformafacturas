@@ -343,7 +343,16 @@ export async function mergeProvidersAction(sourceProviderId: string, targetProvi
                 }
             }
 
-            /* 5. Eliminar el proveedor origen */
+            /* 5. Crear alias CIF del proveedor origen → destino */
+            if (sourceProvider?.cif) {
+                await tx.providerAlias.upsert({
+                    where: { cif: sourceProvider.cif },
+                    update: { providerId: targetProviderId },
+                    create: { cif: sourceProvider.cif, providerId: targetProviderId },
+                })
+            }
+
+            /* 6. Eliminar el proveedor origen */
             await tx.provider.delete({ where: { id: sourceProviderId } })
         })
 
