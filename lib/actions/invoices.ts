@@ -2287,10 +2287,69 @@ async function prepareBatchLine(file: File): Promise<string> {
     const potentialPhones = textData.phoneNumbers.length > 0 ? `\nPOTENTIAL PHONES FOUND IN TEXT: ${textData.phoneNumbers.join(', ')}` : '';
 
     // 3️⃣  Build prompt identical to callPdfExtractAPI()
-    const promptText = `Extract invoice data from these images (consolidate all pages into a single invoice). Only extract visible data, use null for missing optional fields.${potentialCifs}${potentialPhones}`;
+    const promptText = `Extract invoice data from these images (consolidate all pages into a single invoice). Only extract visible data, use null for missing optional fields.
+
+CRITICAL NUMBER ACCURACY: 
+- Distinguish 5 vs S (flat top vs curved), 8 vs B (complete vs open), 0 vs O vs 6 (oval vs round vs curved)
+- Double-check all digit sequences, especially CIF/NIF numbers
+- Verify quantities and codes character by character
+
+PROVIDER (Invoice Issuer - NOT the client):
+- Find company at TOP of invoice, labeled "Vendedor/Proveedor/Emisor"
+- Extract: name, tax ID, email, phone, address
+- Make sure you don't extract the client's info, but the provider's. For example, constraula or sorigué are never the provider.
+
+TAX ID (CIF/NIF/NIE) - EXTREMELY IMPORTANT:
+- CIF format: Letter + exactly 8 digits (e.g., A12345678)
+- NIF format: exactly 8 digits + Letter (e.g., 12345678A) 
+- NIE format: X/Y/Z + exactly 7 digits + Letter (e.g., X1234567A)
+- Look for labels: "CIF:", "NIF:", "Cód. Fiscal:", "Tax ID:", "RFC:"
+- VERIFY digit count is correct (8 for CIF/NIF, 7 for NIE)${potentialCifs}
+
+PHONE NUMBER:
+- Spanish format: 6/7/8/9 + 8 more digits (9 total)
+- May have +34 country code
+- Look for labels: "Tel:", "Teléfono:", "Phone:"${potentialPhones}
+
+INVOICE: Extract code, issue date (ISO), total amount
+
+LINE ITEMS (extract ALL items from all pages and make sure it's actually a material, not "Albarán" or similar)
+- materialName: Use descriptive name.
+- materialCode: Extract the product reference code ONLY IF it is clearly visible and directly associated with the material name in a column like "Código", "Ref.", "Artículo", or "Referencia". It is often an alphanumeric string. If no such code is clearly present for an item, this field MUST BE NULL. Do not invent or guess a code.
+- isMaterial: true for physical items, false for services/fees/taxes
+- quantity, unitPrice, totalPrice (2 decimals)
+- itemDate: ISO format if different from invoice date
+- workOrder: Find simple 3-5 digit OT number (e.g., "Obra: 4077" → "OT-4077"). Avoid complex refs like "38600-OT-4077-1427". If no OT or work order is present, set this field to null. It is possible and valid for this field to be missing. If you cannot identify it clearly, set it to null, do not make it up.
+- description, lineNumber
+
+JSON format:
+{
+  "invoiceCode": "string",
+  "provider": {
+    "name": "string",
+    "cif": "string|null",
+    "email": "string|null", 
+    "phone": "string|null",
+    "address": "string|null"
+  },
+  "issueDate": "string",
+  "totalAmount": "number",
+  "items": [{
+    "materialName": "string",
+    "materialCode": "string|null",
+    "isMaterial": "boolean",
+    "quantity": "number",
+    "unitPrice": "number", 
+    "totalPrice": "number",
+    "itemDate": "string|null",
+    "workOrder": "string|null",
+    "description": "string|null",
+    "lineNumber": "number|null"
+  }]
+}`;
 
     const messages = [
-        { type: "text" as const, text: promptText },
+        { role: "user", type: "text" as const, text: promptText },
         ...imageUrls,
     ];
 
