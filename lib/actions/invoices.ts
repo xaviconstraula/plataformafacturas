@@ -2438,7 +2438,6 @@ JSON format:
             temperature: 0.1,
             messages,
             response_format: { type: "json_object" },
-            max_tokens: 2000,
         },
     });
 }
