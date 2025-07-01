@@ -2348,9 +2348,16 @@ JSON format:
   }]
 }`;
 
+    // Build messages array in valid Chat format: a single user message whose content
+    // is an array consisting of the prompt text followed by the image URLs.
     const messages = [
-        { role: "user", type: "text" as const, text: promptText },
-        ...imageUrls,
+        {
+            role: "user" as const,
+            content: [
+                { type: "text" as const, text: promptText },
+                ...imageUrls,
+            ],
+        },
     ];
 
     return JSON.stringify({
