@@ -8,6 +8,18 @@ import { pdfToPng } from "pdf-to-png-converter";
 import pdfParse from "pdf-parse";
 import OpenAI from "openai";
 import { extractMaterialCode, normalizeMaterialCode, areMaterialCodesSimilar, generateStandardMaterialCode, areMaterialNamesSimilar } from "@/lib/utils";
+import readline from "readline"; // Node stdlib for streaming large files
+import { Readable } from "stream";
+
+// Represents the minimal part of the ChatCompletion response we need when
+// reading a Batch output file. Only the assistant message content is required.
+interface ChatCompletionBody {
+    choices: Array<{
+        message: {
+            content: string;
+        };
+    }>;
+}
 
 // Batch Processing Types and Functions
 export interface BatchProgressInfo {
@@ -137,6 +149,12 @@ export async function getActiveBatches(): Promise<BatchProgressInfo[]> {
 
                 // Refresh the local batch object to reflect latest DB values
                 reconciledBatches.push({ ...batch, status: newStatus, processedFiles: rc.completed ?? 0 + (rc.failed ?? 0), successfulFiles: rc.completed ?? 0, failedFiles: rc.failed ?? 0 });
+
+                // If batch just transitioned to COMPLETED and we haven't ingested results yet, do it now.
+                if (newStatus === 'COMPLETED' && !batch.completedAt && remote.output_file_id) {
+                    await ingestBatchOutput(batch.id, remote.output_file_id);
+                }
+
                 continue;
             } catch (err) {
                 console.error('[getActiveBatches] Failed to retrieve remote batch', batch.id, err);
@@ -2550,4 +2568,82 @@ export async function startInvoiceBatch(formDataWithFiles: FormData): Promise<{ 
     fs.promises.unlink(jsonlPath).catch(() => undefined);
 
     return { batchId: batch.id };
+}
+
+// ---------------------------------------------------------------------------
+// Helper to download and persist results of a completed OpenAI Batch
+// ---------------------------------------------------------------------------
+
+async function ingestBatchOutput(batchId: string, outputFileId: string | null | undefined) {
+    if (!outputFileId) {
+        console.warn(`[ingestBatchOutput] Batch ${batchId} completed but has no output_file_id`);
+        return;
+    }
+
+    console.log(`[ingestBatchOutput] Downloading output for batch ${batchId} (file ${outputFileId})`);
+
+    try {
+        // The SDK returns a Response object which we can stream.
+        const fileResp = await openai.files.content(outputFileId);
+
+        // The Response type from OpenAI SDK uses the Web Streams API; convert cautiously.
+        const responseWithBody = fileResp as unknown as { body?: Readable; text: () => Promise<string> };
+        const body = responseWithBody.body;
+
+        // Fallback: if body is undefined, read text at once.
+        if (!body) {
+            const text = await fileResp.text();
+            await processOutputLines(text.split(/\r?\n/));
+            return;
+        }
+
+        const rl = readline.createInterface({ input: body, crlfDelay: Infinity });
+        const lines: string[] = [];
+        for await (const line of rl) {
+            lines.push(line);
+        }
+        await processOutputLines(lines);
+    } catch (err) {
+        console.error(`[ingestBatchOutput] Failed to ingest output for batch ${batchId}`, err);
+    }
+
+    async function processOutputLines(lines: string[]) {
+        let success = 0;
+        let failed = 0;
+
+        for (const raw of lines) {
+            if (!raw.trim()) continue;
+            try {
+                const parsed = JSON.parse(raw);
+                const response = parsed.response as { status_code: number; body: ChatCompletionBody } | null;
+                if (!response || response.status_code !== 200) {
+                    failed++;
+                    continue;
+                }
+
+                const chatBody = response.body as ChatCompletionBody;
+                const content = chatBody.choices?.[0]?.message?.content;
+                if (!content) {
+                    failed++;
+                    continue;
+                }
+
+                const extracted = JSON.parse(content) as ExtractedPdfData;
+                const result = await saveExtractedInvoice(extracted, parsed.custom_id ?? undefined);
+                if (result.success) success++; else failed++;
+            } catch (err) {
+                console.error('[ingestBatchOutput] Error processing line', err);
+                failed++;
+            }
+        }
+
+        await updateBatchProgress(batchId, {
+            successfulFiles: success,
+            failedFiles: failed,
+            processedFiles: success + failed,
+            completedAt: new Date(),
+        });
+
+        console.log(`[ingestBatchOutput] Persisted ${success} invoices, ${failed} errors for batch ${batchId}`);
+    }
 } 
