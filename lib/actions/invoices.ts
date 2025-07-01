@@ -2547,18 +2547,43 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
             let alertsCreated = 0;
 
             for (const item of extractedData.items) {
-                const material = await findOrCreateMaterialTx(tx, item.materialName, item.materialCode, provider.type);
-                await processInvoiceItemTx(
-                    tx,
-                    item,
-                    invoice.id,
-                    new Date(extractedData.issueDate),
-                    provider.id,
-                    material,
-                    item.isMaterial ?? true,
-                ).then(({ alert }) => {
-                    if (alert) alertsCreated += 1;
-                });
+                // 🚦 Validate item data to prevent runtime errors
+                if (!item.materialName) {
+                    console.warn(`[Batch Output][Invoice ${extractedData.invoiceCode}] Skipping line item due to missing material name (file: ${fileName ?? "unknown"}).`);
+                    continue;
+                }
+
+                if (typeof item.quantity !== "number" || isNaN(item.quantity)) {
+                    console.warn(`[Batch Output][Invoice ${extractedData.invoiceCode}] Skipping item '${item.materialName}' due to invalid quantity: ${item.quantity}.`);
+                    continue; // Quantity is mandatory to create an item
+                }
+
+                // Default missing or invalid prices to 0 so the invoice can still be saved
+                if (typeof item.unitPrice !== "number" || isNaN(item.unitPrice)) {
+                    console.warn(`[Batch Output][Invoice ${extractedData.invoiceCode}] Invalid or missing unitPrice for '${item.materialName}'. Defaulting to 0.`);
+                    (item as unknown as { unitPrice: number }).unitPrice = 0;
+                }
+                if (typeof item.totalPrice !== "number" || isNaN(item.totalPrice)) {
+                    console.warn(`[Batch Output][Invoice ${extractedData.invoiceCode}] Invalid or missing totalPrice for '${item.materialName}'. Defaulting to 0.`);
+                    (item as unknown as { totalPrice: number }).totalPrice = 0;
+                }
+
+                try {
+                    const material = await findOrCreateMaterialTx(tx, item.materialName, item.materialCode, provider.type);
+                    await processInvoiceItemTx(
+                        tx,
+                        item,
+                        invoice.id,
+                        new Date(extractedData.issueDate),
+                        provider.id,
+                        material,
+                        item.isMaterial ?? true,
+                    ).then(({ alert }) => {
+                        if (alert) alertsCreated += 1;
+                    });
+                } catch (itemErr) {
+                    console.error(`[Batch Output][Invoice ${extractedData.invoiceCode}] Failed to process item '${item.materialName}':`, itemErr);
+                }
             }
 
             return {

@@ -173,17 +173,17 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
 
     // Listen for the banner becoming visible so we can hide the button loader.
     useEffect(() => {
-        const handleBannerVisible = () => {
-            setWaitingForBanner(false);
-            setIsUploading(false);
-        };
+        const stopSpinner = () => {
+            setWaitingForBanner(false)
+            setIsUploading(false)
+        }
 
-        window.addEventListener('batchBannerVisible', handleBannerVisible);
+        window.addEventListener('batchBannerReady', stopSpinner)
 
         return () => {
-            window.removeEventListener('batchBannerVisible', handleBannerVisible);
-        };
-    }, []);
+            window.removeEventListener('batchBannerReady', stopSpinner)
+        }
+    }, [])
 
     // Fallback: if something goes wrong and the banner never appears, release
     // the loading state to avoid trapping the user.

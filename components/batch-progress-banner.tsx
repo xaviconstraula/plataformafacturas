@@ -13,6 +13,7 @@ export function BatchProgressBanner() {
     // Tracks if the banner is currently visible so we only emit the
     // "batchBannerVisible" event once per visibility change.
     const bannerShownRef = useRef(false)
+    const [expectedTotal, setExpectedTotal] = useState<number | null>(null)
 
     // Poll for batch updates every 3 seconds
     useEffect(() => {
@@ -66,7 +67,7 @@ export function BatchProgressBanner() {
                 // 🚀  Notify listeners (e.g. upload button) once the banner
                 //     becomes visible so they can stop showing their own loaders.
                 if (activeBatchesOnly.length > 0 && !bannerShownRef.current) {
-                    window.dispatchEvent(new Event('batchBannerVisible'))
+                    window.dispatchEvent(new CustomEvent('batchBannerVisible', { detail: { currentTotal: activeBatchesOnly.reduce((s, b) => s + (b.totalFiles ?? 0), 0) } }))
                     bannerShownRef.current = true
                 } else if (activeBatchesOnly.length === 0 && bannerShownRef.current) {
                     // Reset when no active batches so we can trigger again later.
@@ -83,12 +84,16 @@ export function BatchProgressBanner() {
         }
 
         // Listen for custom event to immediately refresh when a new batch is created
-        const handleBatchCreated = () => {
-            console.log('Batch created event received, refreshing immediately...');
-            fetchBatches();
-        };
+        const handleBatchCreated = (e: Event) => {
+            const detail = (e as CustomEvent<{ totalFiles: number }>).detail
+            if (detail?.totalFiles) {
+                setExpectedTotal(detail.totalFiles)
+            }
+            console.log('Batch created event received, refreshing immediately...')
+            fetchBatches()
+        }
 
-        window.addEventListener('batchCreated', handleBatchCreated);
+        window.addEventListener('batchCreated', handleBatchCreated as EventListener)
 
         fetchBatches()
         const interval = setInterval(fetchBatches, 3000) // Poll every 3 seconds instead of 5
@@ -99,18 +104,22 @@ export function BatchProgressBanner() {
         }
     }, [])
 
-    if (isLoading) {
-        return null // Don't show anything while loading
-    }
+    // Aggregate the total number of files across all active batches so the user
+    // only sees a single banner (e.g. "Procesando 215 facturas") incluso antes
+    // de que todos los batches estén registrados en la BD.
+    const aggregated = activeBatches.reduce((sum, b) => sum + (b.totalFiles ?? 0), 0)
+    const totalFiles = expectedTotal && expectedTotal > aggregated ? expectedTotal : aggregated
 
-    if (activeBatches.length === 0) {
-        return null // No active batches to show
-    }
+    // Emitimos evento cuando alcanzamos el total esperado
+    useEffect(() => {
+        if (expectedTotal && aggregated >= expectedTotal) {
+            window.dispatchEvent(new CustomEvent('batchBannerReady'))
+            setExpectedTotal(null)
+        }
+    }, [aggregated, expectedTotal])
 
-    // Aggregate the total number of files across all active batches so the
-    // user only sees a single banner (e.g. "Procesando 75 facturas") instead
-    // of one banner per chunked batch.
-    const totalFiles = activeBatches.reduce((sum, b) => sum + (b.totalFiles ?? 0), 0)
+    if (isLoading) return null
+    if (activeBatches.length === 0) return null
 
     return (
         <div className="mb-6">
