@@ -74,7 +74,7 @@ export async function getActiveBatches(): Promise<BatchProgressInfo[]> {
     const twoMinutesAgo = new Date();
     twoMinutesAgo.setMinutes(twoMinutesAgo.getMinutes() - 2);
 
-    const batches = await prisma.batchProcessing.findMany({
+    const localBatches = await prisma.batchProcessing.findMany({
         where: {
             OR: [
                 {
@@ -96,6 +96,57 @@ export async function getActiveBatches(): Promise<BatchProgressInfo[]> {
             createdAt: 'desc'
         },
     });
+
+    // 🔄  Attempt to reconcile status with OpenAI for active batches
+    //     We only do this for batches that are still PENDING/PROCESSING to avoid
+    //     unnecessary API calls once a batch is terminal.
+    const reconciledBatches: typeof localBatches = [];
+
+    for (const batch of localBatches) {
+        if (['PENDING', 'PROCESSING'].includes(batch.status)) {
+            try {
+                const remote = await openai.batches.retrieve(batch.id);
+
+                // Map OpenAI status → local BatchStatus
+                const statusMap: Record<string, BatchStatus> = {
+                    validating: 'PENDING',
+                    in_progress: 'PROCESSING',
+                    finalizing: 'PROCESSING',
+                    completed: 'COMPLETED',
+                    failed: 'FAILED',
+                    expired: 'FAILED',
+                    cancelling: 'PROCESSING',
+                    cancelled: 'CANCELLED',
+                };
+
+                const newStatus = statusMap[remote.status] ?? batch.status;
+
+                // Extract counts if present
+                const rc = (remote.request_counts ?? {}) as {
+                    total?: number;
+                    completed?: number;
+                    failed?: number;
+                };
+
+                await updateBatchProgress(batch.id, {
+                    status: newStatus,
+                    processedFiles: rc.completed !== undefined || rc.failed !== undefined ? (rc.completed ?? 0) + (rc.failed ?? 0) : undefined,
+                    successfulFiles: rc.completed,
+                    failedFiles: rc.failed,
+                });
+
+                // Refresh the local batch object to reflect latest DB values
+                reconciledBatches.push({ ...batch, status: newStatus, processedFiles: rc.completed ?? 0 + (rc.failed ?? 0), successfulFiles: rc.completed ?? 0, failedFiles: rc.failed ?? 0 });
+                continue;
+            } catch (err) {
+                console.error('[getActiveBatches] Failed to retrieve remote batch', batch.id, err);
+            }
+        }
+
+        reconciledBatches.push(batch);
+    }
+
+    const batches = reconciledBatches;
 
     return batches.map(batch => ({
         id: batch.id,
