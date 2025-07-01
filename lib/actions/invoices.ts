@@ -2482,19 +2482,14 @@ export async function startInvoiceBatch(formDataWithFiles: FormData): Promise<{ 
     });
 
     // STEP 3 – Create the batch job.
-    // Always send a webhook URL so that we receive progress events from OpenAI. If a secret is provided,
-    // include it as well, but don't block webhook registration when the secret is absent (e.g. local dev).
-    // NOTE: The local API route is `/api/openai-batch-webhook`, **not** `/api/openai/batch-webhook**.
-    // The previous path prevented OpenAI from reaching our handler, leaving batches stuck in the PENDING state.
-
-    const webhookUrl = process.env.OPENAI_BATCH_WEBHOOK_URL || `${process.env.NEXT_PUBLIC_APP_URL}/api/openai-batch-webhook`;
+    // NOTE: Webhooks must be configured through the OpenAI dashboard, not through the API.
+    // Make sure you have set up the webhook endpoint at https://platform.openai.com/settings/project/webhooks
+    // with the URL: /api/openai-batch-webhook
 
     const batch = await openai.batches.create({
         input_file_id: batchFile.id,
         endpoint: '/v1/chat/completions',
-        completion_window: '24h',
-        ...(webhookUrl ? { webhook_url: webhookUrl } : {}),
-        ...(process.env.OPENAI_BATCH_WEBHOOK_SECRET ? { webhook_secret: process.env.OPENAI_BATCH_WEBHOOK_SECRET } : {}),
+        completion_window: '24h'
     });
 
     // STEP 4 – Create our local BatchProcessing record using the same id so the banner can track progress immediately.
