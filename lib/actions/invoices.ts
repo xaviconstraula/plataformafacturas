@@ -2455,6 +2455,45 @@ async function buildBatchJsonl(files: File[]): Promise<string> {
     return lines.join("\n");
 }
 
+// Convenience: generate JSONL chunks whose size stays under the 200 MB limit imposed by the Batch API
+const MAX_BATCH_FILE_SIZE = 190 * 1024 * 1024; // 190 MB to leave safety margin
+
+interface JsonlChunk {
+    content: string;
+    files: File[];
+}
+
+async function buildBatchJsonlChunks(files: File[]): Promise<JsonlChunk[]> {
+    const chunks: JsonlChunk[] = [];
+
+    let currentLines: string[] = [];
+    let currentSize = 0;
+    let currentFiles: File[] = [];
+
+    for (const file of files) {
+        const line = await prepareBatchLine(file);
+        const lineSize = Buffer.byteLength(line, "utf8") + 1; // +1 for newline
+
+        if (currentSize + lineSize > MAX_BATCH_FILE_SIZE && currentLines.length > 0) {
+            // Finish current chunk and start a new one
+            chunks.push({ content: currentLines.join("\n"), files: currentFiles });
+            currentLines = [];
+            currentFiles = [];
+            currentSize = 0;
+        }
+
+        currentLines.push(line);
+        currentFiles.push(file);
+        currentSize += lineSize;
+    }
+
+    if (currentLines.length > 0) {
+        chunks.push({ content: currentLines.join("\n"), files: currentFiles });
+    }
+
+    return chunks;
+}
+
 // ---------------------------------------------------------------------------
 // 🏗️  Helper: Persist extracted JSON response (used by webhook)
 // ---------------------------------------------------------------------------
@@ -2529,44 +2568,50 @@ export async function startInvoiceBatch(formDataWithFiles: FormData): Promise<{ 
         throw new Error('No files provided.');
     }
 
-    // STEP 1 – Build real JSONL content
-    const jsonlContent = await buildBatchJsonl(files);
-
-    // Persist the file to the temporary directory so that the OpenAI SDK can stream it.
-    const fs = await import('fs');
-    const path = await import('path');
-    const tmpDir = path.join(process.cwd(), 'tmp');
+    // STEP 1 – Build one or more JSONL chunks under the size limit
+    const fs = await import("fs");
+    const path = await import("path");
+    const tmpDir = path.join(process.cwd(), "tmp");
     if (!fs.existsSync(tmpDir)) {
         fs.mkdirSync(tmpDir);
     }
-    const jsonlPath = path.join(tmpDir, `batch-input-${Date.now()}.jsonl`);
-    await fs.promises.writeFile(jsonlPath, jsonlContent, 'utf8');
 
-    // STEP 2 – Upload the batch file.
-    const batchFile = await openai.files.create({
-        // Casting via unknown avoids the eslint 'any' rule while still telling TS to accept the stream.
-        file: fs.createReadStream(jsonlPath) as unknown as File,
-        purpose: 'batch',
-    });
+    const chunks = await buildBatchJsonlChunks(files);
 
-    // STEP 3 – Create the batch job.
-    // NOTE: Webhooks must be configured through the OpenAI dashboard, not through the API.
-    // Make sure you have set up the webhook endpoint at https://platform.openai.com/settings/project/webhooks
-    // with the URL: /api/openai-batch-webhook
+    if (chunks.length === 0) {
+        throw new Error("No JSONL chunks built.");
+    }
 
-    const batch = await openai.batches.create({
-        input_file_id: batchFile.id,
-        endpoint: '/v1/chat/completions',
-        completion_window: '24h'
-    });
+    const createdBatchIds: string[] = [];
 
-    // STEP 4 – Create our local BatchProcessing record using the same id so the banner can track progress immediately.
-    await createBatchProcessing(files.length, batch.id);
+    for (const [index, chunk] of chunks.entries()) {
+        const jsonlPath = path.join(tmpDir, `batch-input-${Date.now()}-${index}.jsonl`);
+        await fs.promises.writeFile(jsonlPath, chunk.content, "utf8");
 
-    // Clean the temporary file – fail silently if deletion errors.
-    fs.promises.unlink(jsonlPath).catch(() => undefined);
+        // Upload file
+        const batchFile = await openai.files.create({
+            file: fs.createReadStream(jsonlPath) as unknown as File,
+            purpose: "batch",
+        });
 
-    return { batchId: batch.id };
+        // Create batch job
+        const batch = await openai.batches.create({
+            input_file_id: batchFile.id,
+            endpoint: "/v1/chat/completions",
+            completion_window: "24h",
+        });
+
+        // Record locally so banner can track
+        await createBatchProcessing(chunk.files.length, batch.id);
+
+        createdBatchIds.push(batch.id);
+
+        // Cleanup temp file
+        fs.promises.unlink(jsonlPath).catch(() => undefined);
+    }
+
+    // Return the first batchId for backward-compat; UI polls DB for others
+    return { batchId: createdBatchIds[0] };
 }
 
 // ---------------------------------------------------------------------------
