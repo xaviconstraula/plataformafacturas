@@ -17,6 +17,7 @@ interface InvoiceDropzoneProps {
 export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, className }: InvoiceDropzoneProps) {
     const [files, setFiles] = useState<File[]>([])
     const [isUploading, setIsUploading] = useState(false)
+    const [waitingForBanner, setWaitingForBanner] = useState(false)
     const [loadingStep, setLoadingStep] = useState<'processing' | 'analyzing'>('processing');
     const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number } | null>(null);
 
@@ -101,6 +102,7 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
 
         const operationResults: CreateInvoiceResult[] = [];
         let batchId: string | undefined;
+        let createdBatchSuccessfully = false;
 
         try {
             // Prepare FormData for server action
@@ -113,12 +115,17 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
             console.log(`Starting OpenAI Batch processing for ${filesToProcess.length} files...`);
             const { batchId: createdBatchId } = await startInvoiceBatch(formData);
             batchId = createdBatchId;
+            createdBatchSuccessfully = true;
 
             // Notify the UI about the new batch so the banner appears immediately
             const batchCreatedEvent = new CustomEvent('batchCreated', {
                 detail: { batchId, totalFiles: filesToProcess.length },
             });
             window.dispatchEvent(batchCreatedEvent);
+
+            // Keep the button in loading state until the banner confirms it is
+            // visible so the user perceives continuous progress feedback.
+            setWaitingForBanner(true);
 
             // Generate minimal results so downstream handlers detect batch mode
             const syntheticResults: CreateInvoiceResult[] = [
@@ -149,13 +156,46 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
                 });
             }
         } finally {
-            setIsUploading(false);
             setUploadProgress(null);
             if (onProcessingComplete) {
                 onProcessingComplete(operationResults);
             }
+
+            // Do not clear the uploading state here if we are waiting for the
+            // banner to appear. The 'batchBannerVisible' listener (or the
+            // safety timeout) will take care of hiding the spinner.
+            if (!createdBatchSuccessfully) {
+                // If we didn't create a batch (or it failed), stop the spinner now.
+                setIsUploading(false);
+            }
         }
     }
+
+    // Listen for the banner becoming visible so we can hide the button loader.
+    useEffect(() => {
+        const handleBannerVisible = () => {
+            setWaitingForBanner(false);
+            setIsUploading(false);
+        };
+
+        window.addEventListener('batchBannerVisible', handleBannerVisible);
+
+        return () => {
+            window.removeEventListener('batchBannerVisible', handleBannerVisible);
+        };
+    }, []);
+
+    // Fallback: if something goes wrong and the banner never appears, release
+    // the loading state to avoid trapping the user.
+    useEffect(() => {
+        if (waitingForBanner) {
+            const timer = setTimeout(() => {
+                setWaitingForBanner(false);
+                setIsUploading(false);
+            }, 300000); // 5 min safety timeout
+            return () => clearTimeout(timer);
+        }
+    }, [waitingForBanner]);
 
     return (
         <div className={cn('grid gap-4', className)}>

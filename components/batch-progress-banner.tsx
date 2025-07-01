@@ -10,6 +10,9 @@ export function BatchProgressBanner() {
     const [activeBatches, setActiveBatches] = useState<BatchProgressInfo[]>([])
     const [isLoading, setIsLoading] = useState(true)
     const previousBatchesRef = useRef<BatchProgressInfo[]>([])
+    // Tracks if the banner is currently visible so we only emit the
+    // "batchBannerVisible" event once per visibility change.
+    const bannerShownRef = useRef(false)
 
     // Poll for batch updates every 3 seconds
     useEffect(() => {
@@ -58,7 +61,17 @@ export function BatchProgressBanner() {
                 // Only show batches that are actually active (not completed)
                 const activeBatchesOnly = batches.filter(batch =>
                     batch.status === 'PENDING' || batch.status === 'PROCESSING'
-                );
+                )
+
+                // 🚀  Notify listeners (e.g. upload button) once the banner
+                //     becomes visible so they can stop showing their own loaders.
+                if (activeBatchesOnly.length > 0 && !bannerShownRef.current) {
+                    window.dispatchEvent(new Event('batchBannerVisible'))
+                    bannerShownRef.current = true
+                } else if (activeBatchesOnly.length === 0 && bannerShownRef.current) {
+                    // Reset when no active batches so we can trigger again later.
+                    bannerShownRef.current = false
+                }
 
                 setActiveBatches(activeBatchesOnly)
                 previousBatchesRef.current = batches // Keep all batches for completion detection
@@ -94,21 +107,24 @@ export function BatchProgressBanner() {
         return null // No active batches to show
     }
 
+    // Aggregate the total number of files across all active batches so the
+    // user only sees a single banner (e.g. "Procesando 75 facturas") instead
+    // of one banner per chunked batch.
+    const totalFiles = activeBatches.reduce((sum, b) => sum + (b.totalFiles ?? 0), 0)
+
     return (
-        <div className="space-y-3 mb-6">
-            {activeBatches.map((batch) => (
-                <Card key={batch.id} className="border-blue-200 bg-blue-50">
-                    <CardContent className="pt-4 pb-4">
-                        <div className="flex items-center gap-3">
-                            <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
-                            <FileText className="h-5 w-5 text-blue-600" />
-                            <span className="font-medium text-base">
-                                Procesando {batch.totalFiles} facturas
-                            </span>
-                        </div>
-                    </CardContent>
-                </Card>
-            ))}
+        <div className="mb-6">
+            <Card className="border-blue-200 bg-blue-50">
+                <CardContent className="pt-4 pb-4">
+                    <div className="flex items-center gap-3">
+                        <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
+                        <FileText className="h-5 w-5 text-blue-600" />
+                        <span className="font-medium text-base">
+                            Procesando {totalFiles} factura{totalFiles !== 1 ? 's' : ''}
+                        </span>
+                    </div>
+                </CardContent>
+            </Card>
         </div>
     )
 } 
