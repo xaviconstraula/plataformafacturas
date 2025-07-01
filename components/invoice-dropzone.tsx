@@ -6,7 +6,7 @@ import { UploadCloudIcon, XIcon, FileIcon, BotIcon, Loader2Icon } from 'lucide-r
 import { cn } from '@/lib/utils'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
-import { createInvoiceFromFiles, type CreateInvoiceResult } from '@/lib/actions/invoices'
+import { startInvoiceBatch, type CreateInvoiceResult } from '@/lib/actions/invoices'
 
 interface InvoiceDropzoneProps {
     onProcessingComplete?: (results: CreateInvoiceResult[]) => void;
@@ -103,42 +103,34 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
         let batchId: string | undefined;
 
         try {
-            // First, create the batch record immediately so the banner shows right away
-            const { createBatchProcessing } = await import('@/lib/actions/invoices');
-            batchId = await createBatchProcessing(filesToProcess.length);
-            console.log(`Created batch record immediately: ${batchId} for ${filesToProcess.length} files`);
+            // Prepare FormData for server action
+            const formData = new FormData();
+            filesToProcess.forEach((file) => {
+                formData.append('files', file);
+            });
 
-            // Dispatch custom event to immediately refresh the batch progress banner
+            // Start the OpenAI Batch job via server action
+            console.log(`Starting OpenAI Batch processing for ${filesToProcess.length} files...`);
+            const { batchId: createdBatchId } = await startInvoiceBatch(formData);
+            batchId = createdBatchId;
+
+            // Notify the UI about the new batch so the banner appears immediately
             const batchCreatedEvent = new CustomEvent('batchCreated', {
-                detail: { batchId, totalFiles: filesToProcess.length }
+                detail: { batchId, totalFiles: filesToProcess.length },
             });
             window.dispatchEvent(batchCreatedEvent);
 
-            // Now process all files in a single call
-            const formData = new FormData();
-            filesToProcess.forEach((file) => {
-                formData.append("files", file);
-            });
-            formData.append("existingBatchId", batchId); // Pass the existing batch ID
+            // Generate minimal results so downstream handlers detect batch mode
+            const syntheticResults: CreateInvoiceResult[] = [
+                {
+                    success: true,
+                    message: 'Batch enqueued',
+                    batchId,
+                    fileName: filesToProcess.length === 1 ? filesToProcess[0].name : `${filesToProcess.length} archivos`,
+                },
+            ];
 
-            console.log(`Processing ${filesToProcess.length} files with existing batch ID: ${batchId}`);
-
-            const { results } = await createInvoiceFromFiles(formData);
-            operationResults.push(...results);
-
-            operationResults.forEach((result: CreateInvoiceResult) => {
-                if (result.isBlockedProvider) {
-                    const providerNameMatch = result.message.match(/Provider '(.+?)' is blocked/);
-                    const providerName = providerNameMatch ? providerNameMatch[1] : 'Unknown';
-                    const event = new CustomEvent('blockedProvider', {
-                        detail: {
-                            providerName,
-                            fileName: result.fileName || 'Unknown file'
-                        }
-                    });
-                    window.dispatchEvent(event);
-                }
-            });
+            operationResults.push(...syntheticResults);
 
         } catch (error) {
             console.error("Error creating invoices:", error);

@@ -26,9 +26,11 @@ export interface BatchProgressInfo {
 }
 
 // Create a new batch processing record
-export async function createBatchProcessing(totalFiles: number): Promise<string> {
+export async function createBatchProcessing(totalFiles: number, providedId?: string): Promise<string> {
     const batch = await prisma.batchProcessing.create({
         data: {
+            // Use providedId when supplied so that our local record id matches OpenAI's batch id.
+            ...(providedId ? { id: providedId } : {}),
             totalFiles,
             status: 'PENDING',
         },
@@ -2251,4 +2253,185 @@ export async function createManualInvoice(data: ManualInvoiceData): Promise<Crea
             isBlockedProvider,
         };
     }
+}
+
+// ---------------------------------------------------------------------------
+// 🏗️  Helper: Build a real JSONL line for the Batch API for one PDF file.
+// ---------------------------------------------------------------------------
+
+async function prepareBatchLine(file: File): Promise<string> {
+    // 1️⃣  Convert PDF pages to PNG images (same logic we used in callPdfExtractAPI)
+    const buffer = Buffer.from(await file.arrayBuffer());
+    const arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+
+    const pages = await pdfToPng(arrayBuffer, {
+        disableFontFace: true,
+        useSystemFonts: false,
+        viewportScale: 2.0,
+        strictPagesToProcess: false,
+        verbosityLevel: 0,
+    });
+
+    const imageUrls = pages.map((page) => ({
+        type: "image_url" as const,
+        image_url: {
+            url: `data:image/png;base64,${page.content.toString("base64")}`,
+            detail: "high" as const,
+        },
+    }));
+
+    // 2️⃣  Extract raw text (CIF / phone heuristics) so that the prompt can be enriched
+    const textData = await extractTextFromPdf(file);
+
+    const potentialCifs = textData.cifNumbers.length > 0 ? `\n\nPOTENTIAL CIF/NIF/NIE FOUND IN TEXT: ${textData.cifNumbers.join(', ')}` : '';
+    const potentialPhones = textData.phoneNumbers.length > 0 ? `\nPOTENTIAL PHONES FOUND IN TEXT: ${textData.phoneNumbers.join(', ')}` : '';
+
+    // 3️⃣  Build prompt identical to callPdfExtractAPI()
+    const promptText = `Extract invoice data from these images (consolidate all pages into a single invoice). Only extract visible data, use null for missing optional fields.${potentialCifs}${potentialPhones}`;
+
+    const messages = [
+        { type: "text" as const, text: promptText },
+        ...imageUrls,
+    ];
+
+    return JSON.stringify({
+        custom_id: file.name,
+        method: "POST",
+        url: "/v1/chat/completions",
+        body: {
+            model: "gpt-4.1",
+            temperature: 0.1,
+            messages,
+            response_format: { type: "json_object" },
+            max_tokens: 2000,
+        },
+    });
+}
+
+// Convenience: generate all lines in parallel with limited concurrency (4)
+async function buildBatchJsonl(files: File[]): Promise<string> {
+    const CONCURRENCY = 4;
+    const lines: string[] = [];
+
+    for (let i = 0; i < files.length; i += CONCURRENCY) {
+        const chunk = files.slice(i, i + CONCURRENCY);
+        const chunkLines = await Promise.all(chunk.map(prepareBatchLine));
+        lines.push(...chunkLines);
+    }
+    return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// 🏗️  Helper: Persist extracted JSON response (used by webhook)
+// ---------------------------------------------------------------------------
+
+export async function saveExtractedInvoice(extractedData: ExtractedPdfData, fileName?: string): Promise<CreateInvoiceResult> {
+    try {
+        const result = await prisma.$transaction(async (tx) => {
+            // ✅ Provider
+            const provider = await findOrCreateProviderTx(tx, extractedData.provider);
+
+            // ❌  Duplicate check
+            const existingInvoice = await tx.invoice.findFirst({
+                where: { invoiceCode: extractedData.invoiceCode, providerId: provider.id },
+            });
+            if (existingInvoice) {
+                return {
+                    success: false,
+                    message: `Invoice ${extractedData.invoiceCode} already exists`,
+                    invoiceId: existingInvoice.id,
+                };
+            }
+
+            // ✅ Invoice
+            const invoice = await tx.invoice.create({
+                data: {
+                    invoiceCode: extractedData.invoiceCode,
+                    providerId: provider.id,
+                    issueDate: new Date(extractedData.issueDate),
+                    totalAmount: new Prisma.Decimal(extractedData.totalAmount.toFixed(2)),
+                    status: "PROCESSED",
+                },
+            });
+
+            let alertsCreated = 0;
+
+            for (const item of extractedData.items) {
+                const material = await findOrCreateMaterialTx(tx, item.materialName, item.materialCode, provider.type);
+                await processInvoiceItemTx(
+                    tx,
+                    item,
+                    invoice.id,
+                    new Date(extractedData.issueDate),
+                    provider.id,
+                    material,
+                    item.isMaterial ?? true,
+                ).then(({ alert }) => {
+                    if (alert) alertsCreated += 1;
+                });
+            }
+
+            return {
+                success: true,
+                message: `Invoice ${invoice.invoiceCode} created`,
+                invoiceId: invoice.id,
+                alertsCreated,
+            };
+        });
+
+        return result;
+    } catch (err) {
+        console.error("Failed to persist invoice from batch output", err);
+        return { success: false, message: (err as Error).message || "Unknown error", fileName } as CreateInvoiceResult;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 🚀  Server Action: kick off Batch job
+// ---------------------------------------------------------------------------
+export async function startInvoiceBatch(formDataWithFiles: FormData): Promise<{ batchId: string }> {
+    const files = formDataWithFiles.getAll('files') as File[];
+    if (!files || files.length === 0) {
+        throw new Error('No files provided.');
+    }
+
+    // STEP 1 – Build real JSONL content
+    const jsonlContent = await buildBatchJsonl(files);
+
+    // Persist the file to the temporary directory so that the OpenAI SDK can stream it.
+    const fs = await import('fs');
+    const path = await import('path');
+    const tmpDir = path.join(process.cwd(), 'tmp');
+    if (!fs.existsSync(tmpDir)) {
+        fs.mkdirSync(tmpDir);
+    }
+    const jsonlPath = path.join(tmpDir, `batch-input-${Date.now()}.jsonl`);
+    await fs.promises.writeFile(jsonlPath, jsonlContent, 'utf8');
+
+    // STEP 2 – Upload the batch file.
+    const batchFile = await openai.files.create({
+        // Casting via unknown avoids the eslint 'any' rule while still telling TS to accept the stream.
+        file: fs.createReadStream(jsonlPath) as unknown as File,
+        purpose: 'batch',
+    });
+
+    // STEP 3 – Create the batch job.
+    const webhookUrl = process.env.OPENAI_BATCH_WEBHOOK_URL || `${process.env.NEXT_PUBLIC_APP_URL}/api/openai/batch-webhook`;
+    const batch = await openai.batches.create({
+        input_file_id: batchFile.id,
+        endpoint: '/v1/chat/completions',
+        completion_window: '24h',
+        // The new webhook parameters are optional – use them only when present.
+        ...(process.env.OPENAI_BATCH_WEBHOOK_SECRET && webhookUrl
+            ? { webhook_url: webhookUrl, webhook_secret: process.env.OPENAI_BATCH_WEBHOOK_SECRET }
+            : {}),
+    });
+
+    // STEP 4 – Create our local BatchProcessing record using the same id so the banner can track progress immediately.
+    await createBatchProcessing(files.length, batch.id);
+
+    // Clean the temporary file – fail silently if deletion errors.
+    fs.promises.unlink(jsonlPath).catch(() => undefined);
+
+    return { batchId: batch.id };
 } 

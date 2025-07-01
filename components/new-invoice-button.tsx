@@ -37,50 +37,43 @@ export function NewInvoiceButton() {
     function handleInvoiceProcessingCompletion(results?: CreateInvoiceResult[]) {
         setIsProcessing(false)
         setIsOpen(false)
-        // Display toasts based on results
-        if (results) {
-            results.forEach(result => {
-                if (!result.success) {
-                    // Don't show toast for blocked providers here since it's handled by the notification component
-                    if (!result.isBlockedProvider) {
-                        toast.error(result.message, {
-                            description: result.fileName ? `File: ${result.fileName}` : undefined,
-                        });
-                    }
-                } else if (result.message.includes("already exists")) {
-                    toast.info(result.message, {
+        if (!results || results.length === 0) {
+            toast.error("An unexpected error occurred during processing.");
+            return;
+        }
+
+        // If the first result contains a batchId, we know the new Batch API flow is active.
+        const batchId = results[0]?.batchId;
+        if (batchId) {
+            toast.success("Procesamiento iniciado", {
+                description: "Las facturas se están procesando en segundo plano. La página se actualizará automáticamente cuando estén listas.",
+            });
+            return; // No further per-file toasts; banner will take over.
+        }
+
+        // Legacy per-file behaviour (manual invoices or non-batch uploads)
+        results.forEach(result => {
+            if (!result.success) {
+                if (!result.isBlockedProvider) {
+                    toast.error(result.message, {
                         description: result.fileName ? `File: ${result.fileName}` : undefined,
                     });
-                } else {
-                    // Optionally, show a success toast for each successful upload
-                    // toast.success(result.message, {
-                    //     description: result.fileName ? `File: ${result.fileName}` : undefined,
-                    // });
                 }
-            });
-
-            const successfulUploads = results.filter(r => r.success && !r.message.includes("already exists")).length;
-            const skippedUploads = results.filter(r => r.success && r.message.includes("already exists")).length;
-            const failedUploads = results.filter(r => !r.success).length;
-
-            if (successfulUploads > 0 && failedUploads === 0 && skippedUploads === 0) {
-                toast.success(`Han sido procesadas ${successfulUploads} factura${successfulUploads > 1 ? 's' : ''}.`);
-            } else if (successfulUploads === 0 && failedUploads > 0 && skippedUploads === 0) {
-                // Errors are already shown individually
-            } else if (successfulUploads === 0 && failedUploads === 0 && skippedUploads > 0) {
-                toast.info(`${skippedUploads} invoice${skippedUploads > 1 ? 's were' : ' was'} skipped as ${skippedUploads > 1 ? 'they' : 'it'} already exist${skippedUploads > 1 ? '' : 's'}.`);
-            } else if (results.length > 0) {
-                // Mixed results, individual toasts should cover this.
-                // You could add a summary toast here if desired.
-                // For example:
-                // toast.info(\`Processing complete: ${successfulUploads} successful, ${failedUploads} failed, ${skippedUploads} skipped.\`);
+            } else if (result.message.includes("already exists")) {
+                toast.info(result.message, {
+                    description: result.fileName ? `File: ${result.fileName}` : undefined,
+                });
             }
+        });
 
+        const successfulUploads = results.filter(r => r.success && !r.message.includes("already exists")).length;
+        const skippedUploads = results.filter(r => r.success && r.message.includes("already exists")).length;
+        const failedUploads = results.filter(r => !r.success).length;
 
-        } else {
-            // This case should ideally not happen if InvoiceDropzone always provides results.
-            // Consider a generic error toast if results are unexpectedly undefined.
-            toast.error("An unexpected error occurred during processing.");
+        if (successfulUploads > 0 && failedUploads === 0 && skippedUploads === 0) {
+            toast.success(`Han sido procesadas ${successfulUploads} factura${successfulUploads > 1 ? 's' : ''}.`);
+        } else if (successfulUploads === 0 && failedUploads === 0 && skippedUploads > 0) {
+            toast.info(`${skippedUploads} invoice${skippedUploads > 1 ? 's were' : ' was'} skipped as ${skippedUploads > 1 ? 'they' : 'it'} already exist${skippedUploads > 1 ? '' : 's'}.`);
         }
     }
 
