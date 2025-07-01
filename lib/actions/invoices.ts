@@ -473,7 +473,7 @@ async function callPdfExtractAPI(file: File): Promise<CallPdfExtractAPIResponse>
             pages = await pdfToPng(arrayBuffer, {
                 disableFontFace: true,
                 useSystemFonts: false,
-                viewportScale: 2.0,
+                viewportScale: 1.5,
                 strictPagesToProcess: false,
                 verbosityLevel: 0,
             });
@@ -2336,7 +2336,7 @@ async function prepareBatchLine(file: File): Promise<string> {
     const pages = await pdfToPng(arrayBuffer, {
         disableFontFace: true,
         useSystemFonts: false,
-        viewportScale: 2.0,
+        viewportScale: 1.5,
         strictPagesToProcess: false,
         verbosityLevel: 0,
     });
@@ -2466,25 +2466,42 @@ interface JsonlChunk {
 async function buildBatchJsonlChunks(files: File[]): Promise<JsonlChunk[]> {
     const chunks: JsonlChunk[] = [];
 
+    // Allow limited parallelism to accelerate heavy pdfToPng work.
+    // Four concurrent conversions strike a good balance between speed-up and
+    // memory usage (~40–80 MB per A4 @ scale 2). Adjust if your runtime has
+    // more/less RAM.
+    const CONCURRENCY = 4;
+
     let currentLines: string[] = [];
     let currentSize = 0;
     let currentFiles: File[] = [];
 
-    for (const file of files) {
-        const line = await prepareBatchLine(file);
-        const lineSize = Buffer.byteLength(line, "utf8") + 1; // +1 for newline
+    for (let i = 0; i < files.length; i += CONCURRENCY) {
+        // Slice the next group of files and process them in parallel.
+        const slice = files.slice(i, i + CONCURRENCY);
 
-        if (currentSize + lineSize > MAX_BATCH_FILE_SIZE && currentLines.length > 0) {
-            // Finish current chunk and start a new one
-            chunks.push({ content: currentLines.join("\n"), files: currentFiles });
-            currentLines = [];
-            currentFiles = [];
-            currentSize = 0;
+        const results = await Promise.all(
+            slice.map(async (file) => {
+                const line = await prepareBatchLine(file);
+                return { file, line } as const;
+            })
+        );
+
+        // Append each prepared line, starting new chunks when size would exceed the cap.
+        for (const { file, line } of results) {
+            const lineSize = Buffer.byteLength(line, "utf8") + 1; // +1 for newline
+
+            if (currentSize + lineSize > MAX_BATCH_FILE_SIZE && currentLines.length > 0) {
+                chunks.push({ content: currentLines.join("\n"), files: currentFiles });
+                currentLines = [];
+                currentFiles = [];
+                currentSize = 0;
+            }
+
+            currentLines.push(line);
+            currentFiles.push(file);
+            currentSize += lineSize;
         }
-
-        currentLines.push(line);
-        currentFiles.push(file);
-        currentSize += lineSize;
     }
 
     if (currentLines.length > 0) {
