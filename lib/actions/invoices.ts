@@ -260,67 +260,37 @@ function parseOpenAIResetTime(timeStr: string | null | undefined): number {
 async function extractTextFromPdf(file: File): Promise<ExtractedTextData> {
     try {
         const buffer = Buffer.from(await file.arrayBuffer());
+        const pdfData = await pdfParse(buffer);
+        const rawText = pdfData.text;
 
-        // Validate PDF structure before parsing
-        try {
-            // Basic PDF header check
-            const header = buffer.slice(0, 8).toString();
-            if (!header.startsWith('%PDF-')) {
-                throw new Error('Invalid PDF header');
-            }
+        // Extract all potential CIF/NIF/NIE numbers
+        const cifMatches = [...rawText.matchAll(CIF_REGEX)].map(match => match[0]);
+        const nifMatches = [...rawText.matchAll(NIF_REGEX)].map(match => match[0]);
+        const nieMatches = [...rawText.matchAll(NIE_REGEX)].map(match => match[0]);
 
-            // Check file size
-            const maxSize = 50 * 1024 * 1024; // 50MB
-            if (buffer.length > maxSize) {
-                throw new Error(`PDF file too large (${Math.round(buffer.length / 1024 / 1024)}MB > ${Math.round(maxSize / 1024 / 1024)}MB)`);
-            }
+        // Combine all identification numbers
+        const cifNumbers = [...new Set([...cifMatches, ...nifMatches, ...nieMatches])];
 
-            // Attempt to parse with error recovery options
-            const pdfData = await pdfParse(buffer);
+        // Extract phone numbers
+        const phoneMatches = [...rawText.matchAll(PHONE_REGEX)].map(match =>
+            match[0].replace(/\s/g, '').replace(/^\+34/, '') // Normalize phone numbers
+        );
+        const phoneNumbers = [...new Set(phoneMatches)];
 
-            if (!pdfData || !pdfData.text) {
-                throw new Error('PDF parsing resulted in no text content');
-            }
+        console.log(`Text extraction from ${file.name}: Found ${cifNumbers.length} CIF/NIF/NIE numbers and ${phoneNumbers.length} phone numbers`);
 
-            const rawText = pdfData.text;
-
-            // Extract all potential CIF/NIF/NIE numbers
-            const cifMatches = [...rawText.matchAll(CIF_REGEX)].map(match => match[0]);
-            const nifMatches = [...rawText.matchAll(NIF_REGEX)].map(match => match[0]);
-            const nieMatches = [...rawText.matchAll(NIE_REGEX)].map(match => match[0]);
-
-            // Combine all identification numbers
-            const cifNumbers = [...new Set([...cifMatches, ...nifMatches, ...nieMatches])];
-
-            // Extract phone numbers
-            const phoneMatches = [...rawText.matchAll(PHONE_REGEX)].map(match =>
-                match[0].replace(/\s/g, '').replace(/^\+34/, '') // Normalize phone numbers
-            );
-            const phoneNumbers = [...new Set(phoneMatches)];
-
-            console.log(`Text extraction from ${file.name}: Found ${cifNumbers.length} CIF/NIF/NIE numbers and ${phoneNumbers.length} phone numbers`);
-
-            return {
-                rawText,
-                cifNumbers,
-                phoneNumbers
-            };
-        } catch (parseError) {
-            // Handle specific PDF parsing errors
-            const errorMessage = parseError instanceof Error ? parseError.message : 'Unknown PDF parsing error';
-            if (errorMessage.includes('bad XRef entry')) {
-                console.error(`[${file.name}] Corrupted PDF cross-reference table. File may be damaged.`);
-                throw new Error('PDF_CORRUPTED: Cross-reference table is damaged. The PDF file may be corrupted.');
-            }
-            if (errorMessage.includes('Invalid PDF header')) {
-                console.error(`[${file.name}] File is not a valid PDF.`);
-                throw new Error('INVALID_PDF: File does not appear to be a valid PDF document.');
-            }
-            throw parseError;
-        }
+        return {
+            rawText,
+            cifNumbers,
+            phoneNumbers
+        };
     } catch (error) {
         console.error(`Error extracting text from PDF ${file.name}:`, error);
-        throw error; // Re-throw to handle in caller
+        return {
+            rawText: '',
+            cifNumbers: [],
+            phoneNumbers: []
+        };
     }
 }
 
@@ -425,21 +395,7 @@ async function callPdfExtractAPI(file: File): Promise<CallPdfExtractAPIResponse>
         const arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
 
         // First, extract text data for validation
-        let textData;
-        try {
-            textData = await extractTextFromPdf(file);
-        } catch (textError) {
-            if (textError instanceof Error &&
-                (textError.message.startsWith('PDF_CORRUPTED:') ||
-                    textError.message.startsWith('INVALID_PDF:'))) {
-                return {
-                    extractedData: null,
-                    error: textError.message,
-                    rateLimitHeaders: undefined
-                };
-            }
-            throw textError;
-        }
+        const textData = await extractTextFromPdf(file);
 
         let pages;
         try {
@@ -742,14 +698,102 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
         return newProvider;
 
     } catch (error) {
-        // If we hit a unique constraint violation, the current transaction is unusable (`state 25P02`).
-        // Propagate the error so the caller can retry the whole operation in a *fresh* transaction.
+        // Handle unique constraint violations that might still occur due to race conditions
         if (typeof error === 'object' && error !== null && 'code' in error &&
             (error as { code: string }).code === 'P2002') {
-            console.warn(`Unique constraint violation for provider CIF ${cif}. Deferring recovery to outer retry logic.`);
+
+            console.log(`Race condition detected for provider CIF ${cif}, performing comprehensive search...`);
+
+            // P2002 means a unique constraint was violated, likely the CIF
+            // Another transaction might have created a provider with this CIF or a similar one
+            // Do a comprehensive search to find the existing provider
+
+            // 1. Try exact CIF match first
+            let existingProvider = await tx.provider.findUnique({
+                where: { cif },
+            });
+
+            if (existingProvider) {
+                console.log(`Found provider after race condition by exact CIF: ${existingProvider.name} (CIF: ${cif})`);
+                return existingProvider;
+            }
+
+            // 2. If not found by CIF, search by name (another transaction might have created with different CIF)
+            existingProvider = await tx.provider.findFirst({
+                where: {
+                    name: {
+                        equals: name,
+                        mode: 'insensitive'
+                    }
+                },
+            });
+
+            if (existingProvider) {
+                console.log(`Found provider after race condition by name: ${existingProvider.name} (CIF: ${existingProvider.cif}) - updating with new CIF: ${cif}`);
+                // Update the existing provider with the new CIF if needed
+                const updatedProvider = await tx.provider.update({
+                    where: { id: existingProvider.id },
+                    data: {
+                        cif, // Update with the CIF from current transaction
+                        email: email || existingProvider.email,
+                        phone: phone || existingProvider.phone,
+                        address: address || existingProvider.address,
+                        type: providerType,
+                    }
+                });
+                return updatedProvider;
+            }
+
+            // 3. Search by phone if available
+            if (phone) {
+                existingProvider = await tx.provider.findFirst({
+                    where: { phone: phone },
+                });
+
+                if (existingProvider) {
+                    console.log(`Found provider after race condition by phone: ${existingProvider.name} (CIF: ${existingProvider.cif}) - updating with new CIF: ${cif}`);
+                    const updatedProvider = await tx.provider.update({
+                        where: { id: existingProvider.id },
+                        data: {
+                            cif,
+                            name,
+                            email: email || existingProvider.email,
+                            phone: phone || existingProvider.phone,
+                            address: address || existingProvider.address,
+                            type: providerType,
+                        }
+                    });
+                    return updatedProvider;
+                }
+            }
+
+            // 4. Search by similar name as last resort
+            const allProviders = await tx.provider.findMany();
+            for (const candidate of allProviders) {
+                if (areProviderNamesSimilar(name, candidate.name)) {
+                    console.log(`Found provider after race condition by similar name: ${candidate.name} (CIF: ${candidate.cif}) - updating with new data`);
+                    const updatedProvider = await tx.provider.update({
+                        where: { id: candidate.id },
+                        data: {
+                            cif,
+                            name,
+                            email: email || candidate.email,
+                            phone: phone || candidate.phone,
+                            address: address || candidate.address,
+                            type: providerType,
+                        }
+                    });
+                    return updatedProvider;
+                }
+            }
+
+            // If we still haven't found anything, the race condition might have resolved
+            // Try one more time to create the provider
+            console.log(`No existing provider found after race condition, attempting final creation for ${name} (CIF: ${cif})`);
+            throw error; // Re-throw to let the caller handle it
         }
 
-        // Always re-throw so the outer logic can decide how to handle / retry.
+        // Re-throw other errors
         throw error;
     }
 }
@@ -881,39 +925,73 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
     const category = providerType === 'MACHINERY_RENTAL' ? 'Alquiler Maquinaria' : 'Proveedor de Materiales';
 
     if (!material) {
-        // Generate a deterministic code (prefer the one extracted from the PDF)
-        const generatedBaseCode = materialCode ? normalizeMaterialCode(materialCode) : normalizedName
-            .toLowerCase()
+        // Generate a base code
+        const baseCode = materialCode || normalizedName.toLowerCase()
             .normalize('NFD')
-            .replace(/[^a-z0-9\s]/g, '') // Remove accents & special chars
+            .replace(/[\u0300-\u036f]/g, '') // Remove accents
+            .replace(/[^a-z0-9\s]/g, '') // Remove special characters
             .replace(/\s+/g, '-')
-            .substring(0, 60); // stay reasonably short
+            .substring(0, 45); // Leave room for suffix
 
-        // Final code we will persist / search by
-        const codeToUse = generatedBaseCode;
+        // Try to create with base code first, then with suffixes if needed
+        let attempts = 0;
+        const maxAttempts = 10;
 
-        // Use an atomic upsert so concurrent invoices don't race and the tx never aborts
-        material = await tx.material.upsert({
-            where: { code: codeToUse },
-            update: {
-                // keep name and category fresh without overwriting referenceCode unintentionally
-                name: normalizedName,
-                category,
-                referenceCode: materialCode ?? undefined,
-            },
-            create: {
-                code: codeToUse,
-                name: normalizedName,
-                category,
-                referenceCode: materialCode ?? null,
-            },
-        });
+        while (attempts < maxAttempts) {
+            try {
+                const codeToTry = attempts === 0 ? baseCode : `${baseCode}-${attempts}`;
+
+                material = await tx.material.create({
+                    data: {
+                        code: codeToTry,
+                        name: normalizedName,
+                        category: category,
+                        referenceCode: materialCode, // Guardar el código original extraído del PDF
+                    },
+                });
+                break; // Success, exit loop
+            } catch (error) {
+                // Check if it's a unique constraint error on code
+                if (typeof error === 'object' && error !== null && 'code' in error &&
+                    (error as { code: string }).code === 'P2002' &&
+                    'meta' in error && error.meta && typeof error.meta === 'object' &&
+                    'target' in error.meta && Array.isArray((error.meta as { target: unknown }).target) &&
+                    ((error.meta as { target: string[] }).target).includes('code')) {
+
+                    attempts++;
+                    console.log(`Material code conflict on attempt ${attempts} for material: ${normalizedName}. Trying with suffix...`);
+
+                    if (attempts >= maxAttempts) {
+                        // Final attempt: check if material was created by another transaction
+                        const existingMaterial = await tx.material.findFirst({
+                            where: { name: { equals: normalizedName, mode: 'insensitive' } }
+                        });
+
+                        if (existingMaterial) {
+                            console.log(`Found existing material after race condition: ${existingMaterial.name}`);
+                            material = existingMaterial;
+                            break;
+                        }
+
+                        throw new Error(`Failed to create material '${normalizedName}' after ${maxAttempts} attempts due to code conflicts.`);
+                    }
+                    continue; // Try again with suffix
+                } else {
+                    // Re-throw other errors
+                    throw error;
+                }
+            }
+        }
+
+        if (!material) {
+            throw new Error(`Failed to create material '${normalizedName}' after exhausting all attempts.`);
+        }
     } else {
         // Update category if not set or different
         if (!material.category || material.category !== category) {
             material = await tx.material.update({
                 where: { id: material.id },
-                data: { category },
+                data: { category: category },
             });
         }
     }
@@ -1178,803 +1256,778 @@ export async function createInvoiceFromFiles(
         startedAt: new Date(),
     });
 
-    // ------------------------------------------------------------
-    // Begin main batch processing block (wrapped in try/catch).
-    // ------------------------------------------------------------
-    try {
-        // More conservative initial concurrency for larger batches
-        let CONCURRENCY_LIMIT = files.length > 10 ?
-            Math.min(6, Math.max(3, Math.ceil(files.length / 8))) : // Reduced for large batches
-            Math.min(10, Math.max(4, Math.ceil(files.length / 5))); // Keep existing for small batches
+    // More conservative initial concurrency for larger batches
+    let CONCURRENCY_LIMIT = files.length > 10 ?
+        Math.min(6, Math.max(3, Math.ceil(files.length / 8))) : // Reduced for large batches
+        Math.min(10, Math.max(4, Math.ceil(files.length / 5))); // Keep existing for small batches
 
-        const allFileProcessingResults: Array<ExtractedFileItem & { rateLimitHeaders?: OpenAIRateLimitHeaders }> = [];
-        let lastKnownRateLimits: OpenAIRateLimitHeaders | undefined = undefined;
-        let consecutiveRateLimitHits = 0;
+    const allFileProcessingResults: Array<ExtractedFileItem & { rateLimitHeaders?: OpenAIRateLimitHeaders }> = [];
+    let lastKnownRateLimits: OpenAIRateLimitHeaders | undefined = undefined;
+    let consecutiveRateLimitHits = 0;
 
-        console.log(`Starting extraction for ${files.length} files with initial concurrency limit of ${CONCURRENCY_LIMIT} (conservative for large batches).`);
+    console.log(`Starting extraction for ${files.length} files with initial concurrency limit of ${CONCURRENCY_LIMIT} (conservative for large batches).`);
 
-        // Add memory pressure detection
-        const initialMemory = process.memoryUsage();
-        console.log(`Initial memory usage: ${Math.round(initialMemory.heapUsed / 1024 / 1024)}MB heap, ${Math.round(initialMemory.rss / 1024 / 1024)}MB RSS`);
+    // Add memory pressure detection
+    const initialMemory = process.memoryUsage();
+    console.log(`Initial memory usage: ${Math.round(initialMemory.heapUsed / 1024 / 1024)}MB heap, ${Math.round(initialMemory.rss / 1024 / 1024)}MB RSS`);
 
-        // For very large batches (100+ files), add periodic memory cleanup
-        const isVeryLargeBatch = files.length >= 100;
-        if (isVeryLargeBatch) {
-            console.log(`[Very Large Batch] Processing ${files.length} files - enabling enhanced memory management`);
+    // For very large batches (100+ files), add periodic memory cleanup
+    const isVeryLargeBatch = files.length >= 100;
+    if (isVeryLargeBatch) {
+        console.log(`[Very Large Batch] Processing ${files.length} files - enabling enhanced memory management`);
+    }
+
+    const batchErrors: string[] = [];
+
+    for (let i = 0; i < files.length; i += CONCURRENCY_LIMIT) {
+        const fileChunk = files.slice(i, i + CONCURRENCY_LIMIT);
+        const batchNumber = Math.floor(i / CONCURRENCY_LIMIT) + 1;
+        const totalBatches = Math.ceil(files.length / CONCURRENCY_LIMIT);
+
+        console.log(`Processing batch ${batchNumber} of ${totalBatches} (files ${i + 1} to ${i + fileChunk.length} of ${files.length}) with concurrency ${CONCURRENCY_LIMIT}.`);
+
+        // Update batch progress
+        const currentFileIndex = i + 1;
+        const estimatedTimePerFile = 30; // seconds
+        const remainingFiles = files.length - currentFileIndex;
+        const estimatedCompletion = new Date(Date.now() + (remainingFiles * estimatedTimePerFile * 1000));
+
+        await updateBatchProgress(batchId, {
+            processedFiles: i,
+            currentFile: fileChunk.length > 0 ? fileChunk[0].name : undefined,
+            estimatedCompletion,
+        });
+
+        // Memory pressure check
+        const currentMemory = process.memoryUsage();
+        const heapUsedMB = Math.round(currentMemory.heapUsed / 1024 / 1024);
+        const memoryGrowthMB = Math.round((currentMemory.heapUsed - initialMemory.heapUsed) / 1024 / 1024);
+
+        if (heapUsedMB > 800 || memoryGrowthMB > 400) { // Conservative thresholds
+            console.warn(`[Memory] High memory usage detected: ${heapUsedMB}MB heap (+${memoryGrowthMB}MB growth). Reducing concurrency.`);
+            CONCURRENCY_LIMIT = Math.max(2, Math.floor(CONCURRENCY_LIMIT * 0.6));
+
+            // Force garbage collection if available
+            if (global.gc) {
+                console.log(`[Memory] Running garbage collection...`);
+                global.gc();
+            }
         }
 
-        const batchErrors: string[] = [];
+        // For very large batches, run periodic cleanup every 50 files
+        if (isVeryLargeBatch && (i / CONCURRENCY_LIMIT) % 10 === 0 && i > 0) {
+            console.log(`[Very Large Batch] Processed ${i} files, running memory cleanup...`);
+            if (global.gc) {
+                global.gc();
+            }
+            // Small pause to allow memory cleanup
+            await new Promise(resolve => setTimeout(resolve, 2000));
+        }
 
-        for (let i = 0; i < files.length; i += CONCURRENCY_LIMIT) {
-            const fileChunk = files.slice(i, i + CONCURRENCY_LIMIT);
-            const batchNumber = Math.floor(i / CONCURRENCY_LIMIT) + 1;
-            const totalBatches = Math.ceil(files.length / CONCURRENCY_LIMIT);
+        // Smart rate limit checking - only wait if we're actually close to limits
+        if (lastKnownRateLimits) {
+            let shouldWait = false;
+            let waitTimeMs = 0;
+            let waitReason = "";
 
-            console.log(`Processing batch ${batchNumber} of ${totalBatches} (files ${i + 1} to ${i + fileChunk.length} of ${files.length}) with concurrency ${CONCURRENCY_LIMIT}.`);
+            // More conservative thresholds for large batches
+            const requestThreshold = files.length > 10 ? 5 : 2; // Higher threshold for large batches
+            const tokenThreshold = files.length > 10 ? 15000 : 5000; // Conservative token estimation
 
-            // Update batch progress
-            const currentFileIndex = i + 1;
-            const estimatedTimePerFile = 30; // seconds
-            const remainingFiles = files.length - currentFileIndex;
-            const estimatedCompletion = new Date(Date.now() + (remainingFiles * estimatedTimePerFile * 1000));
-
-            await updateBatchProgress(batchId, {
-                processedFiles: i,
-                currentFile: fileChunk.length > 0 ? fileChunk[0].name : undefined,
-                estimatedCompletion,
-            });
-
-            // Memory pressure check
-            const currentMemory = process.memoryUsage();
-            const heapUsedMB = Math.round(currentMemory.heapUsed / 1024 / 1024);
-            const memoryGrowthMB = Math.round((currentMemory.heapUsed - initialMemory.heapUsed) / 1024 / 1024);
-
-            if (heapUsedMB > 800 || memoryGrowthMB > 400) { // Conservative thresholds
-                console.warn(`[Memory] High memory usage detected: ${heapUsedMB}MB heap (+${memoryGrowthMB}MB growth). Reducing concurrency.`);
-                CONCURRENCY_LIMIT = Math.max(2, Math.floor(CONCURRENCY_LIMIT * 0.6));
-
-                // Force garbage collection if available
-                if (global.gc) {
-                    console.log(`[Memory] Running garbage collection...`);
-                    global.gc();
-                }
+            if (lastKnownRateLimits.remainingRequests !== undefined && lastKnownRateLimits.remainingRequests < requestThreshold) {
+                shouldWait = true;
+                waitTimeMs = Math.max(waitTimeMs, lastKnownRateLimits.resetRequestsTimeMs || 60000);
+                waitReason += " requests";
             }
 
-            // For very large batches, run periodic cleanup every 50 files
-            if (isVeryLargeBatch && (i / CONCURRENCY_LIMIT) % 10 === 0 && i > 0) {
-                console.log(`[Very Large Batch] Processed ${i} files, running memory cleanup...`);
-                if (global.gc) {
-                    global.gc();
-                }
-                // Small pause to allow memory cleanup
-                await new Promise(resolve => setTimeout(resolve, 2000));
+            const estimatedTokensNeeded = fileChunk.length * 5000;
+            if (lastKnownRateLimits.remainingTokens !== undefined && lastKnownRateLimits.remainingTokens < estimatedTokensNeeded + tokenThreshold) {
+                shouldWait = true;
+                waitTimeMs = Math.max(waitTimeMs, lastKnownRateLimits.resetTokensTimeMs || 60000);
+                waitReason += " tokens";
             }
 
-            // Smart rate limit checking - only wait if we're actually close to limits
-            if (lastKnownRateLimits) {
-                let shouldWait = false;
-                let waitTimeMs = 0;
-                let waitReason = "";
+            if (shouldWait) {
+                // More conservative waiting for large batches
+                const baseWaitTime = files.length > 10 ? 15000 : 10000; // Start with longer wait for large batches
+                const adaptiveWaitTime = Math.min(waitTimeMs, baseWaitTime + (consecutiveRateLimitHits * 8000)); // Longer penalties
+                console.warn(`[RateLimit] Close to limits (${waitReason.trim()}). Requests: ${lastKnownRateLimits.remainingRequests}, Tokens: ${lastKnownRateLimits.remainingTokens}. Waiting ${adaptiveWaitTime / 1000}s (conservative for large batch).`);
+                await new Promise(resolve => setTimeout(resolve, adaptiveWaitTime));
+                consecutiveRateLimitHits++;
 
-                // More conservative thresholds for large batches
-                const requestThreshold = files.length > 10 ? 5 : 2; // Higher threshold for large batches
-                const tokenThreshold = files.length > 10 ? 15000 : 5000; // Conservative token estimation
-
-                if (lastKnownRateLimits.remainingRequests !== undefined && lastKnownRateLimits.remainingRequests < requestThreshold) {
-                    shouldWait = true;
-                    waitTimeMs = Math.max(waitTimeMs, lastKnownRateLimits.resetRequestsTimeMs || 60000);
-                    waitReason += " requests";
+                // More aggressive concurrency reduction for large batches
+                if (consecutiveRateLimitHits >= 2 && CONCURRENCY_LIMIT > 2) {
+                    CONCURRENCY_LIMIT = Math.max(2, Math.floor(CONCURRENCY_LIMIT * 0.6)); // More aggressive reduction
+                    console.log(`[RateLimit] Reducing concurrency to ${CONCURRENCY_LIMIT} due to repeated limits (large batch mode)`);
                 }
+            } else {
+                // Reset consecutive hits if we're not hitting limits
+                consecutiveRateLimitHits = 0;
 
-                const estimatedTokensNeeded = fileChunk.length * 5000;
-                if (lastKnownRateLimits.remainingTokens !== undefined && lastKnownRateLimits.remainingTokens < estimatedTokensNeeded + tokenThreshold) {
-                    shouldWait = true;
-                    waitTimeMs = Math.max(waitTimeMs, lastKnownRateLimits.resetTokensTimeMs || 60000);
-                    waitReason += " tokens";
-                }
-
-                if (shouldWait) {
-                    // More conservative waiting for large batches
-                    const baseWaitTime = files.length > 10 ? 15000 : 10000; // Start with longer wait for large batches
-                    const adaptiveWaitTime = Math.min(waitTimeMs, baseWaitTime + (consecutiveRateLimitHits * 8000)); // Longer penalties
-                    console.warn(`[RateLimit] Close to limits (${waitReason.trim()}). Requests: ${lastKnownRateLimits.remainingRequests}, Tokens: ${lastKnownRateLimits.remainingTokens}. Waiting ${adaptiveWaitTime / 1000}s (conservative for large batch).`);
-                    await new Promise(resolve => setTimeout(resolve, adaptiveWaitTime));
-                    consecutiveRateLimitHits++;
-
-                    // More aggressive concurrency reduction for large batches
-                    if (consecutiveRateLimitHits >= 2 && CONCURRENCY_LIMIT > 2) {
-                        CONCURRENCY_LIMIT = Math.max(2, Math.floor(CONCURRENCY_LIMIT * 0.6)); // More aggressive reduction
-                        console.log(`[RateLimit] Reducing concurrency to ${CONCURRENCY_LIMIT} due to repeated limits (large batch mode)`);
-                    }
-                } else {
-                    // Reset consecutive hits if we're not hitting limits
-                    consecutiveRateLimitHits = 0;
-
-                    // More conservative concurrency increases for large batches
-                    if (files.length <= 10 && // Only increase for smaller batches
-                        lastKnownRateLimits.remainingRequests !== undefined && lastKnownRateLimits.remainingRequests > 20 &&
-                        lastKnownRateLimits.remainingTokens !== undefined && lastKnownRateLimits.remainingTokens > 50000 &&
-                        CONCURRENCY_LIMIT < 12) { // Lower max concurrency
-                        CONCURRENCY_LIMIT = Math.min(12, CONCURRENCY_LIMIT + 1);
-                        console.log(`[RateLimit] Increasing concurrency to ${CONCURRENCY_LIMIT} due to available headroom (small batch only)`);
-                    }
+                // More conservative concurrency increases for large batches
+                if (files.length <= 10 && // Only increase for smaller batches
+                    lastKnownRateLimits.remainingRequests !== undefined && lastKnownRateLimits.remainingRequests > 20 &&
+                    lastKnownRateLimits.remainingTokens !== undefined && lastKnownRateLimits.remainingTokens > 50000 &&
+                    CONCURRENCY_LIMIT < 12) { // Lower max concurrency
+                    CONCURRENCY_LIMIT = Math.min(12, CONCURRENCY_LIMIT + 1);
+                    console.log(`[RateLimit] Increasing concurrency to ${CONCURRENCY_LIMIT} due to available headroom (small batch only)`);
                 }
             }
+        }
 
-            const chunkExtractionPromises = fileChunk.map(async (file): Promise<ExtractedFileItem & { rateLimitHeaders?: OpenAIRateLimitHeaders }> => {
-                console.log(`[Batch ${batchNumber}] Processing file for extraction: ${file.name}`);
-                if (file.size === 0) {
-                    console.warn(`[Batch ${batchNumber}] Skipping empty file: ${file.name}`);
-                    return { file, extractedData: null, error: "File is empty.", fileName: file.name };
+        const chunkExtractionPromises = fileChunk.map(async (file): Promise<ExtractedFileItem & { rateLimitHeaders?: OpenAIRateLimitHeaders }> => {
+            console.log(`[Batch ${batchNumber}] Processing file for extraction: ${file.name}`);
+            if (file.size === 0) {
+                console.warn(`[Batch ${batchNumber}] Skipping empty file: ${file.name}`);
+                return { file, extractedData: null, error: "File is empty.", fileName: file.name };
+            }
+            if (file.type !== 'application/pdf') {
+                console.warn(`[Batch ${batchNumber}] Skipping non-PDF file: ${file.name}, type: ${file.type}`);
+                return { file, extractedData: null, error: "File is not a PDF.", fileName: file.name };
+            }
+
+            try {
+                // Use the retry wrapper function with dynamic retry count based on rate limit hits
+                const maxRetries = consecutiveRateLimitHits > 0 ? 2 : 3; // Reduce retries if hitting limits
+                const { extractedData, error: extractionError, rateLimitHeaders } = await callPdfExtractAPIWithRetry(file, maxRetries);
+
+                if (extractionError) {
+                    return { file, extractedData, error: extractionError, fileName: file.name, rateLimitHeaders };
                 }
-                if (file.type !== 'application/pdf') {
-                    console.warn(`[Batch ${batchNumber}] Skipping non-PDF file: ${file.name}, type: ${file.type}`);
-                    return { file, extractedData: null, error: "File is not a PDF.", fileName: file.name };
+
+                if (!extractedData) {
+                    console.error(`[Batch ${batchNumber}] Failed to extract any usable invoice data for file: ${file.name}.`);
+                    return { file, extractedData: null, error: "Failed to extract usable invoice data from PDF.", fileName: file.name, rateLimitHeaders };
+                }
+                if (!extractedData.invoiceCode || !extractedData.provider?.cif || !extractedData.issueDate || typeof extractedData.totalAmount !== 'number') {
+                    console.warn(`[Batch ${batchNumber}] Missing crucial invoice-level data for file: ${file.name}. Data: ${JSON.stringify(extractedData)}`);
+                    return {
+                        file,
+                        extractedData: extractedData,
+                        error: "Missing or invalid crucial invoice-level data after PDF extraction.",
+                        fileName: file.name,
+                        rateLimitHeaders
+                    };
+                }
+                if (!extractedData.items || extractedData.items.length === 0) {
+                    console.warn(`[Batch ${batchNumber}] No line items extracted for file: ${file.name}. Proceeding with invoice-level data if valid.`);
                 }
 
                 try {
-                    // Use the retry wrapper function with dynamic retry count based on rate limit hits
-                    const maxRetries = consecutiveRateLimitHits > 0 ? 2 : 3; // Reduce retries if hitting limits
-                    const { extractedData, error: extractionError, rateLimitHeaders } = await callPdfExtractAPIWithRetry(file, maxRetries);
-
-                    if (extractionError) {
-                        return { file, extractedData, error: extractionError, fileName: file.name, rateLimitHeaders };
-                    }
-
-                    if (!extractedData) {
-                        console.error(`[Batch ${batchNumber}] Failed to extract any usable invoice data for file: ${file.name}.`);
-                        return { file, extractedData: null, error: "Failed to extract usable invoice data from PDF.", fileName: file.name, rateLimitHeaders };
-                    }
-                    if (!extractedData.invoiceCode || !extractedData.provider?.cif || !extractedData.issueDate || typeof extractedData.totalAmount !== 'number') {
-                        console.warn(`[Batch ${batchNumber}] Missing crucial invoice-level data for file: ${file.name}. Data: ${JSON.stringify(extractedData)}`);
-                        return {
-                            file,
-                            extractedData: extractedData,
-                            error: "Missing or invalid crucial invoice-level data after PDF extraction.",
-                            fileName: file.name,
-                            rateLimitHeaders
-                        };
-                    }
-                    if (!extractedData.items || extractedData.items.length === 0) {
-                        console.warn(`[Batch ${batchNumber}] No line items extracted for file: ${file.name}. Proceeding with invoice-level data if valid.`);
-                    }
-
-                    try {
-                        new Date(extractedData.issueDate);
-                        return {
-                            file,
-                            extractedData: extractedData,
-                            fileName: file.name,
-                            rateLimitHeaders
-                        };
-                    } catch (dateError) {
-                        console.warn(`[Batch ${batchNumber}] Invalid issue date format for file: ${file.name}. Date: ${extractedData.issueDate}`);
-                        return {
-                            file,
-                            extractedData: extractedData,
-                            error: `Invalid issue date format: ${extractedData.issueDate}.`,
-                            fileName: file.name,
-                            rateLimitHeaders
-                        };
-                    }
-                } catch (topLevelError: unknown) {
-                    console.error(`[Batch ${batchNumber}] Unexpected error during file processing for ${file.name}:`, topLevelError);
-                    const errorMessage = topLevelError instanceof Error ? topLevelError.message : "Unknown error during file item processing.";
-                    return { file, extractedData: null, error: errorMessage, fileName: file.name, rateLimitHeaders: undefined };
+                    new Date(extractedData.issueDate);
+                    return {
+                        file,
+                        extractedData: extractedData,
+                        fileName: file.name,
+                        rateLimitHeaders
+                    };
+                } catch (dateError) {
+                    console.warn(`[Batch ${batchNumber}] Invalid issue date format for file: ${file.name}. Date: ${extractedData.issueDate}`);
+                    return {
+                        file,
+                        extractedData: extractedData,
+                        error: `Invalid issue date format: ${extractedData.issueDate}.`,
+                        fileName: file.name,
+                        rateLimitHeaders
+                    };
                 }
+            } catch (topLevelError: unknown) {
+                console.error(`[Batch ${batchNumber}] Unexpected error during file processing for ${file.name}:`, topLevelError);
+                const errorMessage = topLevelError instanceof Error ? topLevelError.message : "Unknown error during file item processing.";
+                return { file, extractedData: null, error: errorMessage, fileName: file.name, rateLimitHeaders: undefined };
+            }
+        });
+
+        const chunkResults = await Promise.all(chunkExtractionPromises);
+        allFileProcessingResults.push(...chunkResults);
+
+        // Update rate limits more intelligently - prioritize the most restrictive
+        for (const result of chunkResults) {
+            if (result.rateLimitHeaders) {
+                if (!lastKnownRateLimits ||
+                    (result.rateLimitHeaders.remainingRequests !== undefined &&
+                        (lastKnownRateLimits.remainingRequests === undefined || result.rateLimitHeaders.remainingRequests < lastKnownRateLimits.remainingRequests)) ||
+                    (result.rateLimitHeaders.remainingTokens !== undefined &&
+                        (lastKnownRateLimits.remainingTokens === undefined || result.rateLimitHeaders.remainingTokens < lastKnownRateLimits.remainingTokens))) {
+                    lastKnownRateLimits = result.rateLimitHeaders;
+                }
+            }
+        }
+
+        if (lastKnownRateLimits) {
+            console.log(`[RateLimit] After Batch ${batchNumber}: Remaining Requests: ${lastKnownRateLimits.remainingRequests ?? 'N/A'}, Remaining Tokens: ${lastKnownRateLimits.remainingTokens ?? 'N/A'}, Consecutive Hits: ${consecutiveRateLimitHits}`);
+        }
+    }
+
+    const extractionResults: ExtractedFileItem[] = allFileProcessingResults.map(item => ({
+        file: item.file,
+        extractedData: item.extractedData,
+        error: item.error,
+        fileName: item.fileName,
+    }));
+
+    // 2. Separate items with extraction errors from processable items
+    const finalResults: CreateInvoiceResult[] = [];
+    const processableItems: ExtractedFileItem[] = [];
+
+    for (const item of extractionResults) {
+        if (item.error) {
+            finalResults.push({
+                success: false,
+                message: item.error,
+                fileName: item.fileName
+            });
+        } else if (item.extractedData) {
+            processableItems.push(item);
+        }
+    }
+
+    // 3. Sort processable items by issueDate (ascending)
+    processableItems.sort((a, b) => {
+        const dateA = a.extractedData?.issueDate ? new Date(a.extractedData.issueDate).getTime() : 0;
+        const dateB = b.extractedData?.issueDate ? new Date(b.extractedData.issueDate).getTime() : 0;
+        if (dateA === 0 || dateB === 0) return 0;
+        return dateA - dateB;
+    });
+
+    console.log("Processing order after sorting by issue date:", processableItems.map(p => ({
+        file: p.fileName,
+        date: p.extractedData?.issueDate
+    })));
+
+    // 4. Pre-process providers to reduce race conditions and improve performance
+    console.log("Pre-processing providers to optimize database operations...");
+    const uniqueProviders = new Map<string, ExtractedPdfData['provider']>();
+
+    for (const item of processableItems) {
+        if (item.extractedData?.provider?.cif) {
+            const key = item.extractedData.provider.cif;
+            if (!uniqueProviders.has(key)) {
+                uniqueProviders.set(key, item.extractedData.provider);
+            }
+        }
+    }
+
+    // Pre-create/find providers to avoid race conditions during invoice processing
+    const providerCache = new Map<string, string>(); // CIF -> Provider ID
+    for (const [cif, providerData] of uniqueProviders.entries()) {
+        try {
+            const provider = await prisma.$transaction(async (tx) => {
+                return await findOrCreateProviderTx(tx, providerData);
+            });
+            providerCache.set(cif, provider.id);
+            console.log(`Pre-processed provider: ${provider.name} (${cif})`);
+        } catch (error) {
+            console.error(`Failed to pre-process provider ${providerData.name} (${cif}):`, error);
+            // Continue with other providers, individual invoice processing will handle this error
+        }
+    }
+
+    // Pre-load common materials to reduce database queries during processing
+    console.log("Pre-loading existing materials for faster lookup...");
+    const existingMaterials = await prisma.material.findMany({
+        select: {
+            id: true,
+            name: true,
+            code: true,
+            referenceCode: true,
+            category: true
+        },
+        take: 1000, // Limit to most recent/common materials to avoid memory issues
+        orderBy: { updatedAt: 'desc' }
+    });
+
+    const materialCache = new Map<string, { id: string; name: string; code: string; referenceCode: string | null; category: string | null }>();
+
+    // Cache by name (normalized)
+    for (const material of existingMaterials) {
+        const normalizedName = material.name.toLowerCase().trim();
+        materialCache.set(`name:${normalizedName}`, material);
+
+        // Cache by code if available
+        if (material.code) {
+            materialCache.set(`code:${material.code}`, material);
+        }
+
+        // Cache by reference code if available
+        if (material.referenceCode) {
+            materialCache.set(`ref:${material.referenceCode}`, material);
+        }
+    }
+
+    console.log(`Pre-loaded ${existingMaterials.length} materials for faster processing`);
+
+    // 5. Process database operations with optimized concurrency
+    const DB_CONCURRENCY_LIMIT = Math.min(3, Math.max(1, Math.ceil(processableItems.length / 10))); // Optimized concurrency: 1-3 based on batch size
+    const dbResults: CreateInvoiceResult[] = [];
+
+    // Circuit breaker for catastrophic failures
+    let consecutiveFailures = 0;
+    const MAX_CONSECUTIVE_FAILURES = 5;
+    let circuitBreakerTripped = false;
+
+    for (let i = 0; i < processableItems.length; i += DB_CONCURRENCY_LIMIT) {
+        const chunk = processableItems.slice(i, i + DB_CONCURRENCY_LIMIT);
+
+        const chunkPromises = chunk.map(async (item): Promise<CreateInvoiceResult> => {
+            const { file, extractedData, fileName } = item;
+            if (!extractedData) {
+                return { success: false, message: "No extracted data", fileName: fileName };
+            }
+
+            // Update batch progress
+            await updateBatchProgress(batchId, {
+                currentFile: fileName,
             });
 
-            const chunkResults = await Promise.all(chunkExtractionPromises);
-            allFileProcessingResults.push(...chunkResults);
+            // Retry mechanism for handling provider race conditions during concurrent processing
+            const maxRetries = 3;
+            let lastError: unknown = null;
 
-            // Update rate limits more intelligently - prioritize the most restrictive
-            for (const result of chunkResults) {
-                if (result.rateLimitHeaders) {
-                    if (!lastKnownRateLimits ||
-                        (result.rateLimitHeaders.remainingRequests !== undefined &&
-                            (lastKnownRateLimits.remainingRequests === undefined || result.rateLimitHeaders.remainingRequests < lastKnownRateLimits.remainingRequests)) ||
-                        (result.rateLimitHeaders.remainingTokens !== undefined &&
-                            (lastKnownRateLimits.remainingTokens === undefined || result.rateLimitHeaders.remainingTokens < lastKnownRateLimits.remainingTokens))) {
-                        lastKnownRateLimits = result.rateLimitHeaders;
+            for (let attempt = 1; attempt <= maxRetries; attempt++) {
+                try {
+                    console.log(`Starting optimized database transaction for sorted invoice from file: ${fileName}, invoice code: ${extractedData.invoiceCode}, issue date: ${extractedData.issueDate} (attempt ${attempt}/${maxRetries})`);
+
+                    // For large invoices, use longer timeout and optimized processing
+                    const itemCount = extractedData.items?.length || 0;
+                    const isLargeInvoice = itemCount > 50;
+                    const isVeryLargeInvoice = itemCount > 200;
+
+                    // Adaptive timeout based on item count
+                    const baseTimeout = isVeryLargeInvoice ? 1800000 : isLargeInvoice ? 900000 : 300000; // 30min/15min/5min
+                    const transactionTimeout = Math.min(baseTimeout, 1800000); // Cap at 30 minutes
+
+                    if (isLargeInvoice) {
+                        console.log(`[Large Invoice] Processing ${itemCount} items with optimized timeout: ${transactionTimeout / 1000}s (cached lookups enabled)`);
                     }
-                }
-            }
 
-            if (lastKnownRateLimits) {
-                console.log(`[RateLimit] After Batch ${batchNumber}: Remaining Requests: ${lastKnownRateLimits.remainingRequests ?? 'N/A'}, Remaining Tokens: ${lastKnownRateLimits.remainingTokens ?? 'N/A'}, Consecutive Hits: ${consecutiveRateLimitHits}`);
-            }
-        }
+                    const operationResult: TransactionOperationResult = await prisma.$transaction(async (tx) => {
+                        // Use cached provider if available, otherwise fall back to findOrCreateProviderTx
+                        let provider;
+                        const cachedProviderId = extractedData.provider.cif ? providerCache.get(extractedData.provider.cif) : undefined;
 
-        const extractionResults: ExtractedFileItem[] = allFileProcessingResults.map(item => ({
-            file: item.file,
-            extractedData: item.extractedData,
-            error: item.error,
-            fileName: item.fileName,
-        }));
+                        if (cachedProviderId) {
+                            provider = await tx.provider.findUnique({
+                                where: { id: cachedProviderId }
+                            });
 
-        // 2. Separate items with extraction errors from processable items
-        const finalResults: CreateInvoiceResult[] = [];
-        const processableItems: ExtractedFileItem[] = [];
-
-        for (const item of extractionResults) {
-            if (item.error) {
-                finalResults.push({
-                    success: false,
-                    message: item.error,
-                    fileName: item.fileName
-                });
-            } else if (item.extractedData) {
-                processableItems.push(item);
-            }
-        }
-
-        // 3. Sort processable items by issueDate (ascending)
-        processableItems.sort((a, b) => {
-            const dateA = a.extractedData?.issueDate ? new Date(a.extractedData.issueDate).getTime() : 0;
-            const dateB = b.extractedData?.issueDate ? new Date(b.extractedData.issueDate).getTime() : 0;
-            if (dateA === 0 || dateB === 0) return 0;
-            return dateA - dateB;
-        });
-
-        console.log("Processing order after sorting by issue date:", processableItems.map(p => ({
-            file: p.fileName,
-            date: p.extractedData?.issueDate
-        })));
-
-        // 4. Pre-process providers to reduce race conditions and improve performance
-        console.log("Pre-processing providers to optimize database operations...");
-        const uniqueProviders = new Map<string, ExtractedPdfData['provider']>();
-
-        for (const item of processableItems) {
-            if (item.extractedData?.provider?.cif) {
-                const key = item.extractedData.provider.cif;
-                if (!uniqueProviders.has(key)) {
-                    uniqueProviders.set(key, item.extractedData.provider);
-                }
-            }
-        }
-
-        // Pre-create/find providers to avoid race conditions during invoice processing
-        const providerCache = new Map<string, string>(); // CIF -> Provider ID
-        for (const [cif, providerData] of uniqueProviders.entries()) {
-            try {
-                const provider = await prisma.$transaction(async (tx) => {
-                    return await findOrCreateProviderTx(tx, providerData);
-                });
-                providerCache.set(cif, provider.id);
-                console.log(`Pre-processed provider: ${provider.name} (${cif})`);
-            } catch (error) {
-                console.error(`Failed to pre-process provider ${providerData.name} (${cif}):`, error);
-                // Continue with other providers, individual invoice processing will handle this error
-            }
-        }
-
-        // Pre-load common materials to reduce database queries during processing
-        console.log("Pre-loading existing materials for faster lookup...");
-        const existingMaterials = await prisma.material.findMany({
-            select: {
-                id: true,
-                name: true,
-                code: true,
-                referenceCode: true,
-                category: true
-            },
-            take: 1000, // Limit to most recent/common materials to avoid memory issues
-            orderBy: { updatedAt: 'desc' }
-        });
-
-        const materialCache = new Map<string, { id: string; name: string; code: string; referenceCode: string | null; category: string | null }>();
-
-        // Cache by name (normalized)
-        for (const material of existingMaterials) {
-            const normalizedName = material.name.toLowerCase().trim();
-            materialCache.set(`name:${normalizedName}`, material);
-
-            // Cache by code if available
-            if (material.code) {
-                materialCache.set(`code:${material.code}`, material);
-            }
-
-            // Cache by reference code if available
-            if (material.referenceCode) {
-                materialCache.set(`ref:${material.referenceCode}`, material);
-            }
-        }
-
-        console.log(`Pre-loaded ${existingMaterials.length} materials for faster processing`);
-
-        // 5. Process database operations with optimized concurrency
-        const DB_CONCURRENCY_LIMIT = Math.min(3, Math.max(1, Math.ceil(processableItems.length / 10))); // Optimized concurrency: 1-3 based on batch size
-        const dbResults: CreateInvoiceResult[] = [];
-
-        // Circuit breaker for catastrophic failures
-        let consecutiveFailures = 0;
-        const MAX_CONSECUTIVE_FAILURES = 5;
-        let circuitBreakerTripped = false;
-
-        for (let i = 0; i < processableItems.length; i += DB_CONCURRENCY_LIMIT) {
-            const chunk = processableItems.slice(i, i + DB_CONCURRENCY_LIMIT);
-
-            const chunkPromises = chunk.map(async (item): Promise<CreateInvoiceResult> => {
-                const { file, extractedData, fileName } = item;
-                if (!extractedData) {
-                    return { success: false, message: "No extracted data", fileName: fileName };
-                }
-
-                // Update batch progress
-                await updateBatchProgress(batchId, {
-                    currentFile: fileName,
-                });
-
-                // Retry mechanism for handling provider race conditions during concurrent processing
-                const maxRetries = 3;
-                let lastError: unknown = null;
-
-                for (let attempt = 1; attempt <= maxRetries; attempt++) {
-                    try {
-                        console.log(`Starting optimized database transaction for sorted invoice from file: ${fileName}, invoice code: ${extractedData.invoiceCode}, issue date: ${extractedData.issueDate} (attempt ${attempt}/${maxRetries})`);
-
-                        // For large invoices, use longer timeout and optimized processing
-                        const itemCount = extractedData.items?.length || 0;
-                        const isLargeInvoice = itemCount > 50;
-                        const isVeryLargeInvoice = itemCount > 200;
-
-                        // Adaptive timeout based on item count
-                        const baseTimeout = isVeryLargeInvoice ? 1800000 : isLargeInvoice ? 900000 : 300000; // 30min/15min/5min
-                        const transactionTimeout = Math.min(baseTimeout, 1800000); // Cap at 30 minutes
-
-                        if (isLargeInvoice) {
-                            console.log(`[Large Invoice] Processing ${itemCount} items with optimized timeout: ${transactionTimeout / 1000}s (cached lookups enabled)`);
-                        }
-
-                        const operationResult: TransactionOperationResult = await prisma.$transaction(async (tx) => {
-                            // Use cached provider if available, otherwise fall back to findOrCreateProviderTx
-                            let provider;
-                            const cachedProviderId = extractedData.provider.cif ? providerCache.get(extractedData.provider.cif) : undefined;
-
-                            if (cachedProviderId) {
-                                provider = await tx.provider.findUnique({
-                                    where: { id: cachedProviderId }
-                                });
-
-                                if (!provider) {
-                                    // Cache miss, fall back to findOrCreateProviderTx
-                                    provider = await findOrCreateProviderTx(tx, extractedData.provider);
-                                }
-                            } else {
+                            if (!provider) {
+                                // Cache miss, fall back to findOrCreateProviderTx
                                 provider = await findOrCreateProviderTx(tx, extractedData.provider);
                             }
+                        } else {
+                            provider = await findOrCreateProviderTx(tx, extractedData.provider);
+                        }
 
-                            const existingInvoice = await tx.invoice.findFirst({
-                                where: {
-                                    invoiceCode: extractedData.invoiceCode,
-                                    providerId: provider.id
-                                }
-                            });
-
-                            if (existingInvoice) {
-                                console.log(`Invoice ${extractedData.invoiceCode} from provider ${provider.name} (file: ${fileName}) already exists. Skipping creation.`);
-                                return {
-                                    success: true,
-                                    message: `Invoice ${extractedData.invoiceCode} from provider ${provider.name} already exists.`,
-                                    invoiceId: existingInvoice.id,
-                                    alertsCreated: 0,
-                                    isExisting: true
-                                };
+                        const existingInvoice = await tx.invoice.findFirst({
+                            where: {
+                                invoiceCode: extractedData.invoiceCode,
+                                providerId: provider.id
                             }
-
-                            const invoice = await tx.invoice.create({
-                                data: {
-                                    invoiceCode: extractedData.invoiceCode,
-                                    providerId: provider.id,
-                                    issueDate: new Date(extractedData.issueDate),
-                                    totalAmount: new Prisma.Decimal(extractedData.totalAmount.toFixed(2)),
-                                    status: "PROCESSED",
-                                },
-                            });
-
-                            let alertsCounter = 0;
-                            const currentInvoiceIssueDate = new Date(extractedData.issueDate);
-                            const intraInvoiceMaterialPriceHistory = new Map<string, { price: Prisma.Decimal; date: Date; invoiceItemId: string }>();
-
-                            // Process items in optimized chunks for performance
-                            const ITEM_CHUNK_SIZE = isVeryLargeInvoice ? 15 : isLargeInvoice ? 30 : 999; // Smaller chunks for very large invoices
-                            const itemChunks = [];
-                            for (let i = 0; i < extractedData.items.length; i += ITEM_CHUNK_SIZE) {
-                                itemChunks.push(extractedData.items.slice(i, i + ITEM_CHUNK_SIZE));
-                            }
-
-                            console.log(`[Invoice ${invoice.invoiceCode}] Processing ${extractedData.items.length} items in ${itemChunks.length} chunk(s) (chunk size: ${ITEM_CHUNK_SIZE})`);
-
-                            for (let chunkIndex = 0; chunkIndex < itemChunks.length; chunkIndex++) {
-                                const itemChunk = itemChunks[chunkIndex];
-
-                                if (isLargeInvoice && chunkIndex > 0) {
-                                    console.log(`[Large Invoice] Processing chunk ${chunkIndex + 1}/${itemChunks.length} (${itemChunk.length} items) - using cached lookups`);
-                                    // Minimal delay between chunks for very large invoices
-                                    await new Promise(resolve => setTimeout(resolve, isVeryLargeInvoice ? 50 : 100));
-                                }
-
-                                for (const itemData of itemChunk) {
-                                    if (!itemData.materialName) {
-                                        console.warn(`Skipping item due to missing material name in invoice ${invoice.invoiceCode} from file ${fileName}`);
-                                        continue;
-                                    }
-
-                                    if (typeof itemData.quantity !== 'number' || isNaN(itemData.quantity)) {
-                                        console.warn(`Skipping item due to invalid or missing quantity in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}, Quantity: ${itemData.quantity}`);
-                                        continue;
-                                    }
-
-                                    if (typeof itemData.unitPrice !== 'number' || isNaN(itemData.unitPrice)) {
-                                        console.warn(`Missing or invalid unit price for item in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}. Defaulting to 0.`);
-                                        itemData.unitPrice = 0;
-                                    }
-                                    if (typeof itemData.totalPrice !== 'number' || isNaN(itemData.totalPrice)) {
-                                        console.warn(`Missing or invalid total price for item in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}. Defaulting to 0.`);
-                                        itemData.totalPrice = 0;
-                                    }
-
-                                    const isMaterialItem = typeof itemData.isMaterial === 'boolean' ? itemData.isMaterial : true;
-
-                                    if (!isMaterialItem) {
-                                        console.log(`[Invoice ${invoice.invoiceCode}][Item: ${itemData.materialName}] Marked as non-material. Creating InvoiceItem only.`);
-                                        const quantityDecimal = new Prisma.Decimal(itemData.quantity.toFixed(2));
-                                        const currentUnitPriceDecimal = new Prisma.Decimal(itemData.unitPrice.toFixed(2));
-                                        const totalPriceDecimal = new Prisma.Decimal(itemData.totalPrice.toFixed(2));
-                                        const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
-
-                                        await tx.invoiceItem.create({
-                                            data: {
-                                                invoiceId: invoice.id,
-                                                materialId: (await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache)).id,
-                                                quantity: quantityDecimal,
-                                                unitPrice: currentUnitPriceDecimal,
-                                                totalPrice: totalPriceDecimal,
-                                                itemDate: effectiveItemDate,
-                                                workOrder: itemData.workOrder || null,
-                                            },
-                                        });
-                                        console.log(`[Invoice ${invoice.invoiceCode}] Non-material item "${itemData.materialName}" added to invoice items. No price alert/MaterialProvider update.`);
-                                        continue;
-                                    }
-
-                                    let material: Material;
-                                    try {
-                                        material = await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache);
-                                    } catch (materialError) {
-                                        console.error(`Error creating/finding material '${itemData.materialName}' in invoice ${invoice.invoiceCode}:`, materialError);
-                                        throw new Error(`Failed to process material '${itemData.materialName}': ${materialError instanceof Error ? materialError.message : 'Unknown error'}`);
-                                    }
-                                    const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
-                                    const currentItemUnitPrice = new Prisma.Decimal(itemData.unitPrice.toFixed(2));
-
-                                    const lastSeenPriceRecordInThisInvoice = intraInvoiceMaterialPriceHistory.get(material.id);
-
-                                    if (lastSeenPriceRecordInThisInvoice) {
-                                        if (effectiveItemDate.getTime() >= lastSeenPriceRecordInThisInvoice.date.getTime() &&
-                                            !currentItemUnitPrice.equals(lastSeenPriceRecordInThisInvoice.price)) {
-
-                                            const priceDiff = currentItemUnitPrice.minus(lastSeenPriceRecordInThisInvoice.price);
-                                            let percentageChangeDecimal: Prisma.Decimal;
-                                            if (!lastSeenPriceRecordInThisInvoice.price.isZero()) {
-                                                percentageChangeDecimal = priceDiff.dividedBy(lastSeenPriceRecordInThisInvoice.price).times(100);
-                                            } else {
-                                                percentageChangeDecimal = new Prisma.Decimal(currentItemUnitPrice.isPositive() ? 9999 : -9999);
-                                            }
-
-                                            try {
-                                                await tx.priceAlert.create({
-                                                    data: {
-                                                        materialId: material.id,
-                                                        providerId: provider.id,
-                                                        oldPrice: lastSeenPriceRecordInThisInvoice.price,
-                                                        newPrice: currentItemUnitPrice,
-                                                        percentage: percentageChangeDecimal,
-                                                        status: "PENDING",
-                                                        effectiveDate: effectiveItemDate,
-                                                        invoiceId: invoice.id,
-                                                    },
-                                                });
-                                            } catch (alertError) {
-                                                // Manejar error de constraint único para alertas intra-factura
-                                                if (typeof alertError === 'object' && alertError !== null && 'code' in alertError &&
-                                                    (alertError as { code: string }).code === 'P2002') {
-                                                    console.log(`[Invoice ${invoice.invoiceCode}][Material '${material.name}'] Intra-invoice price alert already exists (caught constraint violation). Skipping duplicate creation.`);
-                                                    // No incrementar alertsCounter en este caso
-                                                    alertsCounter--; // Compensar el incremento que viene después
-                                                } else {
-                                                    throw alertError;
-                                                }
-                                            }
-                                            alertsCounter++;
-                                            console.log(`[Invoice ${invoice.invoiceCode}][Material '${material.name}'] INTRA-INVOICE Price alert created. Old (from item ${lastSeenPriceRecordInThisInvoice.invoiceItemId} in this invoice): ${lastSeenPriceRecordInThisInvoice.price}, New (current item): ${currentItemUnitPrice}, Change: ${percentageChangeDecimal.toFixed(2)}%, Effective Date: ${effectiveItemDate.toISOString()}`);
-                                        }
-                                    }
-
-                                    const { invoiceItem, alert: interInvoiceAlert } = await processInvoiceItemTx(
-                                        tx,
-                                        itemData,
-                                        invoice.id,
-                                        currentInvoiceIssueDate,
-                                        provider.id,
-                                        material,
-                                        isMaterialItem
-                                    );
-
-                                    if (interInvoiceAlert) {
-                                        alertsCounter++;
-                                    }
-
-                                    if (isMaterialItem) {
-                                        intraInvoiceMaterialPriceHistory.set(material.id, {
-                                            price: invoiceItem.unitPrice,
-                                            date: invoiceItem.itemDate,
-                                            invoiceItemId: invoiceItem.id
-                                        });
-                                    }
-                                }
-                            }
-                            console.log(`Successfully created invoice ${invoice.invoiceCode} from file: ${fileName}. Total alerts for this invoice: ${alertsCounter}`);
-                            return {
-                                success: true,
-                                message: `Invoice ${invoice.invoiceCode} created successfully.`,
-                                invoiceId: invoice.id,
-                                alertsCreated: alertsCounter,
-                                isExisting: false
-                            };
-                        }, {
-                            timeout: transactionTimeout, // Use dynamic timeout based on invoice size
-                            maxWait: 300000 // 5 minutes max wait
                         });
 
-                        // Success! Return the result
-                        if (operationResult.isExisting) {
+                        if (existingInvoice) {
+                            console.log(`Invoice ${extractedData.invoiceCode} from provider ${provider.name} (file: ${fileName}) already exists. Skipping creation.`);
                             return {
                                 success: true,
-                                message: operationResult.message,
-                                invoiceId: operationResult.invoiceId,
-                                fileName: fileName
-                            };
-                        } else {
-                            return {
-                                success: operationResult.success,
-                                message: operationResult.message,
-                                invoiceId: operationResult.invoiceId,
-                                alertsCreated: operationResult.alertsCreated,
-                                fileName: fileName
+                                message: `Invoice ${extractedData.invoiceCode} from provider ${provider.name} already exists.`,
+                                invoiceId: existingInvoice.id,
+                                alertsCreated: 0,
+                                isExisting: true
                             };
                         }
 
-                    } catch (error) {
-                        lastError = error;
-                        console.error(`Error processing sorted invoice from ${fileName} (attempt ${attempt}/${maxRetries}):`, error);
+                        const invoice = await tx.invoice.create({
+                            data: {
+                                invoiceCode: extractedData.invoiceCode,
+                                providerId: provider.id,
+                                issueDate: new Date(extractedData.issueDate),
+                                totalAmount: new Prisma.Decimal(extractedData.totalAmount.toFixed(2)),
+                                status: "PROCESSED",
+                            },
+                        });
 
-                        // Check for memory-related errors
-                        const isMemoryError = error instanceof Error && (
-                            error.message.includes('out of memory') ||
-                            error.message.includes('ENOMEM') ||
-                            error.message.includes('heap') ||
-                            error.message.includes('JavaScript heap out of memory')
-                        );
+                        let alertsCounter = 0;
+                        const currentInvoiceIssueDate = new Date(extractedData.issueDate);
+                        const intraInvoiceMaterialPriceHistory = new Map<string, { price: Prisma.Decimal; date: Date; invoiceItemId: string }>();
 
-                        // Check for timeout errors
-                        const isTimeoutError = error instanceof Error && (
-                            error.message.includes('timeout') ||
-                            error.message.includes('ETIMEDOUT') ||
-                            error.message.includes('Connection timeout')
-                        );
+                        // Process items in optimized chunks for performance
+                        const ITEM_CHUNK_SIZE = isVeryLargeInvoice ? 15 : isLargeInvoice ? 30 : 999; // Smaller chunks for very large invoices
+                        const itemChunks = [];
+                        for (let i = 0; i < extractedData.items.length; i += ITEM_CHUNK_SIZE) {
+                            itemChunks.push(extractedData.items.slice(i, i + ITEM_CHUNK_SIZE));
+                        }
 
-                        // Check for database connection errors
-                        const isConnectionError = typeof error === 'object' && error !== null && 'code' in error &&
-                            ['P1000', 'P1001', 'P1002', 'P1008', 'P1009', 'P1010'].includes((error as { code: string }).code);
+                        console.log(`[Invoice ${invoice.invoiceCode}] Processing ${extractedData.items.length} items in ${itemChunks.length} chunk(s) (chunk size: ${ITEM_CHUNK_SIZE})`);
 
-                        // Check if this error is worth retrying
-                        const isRetryableError = typeof error === 'object' && error !== null && 'code' in error &&
-                            (error as { code: string }).code === 'P2002'; // Unique constraint violation
+                        for (let chunkIndex = 0; chunkIndex < itemChunks.length; chunkIndex++) {
+                            const itemChunk = itemChunks[chunkIndex];
 
-                        const isBlockedProviderError = error instanceof Error &&
-                            (error as Error & { isBlockedProvider?: boolean }).isBlockedProvider;
-
-                        // Special handling for memory errors
-                        if (isMemoryError) {
-                            console.error(`[Memory Error] Memory exhaustion detected for ${fileName}. This file will be skipped.`);
-                            if (global.gc) {
-                                console.log(`[Memory Error] Running emergency garbage collection...`);
-                                global.gc();
+                            if (isLargeInvoice && chunkIndex > 0) {
+                                console.log(`[Large Invoice] Processing chunk ${chunkIndex + 1}/${itemChunks.length} (${itemChunk.length} items) - using cached lookups`);
+                                // Minimal delay between chunks for very large invoices
+                                await new Promise(resolve => setTimeout(resolve, isVeryLargeInvoice ? 50 : 100));
                             }
-                            break; // Don't retry memory errors
-                        }
 
-                        // Special handling for timeout errors - retry with longer timeout
-                        if (isTimeoutError && attempt < maxRetries) {
-                            console.warn(`[Timeout] Transaction timeout for ${fileName}, will retry with longer timeout...`);
-                            const delay = attempt * 2000 + Math.random() * 1000; // 2-3s, 4-5s delays
-                            console.log(`Will retry after ${delay.toFixed(0)}ms delay...`);
-                            await new Promise(resolve => setTimeout(resolve, delay));
-                            continue;
-                        }
+                            for (const itemData of itemChunk) {
+                                if (!itemData.materialName) {
+                                    console.warn(`Skipping item due to missing material name in invoice ${invoice.invoiceCode} from file ${fileName}`);
+                                    continue;
+                                }
 
-                        // Special handling for connection errors - longer retry delays
-                        if (isConnectionError && attempt < maxRetries) {
-                            console.warn(`[Connection] Database connection error for ${fileName}, will retry...`);
-                            const delay = attempt * 5000 + Math.random() * 2000; // 5-7s, 10-12s delays
-                            console.log(`Will retry after ${delay.toFixed(0)}ms delay...`);
-                            await new Promise(resolve => setTimeout(resolve, delay));
-                            continue;
-                        }
+                                if (typeof itemData.quantity !== 'number' || isNaN(itemData.quantity)) {
+                                    console.warn(`Skipping item due to invalid or missing quantity in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}, Quantity: ${itemData.quantity}`);
+                                    continue;
+                                }
 
-                        // Don't retry for blocked providers, memory errors, or on last attempt
-                        if (isBlockedProviderError || isMemoryError || attempt === maxRetries || (!isRetryableError && !isTimeoutError && !isConnectionError)) {
-                            break; // Exit retry loop
-                        }
+                                if (typeof itemData.unitPrice !== 'number' || isNaN(itemData.unitPrice)) {
+                                    console.warn(`Missing or invalid unit price for item in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}. Defaulting to 0.`);
+                                    itemData.unitPrice = 0;
+                                }
+                                if (typeof itemData.totalPrice !== 'number' || isNaN(itemData.totalPrice)) {
+                                    console.warn(`Missing or invalid total price for item in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}. Defaulting to 0.`);
+                                    itemData.totalPrice = 0;
+                                }
 
-                        // Add a small delay before retrying to reduce race conditions
-                        const delay = attempt * 100 + Math.random() * 100; // 100-200ms, 200-300ms, etc.
+                                const isMaterialItem = typeof itemData.isMaterial === 'boolean' ? itemData.isMaterial : true;
+
+                                if (!isMaterialItem) {
+                                    console.log(`[Invoice ${invoice.invoiceCode}][Item: ${itemData.materialName}] Marked as non-material. Creating InvoiceItem only.`);
+                                    const quantityDecimal = new Prisma.Decimal(itemData.quantity.toFixed(2));
+                                    const currentUnitPriceDecimal = new Prisma.Decimal(itemData.unitPrice.toFixed(2));
+                                    const totalPriceDecimal = new Prisma.Decimal(itemData.totalPrice.toFixed(2));
+                                    const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
+
+                                    await tx.invoiceItem.create({
+                                        data: {
+                                            invoiceId: invoice.id,
+                                            materialId: (await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache)).id,
+                                            quantity: quantityDecimal,
+                                            unitPrice: currentUnitPriceDecimal,
+                                            totalPrice: totalPriceDecimal,
+                                            itemDate: effectiveItemDate,
+                                            workOrder: itemData.workOrder || null,
+                                        },
+                                    });
+                                    console.log(`[Invoice ${invoice.invoiceCode}] Non-material item "${itemData.materialName}" added to invoice items. No price alert/MaterialProvider update.`);
+                                    continue;
+                                }
+
+                                let material: Material;
+                                try {
+                                    material = await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache);
+                                } catch (materialError) {
+                                    console.error(`Error creating/finding material '${itemData.materialName}' in invoice ${invoice.invoiceCode}:`, materialError);
+                                    throw new Error(`Failed to process material '${itemData.materialName}': ${materialError instanceof Error ? materialError.message : 'Unknown error'}`);
+                                }
+                                const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
+                                const currentItemUnitPrice = new Prisma.Decimal(itemData.unitPrice.toFixed(2));
+
+                                const lastSeenPriceRecordInThisInvoice = intraInvoiceMaterialPriceHistory.get(material.id);
+
+                                if (lastSeenPriceRecordInThisInvoice) {
+                                    if (effectiveItemDate.getTime() >= lastSeenPriceRecordInThisInvoice.date.getTime() &&
+                                        !currentItemUnitPrice.equals(lastSeenPriceRecordInThisInvoice.price)) {
+
+                                        const priceDiff = currentItemUnitPrice.minus(lastSeenPriceRecordInThisInvoice.price);
+                                        let percentageChangeDecimal: Prisma.Decimal;
+                                        if (!lastSeenPriceRecordInThisInvoice.price.isZero()) {
+                                            percentageChangeDecimal = priceDiff.dividedBy(lastSeenPriceRecordInThisInvoice.price).times(100);
+                                        } else {
+                                            percentageChangeDecimal = new Prisma.Decimal(currentItemUnitPrice.isPositive() ? 9999 : -9999);
+                                        }
+
+                                        try {
+                                            await tx.priceAlert.create({
+                                                data: {
+                                                    materialId: material.id,
+                                                    providerId: provider.id,
+                                                    oldPrice: lastSeenPriceRecordInThisInvoice.price,
+                                                    newPrice: currentItemUnitPrice,
+                                                    percentage: percentageChangeDecimal,
+                                                    status: "PENDING",
+                                                    effectiveDate: effectiveItemDate,
+                                                    invoiceId: invoice.id,
+                                                },
+                                            });
+                                        } catch (alertError) {
+                                            // Manejar error de constraint único para alertas intra-factura
+                                            if (typeof alertError === 'object' && alertError !== null && 'code' in alertError &&
+                                                (alertError as { code: string }).code === 'P2002') {
+                                                console.log(`[Invoice ${invoice.invoiceCode}][Material '${material.name}'] Intra-invoice price alert already exists (caught constraint violation). Skipping duplicate creation.`);
+                                                // No incrementar alertsCounter en este caso
+                                                alertsCounter--; // Compensar el incremento que viene después
+                                            } else {
+                                                throw alertError;
+                                            }
+                                        }
+                                        alertsCounter++;
+                                        console.log(`[Invoice ${invoice.invoiceCode}][Material '${material.name}'] INTRA-INVOICE Price alert created. Old (from item ${lastSeenPriceRecordInThisInvoice.invoiceItemId} in this invoice): ${lastSeenPriceRecordInThisInvoice.price}, New (current item): ${currentItemUnitPrice}, Change: ${percentageChangeDecimal.toFixed(2)}%, Effective Date: ${effectiveItemDate.toISOString()}`);
+                                    }
+                                }
+
+                                const { invoiceItem, alert: interInvoiceAlert } = await processInvoiceItemTx(
+                                    tx,
+                                    itemData,
+                                    invoice.id,
+                                    currentInvoiceIssueDate,
+                                    provider.id,
+                                    material,
+                                    isMaterialItem
+                                );
+
+                                if (interInvoiceAlert) {
+                                    alertsCounter++;
+                                }
+
+                                if (isMaterialItem) {
+                                    intraInvoiceMaterialPriceHistory.set(material.id, {
+                                        price: invoiceItem.unitPrice,
+                                        date: invoiceItem.itemDate,
+                                        invoiceItemId: invoiceItem.id
+                                    });
+                                }
+                            }
+                        }
+                        console.log(`Successfully created invoice ${invoice.invoiceCode} from file: ${fileName}. Total alerts for this invoice: ${alertsCounter}`);
+                        return {
+                            success: true,
+                            message: `Invoice ${invoice.invoiceCode} created successfully.`,
+                            invoiceId: invoice.id,
+                            alertsCreated: alertsCounter,
+                            isExisting: false
+                        };
+                    }, {
+                        timeout: transactionTimeout, // Use dynamic timeout based on invoice size
+                        maxWait: 300000 // 5 minutes max wait
+                    });
+
+                    // Success! Return the result
+                    if (operationResult.isExisting) {
+                        return {
+                            success: true,
+                            message: operationResult.message,
+                            invoiceId: operationResult.invoiceId,
+                            fileName: fileName
+                        };
+                    } else {
+                        return {
+                            success: operationResult.success,
+                            message: operationResult.message,
+                            invoiceId: operationResult.invoiceId,
+                            alertsCreated: operationResult.alertsCreated,
+                            fileName: fileName
+                        };
+                    }
+
+                } catch (error) {
+                    lastError = error;
+                    console.error(`Error processing sorted invoice from ${fileName} (attempt ${attempt}/${maxRetries}):`, error);
+
+                    // Check for memory-related errors
+                    const isMemoryError = error instanceof Error && (
+                        error.message.includes('out of memory') ||
+                        error.message.includes('ENOMEM') ||
+                        error.message.includes('heap') ||
+                        error.message.includes('JavaScript heap out of memory')
+                    );
+
+                    // Check for timeout errors
+                    const isTimeoutError = error instanceof Error && (
+                        error.message.includes('timeout') ||
+                        error.message.includes('ETIMEDOUT') ||
+                        error.message.includes('Connection timeout')
+                    );
+
+                    // Check for database connection errors
+                    const isConnectionError = typeof error === 'object' && error !== null && 'code' in error &&
+                        ['P1000', 'P1001', 'P1002', 'P1008', 'P1009', 'P1010'].includes((error as { code: string }).code);
+
+                    // Check if this error is worth retrying
+                    const isRetryableError = typeof error === 'object' && error !== null && 'code' in error &&
+                        (error as { code: string }).code === 'P2002'; // Unique constraint violation
+
+                    const isBlockedProviderError = error instanceof Error &&
+                        (error as Error & { isBlockedProvider?: boolean }).isBlockedProvider;
+
+                    // Special handling for memory errors
+                    if (isMemoryError) {
+                        console.error(`[Memory Error] Memory exhaustion detected for ${fileName}. This file will be skipped.`);
+                        if (global.gc) {
+                            console.log(`[Memory Error] Running emergency garbage collection...`);
+                            global.gc();
+                        }
+                        break; // Don't retry memory errors
+                    }
+
+                    // Special handling for timeout errors - retry with longer timeout
+                    if (isTimeoutError && attempt < maxRetries) {
+                        console.warn(`[Timeout] Transaction timeout for ${fileName}, will retry with longer timeout...`);
+                        const delay = attempt * 2000 + Math.random() * 1000; // 2-3s, 4-5s delays
                         console.log(`Will retry after ${delay.toFixed(0)}ms delay...`);
                         await new Promise(resolve => setTimeout(resolve, delay));
+                        continue;
                     }
-                }
 
-                // If we get here, all retries failed
-                const baseMessage = `Failed to create invoice from ${fileName}`;
-                let specificMessage = "An unexpected error occurred.";
-                let isBlockedProvider = false;
-
-                if (lastError instanceof Error) {
-                    specificMessage = lastError.message;
-
-                    // Check if this is a blocked provider error
-                    if ((lastError as Error & { isBlockedProvider?: boolean }).isBlockedProvider) {
-                        isBlockedProvider = true;
-                        specificMessage = `Provider is blocked: ${specificMessage}`;
-                        console.warn(`Blocked provider detected in file ${fileName}: ${specificMessage}`);
-                    } else if (specificMessage.includes('Failed to process material')) {
-                        specificMessage = `Material processing error: ${specificMessage}`;
-                    } else if (specificMessage.includes('after 10 attempts due to code conflicts')) {
-                        specificMessage = `Unable to create unique material code. This may indicate a data consistency issue.`;
-                    } else if (specificMessage.includes('Provider') && specificMessage.includes('is blocked')) {
-                        isBlockedProvider = true;
-                        specificMessage = `This provider is not allowed for processing.`;
+                    // Special handling for connection errors - longer retry delays
+                    if (isConnectionError && attempt < maxRetries) {
+                        console.warn(`[Connection] Database connection error for ${fileName}, will retry...`);
+                        const delay = attempt * 5000 + Math.random() * 2000; // 5-7s, 10-12s delays
+                        console.log(`Will retry after ${delay.toFixed(0)}ms delay...`);
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        continue;
                     }
-                }
 
-                const isPrismaP2002Error = (e: unknown): e is { code: string; meta?: { target?: string[] } } => {
-                    return typeof e === 'object' && e !== null && 'code' in e && (e as { code: unknown }).code === 'P2002';
-                };
-
-                if (isPrismaP2002Error(lastError)) {
-                    if (lastError.meta && lastError.meta.target) {
-                        if (lastError.meta.target.includes('invoiceCode') && extractedData) {
-                            console.warn(`Duplicate invoice code '${extractedData.invoiceCode}' for file: ${fileName} (after ${maxRetries} retries)`);
-                            specificMessage = `An invoice with code '${extractedData.invoiceCode}' already exists.`;
-                        } else if (lastError.meta.target.includes('code')) {
-                            specificMessage = `A material with this code already exists. Race condition persisted after ${maxRetries} retries.`;
-                        } else if (lastError.meta.target.includes('cif')) {
-                            specificMessage = `Provider CIF constraint conflict persisted after ${maxRetries} retries. This may indicate a provider consolidation issue.`;
-                        }
+                    // Don't retry for blocked providers, memory errors, or on last attempt
+                    if (isBlockedProviderError || isMemoryError || attempt === maxRetries || (!isRetryableError && !isTimeoutError && !isConnectionError)) {
+                        break; // Exit retry loop
                     }
+
+                    // Add a small delay before retrying to reduce race conditions
+                    const delay = attempt * 100 + Math.random() * 100; // 100-200ms, 200-300ms, etc.
+                    console.log(`Will retry after ${delay.toFixed(0)}ms delay...`);
+                    await new Promise(resolve => setTimeout(resolve, delay));
                 }
-
-                return {
-                    success: false,
-                    message: isBlockedProvider ? specificMessage : `${baseMessage}: ${specificMessage}`,
-                    fileName: fileName,
-                    isBlockedProvider
-                };
-            });
-
-            const chunkResults = await Promise.all(chunkPromises);
-            dbResults.push(...chunkResults);
-
-            // Update circuit breaker state
-            const failuresInChunk = chunkResults.filter(r => !r.success && !r.isBlockedProvider).length;
-            if (failuresInChunk > 0) {
-                consecutiveFailures += failuresInChunk;
-                if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-                    circuitBreakerTripped = true;
-                    console.error(`[Circuit Breaker] ${consecutiveFailures} consecutive failures detected. Stopping further processing to prevent system overload.`);
-
-                    // Mark remaining items as failed
-                    const remainingItems = processableItems.slice(i + DB_CONCURRENCY_LIMIT);
-                    for (const item of remainingItems) {
-                        dbResults.push({
-                            success: false,
-                            message: `Processing stopped due to circuit breaker (${consecutiveFailures} consecutive failures)`,
-                            fileName: item.fileName
-                        });
-                    }
-                    break;
-                }
-            } else {
-                // Reset counter on successful batch
-                consecutiveFailures = 0;
             }
-        }
 
-        // Combine extraction errors with database results
-        finalResults.push(...dbResults);
+            // If we get here, all retries failed
+            const baseMessage = `Failed to create invoice from ${fileName}`;
+            let specificMessage = "An unexpected error occurred.";
+            let isBlockedProvider = false;
 
-        // Add batch ID to all results
-        const finalResultsWithBatch = finalResults.map(result => ({
-            ...result,
-            batchId
-        }));
+            if (lastError instanceof Error) {
+                specificMessage = lastError.message;
 
-        // Calculate final batch statistics
-        const successfulInvoices = finalResultsWithBatch.filter(r => r.success && !r.message.includes("already exists"));
-        const failedInvoices = finalResultsWithBatch.filter(r => !r.success && !r.isBlockedProvider);
-        const blockedInvoices = finalResultsWithBatch.filter(r => r.isBlockedProvider);
+                // Check if this is a blocked provider error
+                if ((lastError as Error & { isBlockedProvider?: boolean }).isBlockedProvider) {
+                    isBlockedProvider = true;
+                    specificMessage = `Provider is blocked: ${specificMessage}`;
+                    console.warn(`Blocked provider detected in file ${fileName}: ${specificMessage}`);
+                } else if (specificMessage.includes('Failed to process material')) {
+                    specificMessage = `Material processing error: ${specificMessage}`;
+                } else if (specificMessage.includes('after 10 attempts due to code conflicts')) {
+                    specificMessage = `Unable to create unique material code. This may indicate a data consistency issue.`;
+                } else if (specificMessage.includes('Provider') && specificMessage.includes('is blocked')) {
+                    isBlockedProvider = true;
+                    specificMessage = `This provider is not allowed for processing.`;
+                }
+            }
 
-        // Update final batch status
-        const overallSuccess = finalResultsWithBatch.every(r => r.success);
-        const finalStatus: BatchStatus = circuitBreakerTripped ? 'FAILED' :
-            overallSuccess ? 'COMPLETED' : 'COMPLETED'; // Still completed even with some failures
+            const isPrismaP2002Error = (e: unknown): e is { code: string; meta?: { target?: string[] } } => {
+                return typeof e === 'object' && e !== null && 'code' in e && (e as { code: unknown }).code === 'P2002';
+            };
 
-        await updateBatchProgress(batchId, {
-            status: finalStatus,
-            processedFiles: files.length,
-            successfulFiles: successfulInvoices.length,
-            failedFiles: failedInvoices.length,
-            blockedFiles: blockedInvoices.length,
-            completedAt: new Date(),
-            errors: batchErrors.length > 0 ? batchErrors : undefined,
+            if (isPrismaP2002Error(lastError)) {
+                if (lastError.meta && lastError.meta.target) {
+                    if (lastError.meta.target.includes('invoiceCode') && extractedData) {
+                        console.warn(`Duplicate invoice code '${extractedData.invoiceCode}' for file: ${fileName} (after ${maxRetries} retries)`);
+                        specificMessage = `An invoice with code '${extractedData.invoiceCode}' already exists.`;
+                    } else if (lastError.meta.target.includes('code')) {
+                        specificMessage = `A material with this code already exists. Race condition persisted after ${maxRetries} retries.`;
+                    } else if (lastError.meta.target.includes('cif')) {
+                        specificMessage = `Provider CIF constraint conflict persisted after ${maxRetries} retries. This may indicate a provider consolidation issue.`;
+                    }
+                }
+            }
+
+            return {
+                success: false,
+                message: isBlockedProvider ? specificMessage : `${baseMessage}: ${specificMessage}`,
+                fileName: fileName,
+                isBlockedProvider
+            };
         });
 
-        // Performance summary
-        const batchRecord = await prisma.batchProcessing.findUnique({
-            where: { id: batchId },
-            select: { createdAt: true }
-        });
-        const processingTimeMs = batchRecord ? Date.now() - batchRecord.createdAt.getTime() : null;
+        const chunkResults = await Promise.all(chunkPromises);
+        dbResults.push(...chunkResults);
 
-        const avgTimePerFile = processingTimeMs ? (processingTimeMs / files.length / 1000).toFixed(2) : 'N/A';
-        const totalAlerts = finalResultsWithBatch.reduce((sum, r) => sum + (r.alertsCreated || 0), 0);
+        // Update circuit breaker state
+        const failuresInChunk = chunkResults.filter(r => !r.success && !r.isBlockedProvider).length;
+        if (failuresInChunk > 0) {
+            consecutiveFailures += failuresInChunk;
+            if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+                circuitBreakerTripped = true;
+                console.error(`[Circuit Breaker] ${consecutiveFailures} consecutive failures detected. Stopping further processing to prevent system overload.`);
 
-        console.log(`Batch ${batchId} completed in ${processingTimeMs ? (processingTimeMs / 1000).toFixed(2) : 'N/A'}s (avg: ${avgTimePerFile}s/file)`);
-        console.log(`Results: ${successfulInvoices.length} successful, ${failedInvoices.length} failed, ${blockedInvoices.length} blocked, ${totalAlerts} alerts created`);
-        console.log(`Optimizations: ${providerCache.size} providers pre-cached, ${existingMaterials.length} materials pre-loaded`);
-
-        const newlyCreatedInvoices = finalResultsWithBatch.filter(r => r.success && r.invoiceId && !r.message.includes("already exists"));
-
-        if (newlyCreatedInvoices.length > 0) {
-            revalidatePath("/facturas");
-            console.log("Revalidated /facturas path.");
-            if (newlyCreatedInvoices.some(r => r.alertsCreated && r.alertsCreated > 0)) {
-                revalidatePath("/alertas");
-                console.log("Revalidated /alertas path due to new alerts.");
+                // Mark remaining items as failed
+                const remainingItems = processableItems.slice(i + DB_CONCURRENCY_LIMIT);
+                for (const item of remainingItems) {
+                    dbResults.push({
+                        success: false,
+                        message: `Processing stopped due to circuit breaker (${consecutiveFailures} consecutive failures)`,
+                        fileName: item.fileName
+                    });
+                }
+                break;
             }
+        } else {
+            // Reset counter on successful batch
+            consecutiveFailures = 0;
         }
-
-        // Clean up old batch records as maintenance (non-blocking)
-        if (Math.random() < 0.1) { // Only run cleanup 10% of the time to reduce overhead
-            cleanupOldBatches().catch(error => {
-                console.error("Background cleanup failed:", error);
-            });
-        }
-
-        return { overallSuccess, results: finalResultsWithBatch, batchId };
-    } catch (error) {
-        // Something went wrong that was not handled by the internal
-        // logic. Make a best-effort attempt to mark the batch as
-        // FAILED so the front-end can stop polling and display an
-        // appropriate error message.
-        console.error("Unhandled error during batch processing:", error);
-
-        try {
-            await updateBatchProgress(batchId, {
-                status: 'FAILED',
-                completedAt: new Date(),
-            });
-        } catch (updateError) {
-            console.error("Failed to update batch status after error:", updateError);
-        }
-
-        // Re-throw to propagate the failure up the call stack; the
-        // dropzone component already shows a background-processing
-        // toast and will rely on the batch record for progress.
-        throw error;
     }
+
+    // Combine extraction errors with database results
+    finalResults.push(...dbResults);
+
+    // Add batch ID to all results
+    const finalResultsWithBatch = finalResults.map(result => ({
+        ...result,
+        batchId
+    }));
+
+    // Calculate final batch statistics
+    const successfulInvoices = finalResultsWithBatch.filter(r => r.success && !r.message.includes("already exists"));
+    const failedInvoices = finalResultsWithBatch.filter(r => !r.success && !r.isBlockedProvider);
+    const blockedInvoices = finalResultsWithBatch.filter(r => r.isBlockedProvider);
+
+    // Update final batch status
+    const overallSuccess = finalResultsWithBatch.every(r => r.success);
+    const finalStatus: BatchStatus = circuitBreakerTripped ? 'FAILED' :
+        overallSuccess ? 'COMPLETED' : 'COMPLETED'; // Still completed even with some failures
+
+    await updateBatchProgress(batchId, {
+        status: finalStatus,
+        processedFiles: files.length,
+        successfulFiles: successfulInvoices.length,
+        failedFiles: failedInvoices.length,
+        blockedFiles: blockedInvoices.length,
+        completedAt: new Date(),
+        errors: batchErrors.length > 0 ? batchErrors : undefined,
+    });
+
+    // Performance summary
+    const batchRecord = await prisma.batchProcessing.findUnique({
+        where: { id: batchId },
+        select: { createdAt: true }
+    });
+    const processingTimeMs = batchRecord ? Date.now() - batchRecord.createdAt.getTime() : null;
+
+    const avgTimePerFile = processingTimeMs ? (processingTimeMs / files.length / 1000).toFixed(2) : 'N/A';
+    const totalAlerts = finalResultsWithBatch.reduce((sum, r) => sum + (r.alertsCreated || 0), 0);
+
+    console.log(`Batch ${batchId} completed in ${processingTimeMs ? (processingTimeMs / 1000).toFixed(2) : 'N/A'}s (avg: ${avgTimePerFile}s/file)`);
+    console.log(`Results: ${successfulInvoices.length} successful, ${failedInvoices.length} failed, ${blockedInvoices.length} blocked, ${totalAlerts} alerts created`);
+    console.log(`Optimizations: ${providerCache.size} providers pre-cached, ${existingMaterials.length} materials pre-loaded`);
+
+    const newlyCreatedInvoices = finalResultsWithBatch.filter(r => r.success && r.invoiceId && !r.message.includes("already exists"));
+
+    if (newlyCreatedInvoices.length > 0) {
+        revalidatePath("/facturas");
+        console.log("Revalidated /facturas path.");
+        if (newlyCreatedInvoices.some(r => r.alertsCreated && r.alertsCreated > 0)) {
+            revalidatePath("/alertas");
+            console.log("Revalidated /alertas path due to new alerts.");
+        }
+    }
+
+    // Clean up old batch records as maintenance (non-blocking)
+    if (Math.random() < 0.1) { // Only run cleanup 10% of the time to reduce overhead
+        cleanupOldBatches().catch(error => {
+            console.error("Background cleanup failed:", error);
+        });
+    }
+
+    return { overallSuccess, results: finalResultsWithBatch, batchId };
 }
 
 // Manual invoice creation function for form submissions
