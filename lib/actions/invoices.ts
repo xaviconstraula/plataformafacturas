@@ -2470,10 +2470,10 @@ async function buildBatchJsonlChunks(files: File[]): Promise<JsonlChunk[]> {
     const chunks: JsonlChunk[] = [];
 
     // Allow limited parallelism to accelerate heavy pdfToPng work.
-    // Four concurrent conversions strike a good balance between speed-up and
-    // memory usage (~40–80 MB per A4 @ scale 2). Adjust if your runtime has
-    // more/less RAM.
-    const CONCURRENCY = 4;
+    // Use more conservative concurrency for very large batches to avoid OOM.
+    const CONCURRENCY = files.length >= 250 ? 1 : files.length >= 150 ? 2 : 4;
+
+    console.log(`[buildBatchJsonlChunks] Building JSONL for ${files.length} files with concurrency ${CONCURRENCY}`);
 
     let currentLines: string[] = [];
     let currentSize = 0;
@@ -2504,6 +2504,18 @@ async function buildBatchJsonlChunks(files: File[]): Promise<JsonlChunk[]> {
             currentLines.push(line);
             currentFiles.push(file);
             currentSize += lineSize;
+        }
+
+        // Memory monitoring & opportunistic GC
+        const mem = process.memoryUsage();
+        const heapMb = Math.round(mem.heapUsed / 1024 / 1024);
+        if (heapMb > 1500) {
+            console.warn(`[buildBatchJsonlChunks] High heap usage detected (${heapMb} MB). Triggering GC and throttling…`);
+            if (global.gc) {
+                global.gc();
+            }
+            // Small delay to let GC do its work in tight loops
+            await new Promise((r) => setTimeout(r, 500));
         }
     }
 
