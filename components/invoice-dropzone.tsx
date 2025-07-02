@@ -96,82 +96,69 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
         const filesToProcess = [...files]; // Copy files to a new array
         setFiles([]); // Clear files from UI immediately
 
+        // 🚧  Split huge selections into smaller requests so Next.js does not
+        //     need to buffer hundreds of MB in a single multipart body. Each
+        //     sub-batch will be processed independently by the server.
+        const MAX_FILES_PER_REQUEST = 80; // 80 × 5 MB  ≈ 400 MB (worst-case)
+        const chunks: File[][] = [];
+        for (let i = 0; i < filesToProcess.length; i += MAX_FILES_PER_REQUEST) {
+            chunks.push(filesToProcess.slice(i, i + MAX_FILES_PER_REQUEST));
+        }
+
+        // Track progress across all chunks
+        setUploadProgress({ current: 0, total: chunks.length });
+
         toast.info("Iniciando procesamiento de facturas", {
             description: "Las facturas se procesarán en segundo plano. La página se actualizará automáticamente para mostrar el progreso.",
         });
 
+        const operationResults: CreateInvoiceResult[] = [];
+
         // 🚀  Optimistically show the processing banner right away so the user gets
-        //      instant feedback without waiting for the server to finish heavy PDF
-        //      work (pdfToPng, JSONL assembly, etc.).
+        //     instant feedback without waiting for the server to finish heavy work.
         const earlyBatchEvent = new CustomEvent('batchCreated', {
             detail: { totalFiles: filesToProcess.length },
         });
         window.dispatchEvent(earlyBatchEvent);
-
-        // Enter waiting-for-banner mode immediately so the button keeps spinning
-        // until the banner confirms it's visible.
         setWaitingForBanner(true);
 
-        const operationResults: CreateInvoiceResult[] = [];
-        let batchId: string | undefined;
-        let createdBatchSuccessfully = false;
+        for (let idx = 0; idx < chunks.length; idx++) {
+            const chunk = chunks[idx];
 
-        try {
-            // Prepare FormData for server action
-            const formData = new FormData();
-            filesToProcess.forEach((file) => {
-                formData.append('files', file);
-            });
+            try {
+                const formData = new FormData();
+                chunk.forEach((file) => {
+                    formData.append('files', file);
+                });
 
-            // Start the OpenAI Batch job via server action
-            console.log(`Starting OpenAI Batch processing for ${filesToProcess.length} files...`);
-            const { batchId: createdBatchId } = await startInvoiceBatch(formData);
-            batchId = createdBatchId;
-            createdBatchSuccessfully = true;
+                console.log(`▶️  Sub-batch ${idx + 1}/${chunks.length} – ${chunk.length} archivos`);
+                const { batchId } = await startInvoiceBatch(formData);
 
-            // Generate minimal results so downstream handlers detect batch mode
-            const syntheticResults: CreateInvoiceResult[] = [
-                {
+                operationResults.push({
                     success: true,
                     message: 'Batch enqueued',
                     batchId,
-                    fileName: filesToProcess.length === 1 ? filesToProcess[0].name : `${filesToProcess.length} archivos`,
-                },
-            ];
-
-            operationResults.push(...syntheticResults);
-
-        } catch (error) {
-            console.error("Error creating invoices:", error);
-            // The server often times out (e.g., Cloudflare 524) while the work
-            // continues successfully in the background. Treat this as an info
-            // message rather than an error so we don't alarm the user.
-            toast.info("Procesamiento en segundo plano", {
-                description: "La carga de facturas continúa en segundo plano. La página se actualizará automáticamente cuando esté listo.",
-            });
-
-            // Even if there's an error, we still want to pass the batch ID if we have it
-            // so the user can track progress
-            if (batchId) {
-                operationResults.push({
-                    success: false,
-                    message: "Processing timeout - continuing in background",
-                    batchId: batchId,
-                    fileName: "Batch Processing"
+                    fileName: `${chunk.length} archivos (sub-batch ${idx + 1})`,
                 });
-            }
-        } finally {
-            setUploadProgress(null);
-            if (onProcessingComplete) {
-                onProcessingComplete(operationResults);
-            }
 
-            // Release the loading state only if we are not in the "waiting for
-            // banner" phase. Otherwise the banner (or safety timeout) will hide
-            // the spinner at the right time.
-            if (!waitingForBanner) {
-                setIsUploading(false);
+            } catch (error) {
+                console.error(`Error creating sub-batch ${idx + 1}:`, error);
+                toast.info("Sub-lote en segundo plano", {
+                    description: "La carga continúa en segundo plano.",
+                });
+            } finally {
+                // Update progress for the UI loader (“Procesando lote …”)
+                setUploadProgress({ current: idx + 1, total: chunks.length });
             }
+        }
+
+        // Finalize upload state
+        setUploadProgress(null);
+        if (onProcessingComplete) {
+            onProcessingComplete(operationResults);
+        }
+        if (!waitingForBanner) {
+            setIsUploading(false);
         }
     }
 
