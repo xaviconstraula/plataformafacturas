@@ -118,8 +118,16 @@ export function BatchProgressBanner() {
         }
     }, [aggregated, expectedTotal])
 
+    // Show nothing while the very first fetch is in-flight.
     if (isLoading) return null
-    if (activeBatches.length === 0) return null
+
+    // If we have no active batches *and* no optimistic expectation, hide the banner.
+    // Having an `expectedTotal` means the client just queued a batch locally, so we
+    // still render the banner right away for instant feedback, even before the
+    // server has persisted the record.
+    if (activeBatches.length === 0 && (expectedTotal === null || expectedTotal === 0)) {
+        return null
+    }
 
     return (
         <div className="mb-6">

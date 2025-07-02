@@ -100,6 +100,18 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
             description: "Las facturas se procesarán en segundo plano. La página se actualizará automáticamente para mostrar el progreso.",
         });
 
+        // 🚀  Optimistically show the processing banner right away so the user gets
+        //      instant feedback without waiting for the server to finish heavy PDF
+        //      work (pdfToPng, JSONL assembly, etc.).
+        const earlyBatchEvent = new CustomEvent('batchCreated', {
+            detail: { totalFiles: filesToProcess.length },
+        });
+        window.dispatchEvent(earlyBatchEvent);
+
+        // Enter waiting-for-banner mode immediately so the button keeps spinning
+        // until the banner confirms it's visible.
+        setWaitingForBanner(true);
+
         const operationResults: CreateInvoiceResult[] = [];
         let batchId: string | undefined;
         let createdBatchSuccessfully = false;
@@ -117,16 +129,6 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
             batchId = createdBatchId;
             createdBatchSuccessfully = true;
 
-            // Notify the UI about the new batch so the banner appears immediately
-            const batchCreatedEvent = new CustomEvent('batchCreated', {
-                detail: { batchId, totalFiles: filesToProcess.length },
-            });
-            window.dispatchEvent(batchCreatedEvent);
-
-            // Keep the button in loading state until the banner confirms it is
-            // visible so the user perceives continuous progress feedback.
-            setWaitingForBanner(true);
-
             // Generate minimal results so downstream handlers detect batch mode
             const syntheticResults: CreateInvoiceResult[] = [
                 {
@@ -141,7 +143,10 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
 
         } catch (error) {
             console.error("Error creating invoices:", error);
-            toast.warning("El procesamiento está tardando más de lo esperado", {
+            // The server often times out (e.g., Cloudflare 524) while the work
+            // continues successfully in the background. Treat this as an info
+            // message rather than an error so we don't alarm the user.
+            toast.info("Procesamiento en segundo plano", {
                 description: "La carga de facturas continúa en segundo plano. La página se actualizará automáticamente cuando esté listo.",
             });
 
@@ -161,11 +166,10 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
                 onProcessingComplete(operationResults);
             }
 
-            // Do not clear the uploading state here if we are waiting for the
-            // banner to appear. The 'batchBannerVisible' listener (or the
-            // safety timeout) will take care of hiding the spinner.
-            if (!createdBatchSuccessfully) {
-                // If we didn't create a batch (or it failed), stop the spinner now.
+            // Release the loading state only if we are not in the "waiting for
+            // banner" phase. Otherwise the banner (or safety timeout) will hide
+            // the spinner at the right time.
+            if (!waitingForBanner) {
                 setIsUploading(false);
             }
         }
