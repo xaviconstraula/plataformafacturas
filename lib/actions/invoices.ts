@@ -2611,28 +2611,25 @@ export async function startInvoiceBatch(formDataWithFiles: FormData): Promise<{ 
         throw new Error('No files provided.');
     }
 
-    // 1️⃣  Create a local placeholder record so the UI can show progress instantly.
+    // 1️⃣  Generate a temporary id so the client can detect "batch mode". We do
+    //     NOT persist it, thus it will not contribute to banner counts.
     const { randomUUID } = await import('crypto');
-    const placeholderId = randomUUID();
-    await createBatchProcessing(files.length, placeholderId);
+    const tempId = `temp-${randomUUID()}`;
 
-    // 2️⃣  Run heavy PDF → JSONL → OpenAI Batch work in the background.
-    //     We deliberately do NOT await this promise so we can return before
-    //     Cloudflare / reverse-proxy timeouts (100 s) kick in.
-    void processBatchInBackground(files, placeholderId).catch((err) => {
+    // 2️⃣  Launch heavy work in background (no await).
+    void processBatchInBackground(files).catch((err) => {
         console.error('[startInvoiceBatch] Background batch failed', err);
     });
 
-    // 3️⃣  Return the placeholder id immediately. The banner will poll the DB
-    //     and switch to the real OpenAI batch records once they are created.
-    return { batchId: placeholderId };
+    // 3️⃣  Return the temporary id immediately.
+    return { batchId: tempId };
 }
 
 // ---------------------------------------------------------------------------
 // 🏃‍♂️  Background worker — performs the heavy work and creates real Batch jobs
 // ---------------------------------------------------------------------------
 
-async function processBatchInBackground(files: File[], placeholderId: string) {
+async function processBatchInBackground(files: File[]) {
     try {
         // STEP A – Build JSONL chunks
         const fs = await import('fs');
@@ -2677,20 +2674,9 @@ async function processBatchInBackground(files: File[], placeholderId: string) {
             fs.promises.unlink(jsonlPath).catch(() => undefined);
         }
 
-        // Mark placeholder as completed so it disappears from "active" lists.
-        await updateBatchProgress(placeholderId, {
-            status: 'COMPLETED',
-            processedFiles: filesEnqueued,
-            successfulFiles: filesEnqueued,
-            completedAt: new Date(),
-        });
+        // All real batches are now tracked individually; no further action needed here.
     } catch (err) {
-        console.error('[processBatchInBackground] Failed', err);
-        await updateBatchProgress(placeholderId, {
-            status: 'FAILED',
-            errors: [(err as Error).message],
-            completedAt: new Date(),
-        });
+        console.error('[processBatchInBackground] Failed to enqueue batches', err);
     }
 }
 
