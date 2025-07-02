@@ -2602,58 +2602,96 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
 }
 
 // ---------------------------------------------------------------------------
-// 🚀  Server Action: kick off Batch job
+// 🚀  Server Action: kick off Batch job (returns immediately)
 // ---------------------------------------------------------------------------
+
 export async function startInvoiceBatch(formDataWithFiles: FormData): Promise<{ batchId: string }> {
     const files = formDataWithFiles.getAll('files') as File[];
     if (!files || files.length === 0) {
         throw new Error('No files provided.');
     }
 
-    // STEP 1 – Build one or more JSONL chunks under the size limit
-    const fs = await import("fs");
-    const path = await import("path");
-    const tmpDir = path.join(process.cwd(), "tmp");
-    if (!fs.existsSync(tmpDir)) {
-        fs.mkdirSync(tmpDir);
-    }
+    // 1️⃣  Create a local placeholder record so the UI can show progress instantly.
+    const { randomUUID } = await import('crypto');
+    const placeholderId = randomUUID();
+    await createBatchProcessing(files.length, placeholderId);
 
-    const chunks = await buildBatchJsonlChunks(files);
+    // 2️⃣  Run heavy PDF → JSONL → OpenAI Batch work in the background.
+    //     We deliberately do NOT await this promise so we can return before
+    //     Cloudflare / reverse-proxy timeouts (100 s) kick in.
+    void processBatchInBackground(files, placeholderId).catch((err) => {
+        console.error('[startInvoiceBatch] Background batch failed', err);
+    });
 
-    if (chunks.length === 0) {
-        throw new Error("No JSONL chunks built.");
-    }
+    // 3️⃣  Return the placeholder id immediately. The banner will poll the DB
+    //     and switch to the real OpenAI batch records once they are created.
+    return { batchId: placeholderId };
+}
 
-    const createdBatchIds: string[] = [];
+// ---------------------------------------------------------------------------
+// 🏃‍♂️  Background worker — performs the heavy work and creates real Batch jobs
+// ---------------------------------------------------------------------------
 
-    for (const [index, chunk] of chunks.entries()) {
-        const jsonlPath = path.join(tmpDir, `batch-input-${Date.now()}-${index}.jsonl`);
-        await fs.promises.writeFile(jsonlPath, chunk.content, "utf8");
+async function processBatchInBackground(files: File[], placeholderId: string) {
+    try {
+        // STEP A – Build JSONL chunks
+        const fs = await import('fs');
+        const path = await import('path');
+        const tmpDir = path.join(process.cwd(), 'tmp');
+        if (!fs.existsSync(tmpDir)) {
+            fs.mkdirSync(tmpDir);
+        }
 
-        // Upload file
-        const batchFile = await openai.files.create({
-            file: fs.createReadStream(jsonlPath) as unknown as File,
-            purpose: "batch",
+        const chunks = await buildBatchJsonlChunks(files);
+        if (chunks.length === 0) {
+            throw new Error('No JSONL chunks built.');
+        }
+
+        // Keep track of how many files we have successfully enqueued so we can
+        // update the placeholder record at the end.
+        let filesEnqueued = 0;
+
+        for (const [index, chunk] of chunks.entries()) {
+            const jsonlPath = path.join(tmpDir, `batch-input-${Date.now()}-${index}.jsonl`);
+            await fs.promises.writeFile(jsonlPath, chunk.content, 'utf8');
+
+            // Upload file to OpenAI
+            const batchFile = await openai.files.create({
+                file: fs.createReadStream(jsonlPath) as unknown as File,
+                purpose: 'batch',
+            });
+
+            // Create remote Batch job
+            const batch = await openai.batches.create({
+                input_file_id: batchFile.id,
+                endpoint: '/v1/chat/completions',
+                completion_window: '24h',
+            });
+
+            // Record each real batch so the UI can track real progress
+            await createBatchProcessing(chunk.files.length, batch.id);
+
+            filesEnqueued += chunk.files.length;
+
+            // Cleanup temp file in background (don't block loop)
+            fs.promises.unlink(jsonlPath).catch(() => undefined);
+        }
+
+        // Mark placeholder as completed so it disappears from "active" lists.
+        await updateBatchProgress(placeholderId, {
+            status: 'COMPLETED',
+            processedFiles: filesEnqueued,
+            successfulFiles: filesEnqueued,
+            completedAt: new Date(),
         });
-
-        // Create batch job
-        const batch = await openai.batches.create({
-            input_file_id: batchFile.id,
-            endpoint: "/v1/chat/completions",
-            completion_window: "24h",
+    } catch (err) {
+        console.error('[processBatchInBackground] Failed', err);
+        await updateBatchProgress(placeholderId, {
+            status: 'FAILED',
+            errors: [(err as Error).message],
+            completedAt: new Date(),
         });
-
-        // Record locally so banner can track
-        await createBatchProcessing(chunk.files.length, batch.id);
-
-        createdBatchIds.push(batch.id);
-
-        // Cleanup temp file
-        fs.promises.unlink(jsonlPath).catch(() => undefined);
     }
-
-    // Return the first batchId for backward-compat; UI polls DB for others
-    return { batchId: createdBatchIds[0] };
 }
 
 // ---------------------------------------------------------------------------
