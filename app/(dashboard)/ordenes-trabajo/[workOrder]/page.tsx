@@ -10,6 +10,7 @@ import { formatCurrency, formatDate } from "@/lib/utils"
 import { prisma } from "@/lib/db"
 import type { InvoiceItem, Material, Invoice, Provider } from "@/generated/prisma"
 import { GoBackButton } from "@/components/go-back-button"
+import { ExcelExportButton } from "@/components/excel-export-button"
 
 type InvoiceItemWithDetails = InvoiceItem & {
     material: Material
@@ -150,10 +151,13 @@ export default async function WorkOrderDetailPage({ params }: PageProps) {
                         Desglose detallado de materiales y costes
                     </p>
                 </div>
-                <GoBackButton
-                    fallbackUrl="/ordenes-trabajo"
-                    label="Volver a Órdenes de Trabajo"
-                />
+                <div className="flex items-center gap-2">
+                    <ExcelExportButton filters={{ workOrder }} includeDetails />
+                    <GoBackButton
+                        fallbackUrl="/ordenes-trabajo"
+                        label="Volver a Órdenes de Trabajo"
+                    />
+                </div>
             </div>
 
             {/* Work Order Summary */}

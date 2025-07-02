@@ -190,6 +190,22 @@ async function main() {
     const startDate = new Date(TODAY)
     startDate.setMonth(startDate.getMonth() - 7) // Start from 8 months ago instead of 6
 
+    // Work order pools for different types of projects
+    const workOrders = [
+        'OT-2024-001-EDIFICIO-OFICINAS',
+        'OT-2024-002-VIVIENDAS-RESIDENCIAL',
+        'OT-2024-003-INFRAESTRUCTURA-PUENTE',
+        'OT-2024-004-RENOVACION-HOSPITAL',
+        'OT-2024-005-CENTRO-COMERCIAL',
+        'OT-2024-006-PARKING-SUBTERRANEO',
+        'OT-2024-007-ESCUELA-PRIMARIA',
+        'OT-2024-008-FABRICA-INDUSTRIAL',
+        'OT-2025-001-TORRE-OFICINAS',
+        'OT-2025-002-COMPLEJO-DEPORTIVO',
+        'OT-2025-003-AMPLIACION-METRO',
+        'OT-2025-004-CENTRO-SALUD'
+    ]
+
     for (const provider of providers) {
         // Create 4 invoices per provider instead of 3
         for (let i = 0; i < 4; i++) {
@@ -242,6 +258,9 @@ async function main() {
                     10 + (j * 5) // 10, 15, 20 unidades para materiales
                 const totalPrice = Number((quantity * basePrice).toFixed(2))
 
+                // Assign a random work order to each item
+                const randomWorkOrder = workOrders[Math.floor(Math.random() * workOrders.length)]
+
                 await prisma.invoiceItem.create({
                     data: {
                         invoiceId: invoice.id,
@@ -250,6 +269,7 @@ async function main() {
                         unitPrice: basePrice,
                         totalPrice,
                         itemDate: createdAt,
+                        workOrder: randomWorkOrder,
                     }
                 })
 

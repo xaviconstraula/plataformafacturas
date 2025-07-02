@@ -25,22 +25,17 @@ export interface InvoiceItemExport {
     'Total Factura': number;
     'Código Material': string;
     'Nombre Material': string;
-    'Categoría': string;
-    'Descripción Línea': string;
     'Cantidad': number;
     'Precio Unitario': number;
     'Total Línea': number;
     'OT/CECO': string;
     'Fecha Línea': string;
     'Número Línea': number;
-    'Grupo Producto': string;
 }
 
 export interface MaterialSummaryExport {
     'Código Material': string;
     'Nombre Material': string;
-    'Categoría': string;
-    'Grupo Producto': string;
     'Cantidad Total': number;
     'Coste Total': number;
     'Precio Promedio': number;
@@ -99,16 +94,16 @@ export async function exportDetailedInvoiceData(filters: ExportFilters = {}) {
         'Total Factura': item.invoice.totalAmount.toNumber(),
         'Código Material': item.material.code,
         'Nombre Material': item.material.name,
-        'Categoría': item.material.category || '',
-        'Descripción Línea': item.description || '',
         'Cantidad': item.quantity.toNumber(),
         'Precio Unitario': item.unitPrice.toNumber(),
         'Total Línea': item.totalPrice.toNumber(),
         'OT/CECO': item.workOrder || '',
         'Fecha Línea': item.itemDate.toLocaleDateString('es-ES'),
-        'Número Línea': item.lineNumber || 0,
-        'Grupo Producto': item.material.productGroup?.standardizedName || ''
+        'Número Línea': item.lineNumber || 0
     }));
+
+    // Ordenar alfabéticamente por nombre de material (A → Z)
+    exportData.sort((a, b) => a['Nombre Material'].localeCompare(b['Nombre Material'], 'es', { sensitivity: 'base' }));
 
     return exportData;
 }
@@ -158,8 +153,6 @@ export async function exportMaterialSummary(filters: ExportFilters = {}) {
         exportData.push({
             'Código Material': material.code,
             'Nombre Material': material.name,
-            'Categoría': material.category || '',
-            'Grupo Producto': material.productGroup?.standardizedName || '',
             'Cantidad Total': totalQuantity,
             'Coste Total': totalCost,
             'Precio Promedio': averagePrice,
