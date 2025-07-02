@@ -2455,8 +2455,11 @@ async function buildBatchJsonl(files: File[]): Promise<string> {
     return lines.join("\n");
 }
 
-// Convenience: generate JSONL chunks whose size stays under the 200 MB limit imposed by the Batch API
-const MAX_BATCH_FILE_SIZE = 190 * 1024 * 1024; // 190 MB to leave safety margin
+// Convenience: generate JSONL chunks whose size stays safely under the 100 MB limit imposed by the Batch API
+// OpenAI currently rejects Batch input files larger than 100 MB.
+// Stay well below that hard limit so we never lose the entire
+// batch due to a single oversize upload.
+const MAX_BATCH_FILE_SIZE = 90 * 1024 * 1024; // 90 MB safety threshold
 
 interface JsonlChunk {
     content: string;
