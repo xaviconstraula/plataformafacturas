@@ -14,6 +14,14 @@ export interface ExportFilters {
     maxPrice?: number;
     fiscalYear?: number;
     naturalYear?: number;
+    // Additional filters for materials page
+    materialSearch?: string;
+    minUnitPrice?: number;
+    maxUnitPrice?: number;
+    minTotalCost?: number;
+    maxTotalCost?: number;
+    minQuantity?: number;
+    maxQuantity?: number;
 }
 
 export interface InvoiceItemExport {
@@ -188,12 +196,13 @@ export async function exportSupplierSummary(filters: ExportFilters = {}) {
                 lt: new Date(filters.naturalYear + 1, 0, 1)
             }
         } : {}),
-        ...(filters.workOrder || filters.materialId || filters.category ? {
+        ...(filters.workOrder || filters.materialId || filters.category || filters.materialSearch ? {
             items: {
                 some: {
                     ...(filters.workOrder ? { workOrder: { contains: processWorkOrderSearch(filters.workOrder), mode: 'insensitive' } } : {}),
                     ...(filters.materialId ? { materialId: filters.materialId } : {}),
-                    ...(filters.category ? { material: { category: { contains: filters.category, mode: 'insensitive' } } } : {})
+                    ...(filters.category ? { material: { category: { contains: filters.category, mode: 'insensitive' } } } : {}),
+                    ...(filters.materialSearch ? { material: { name: { contains: filters.materialSearch, mode: 'insensitive' } } } : {})
                 }
             }
         } : {})
@@ -279,11 +288,18 @@ function buildWhereClause(filters: ExportFilters): Prisma.InvoiceItemWhereInput 
     return {
         ...(filters.materialId ? { materialId: filters.materialId } : {}),
         ...(filters.category ? { material: { category: { contains: filters.category, mode: 'insensitive' } } } : {}),
+        ...(filters.materialSearch ? { material: { name: { contains: filters.materialSearch, mode: 'insensitive' } } } : {}),
         ...(filters.workOrder ? { workOrder: { contains: processWorkOrderSearch(filters.workOrder), mode: 'insensitive' } } : {}),
         ...(filters.supplierId ? { invoice: { providerId: filters.supplierId } } : {}),
         ...(filters.supplierCif ? { invoice: { provider: { cif: { contains: filters.supplierCif, mode: 'insensitive' } } } } : {}),
         ...(filters.minPrice ? { unitPrice: { gte: filters.minPrice } } : {}),
         ...(filters.maxPrice ? { unitPrice: { lte: filters.maxPrice } } : {}),
+        ...(filters.minUnitPrice ? { unitPrice: { gte: filters.minUnitPrice } } : {}),
+        ...(filters.maxUnitPrice ? { unitPrice: { lte: filters.maxUnitPrice } } : {}),
+        ...(filters.minTotalCost ? { totalPrice: { gte: filters.minTotalCost } } : {}),
+        ...(filters.maxTotalCost ? { totalPrice: { lte: filters.maxTotalCost } } : {}),
+        ...(filters.minQuantity ? { quantity: { gte: filters.minQuantity } } : {}),
+        ...(filters.maxQuantity ? { quantity: { lte: filters.maxQuantity } } : {}),
         ...(filters.startDate || filters.endDate ? {
             itemDate: {
                 ...(filters.startDate ? { gte: filters.startDate } : {}),

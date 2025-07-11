@@ -20,13 +20,20 @@ interface MaterialAnalyticsSectionProps {
     suppliers: Array<{ id: string; name: string; type: ProviderType }>
     categories: string[]
     workOrders: string[]
+    pagination?: {
+        currentPage: number
+        totalPages: number
+        pageSize: number
+        totalCount: number
+    }
 }
 
 export function MaterialAnalyticsSection({
     materialAnalytics,
     suppliers,
     categories,
-    workOrders
+    workOrders,
+    pagination
 }: MaterialAnalyticsSectionProps) {
     const searchParams = useSearchParams()
 
@@ -49,12 +56,15 @@ export function MaterialAnalyticsSection({
     const sortBy = (searchParams.get('sortBy') || 'cost') as 'quantity' | 'cost' | 'name' | 'avgUnitPrice'
     const sortOrder = (searchParams.get('sortOrder') || 'desc') as 'asc' | 'desc'
 
-    // Pagination params
-    const currentPage = parseInt(searchParams.get('page') || '1', 10)
-    const itemsPerPage = 20
+    // Use server-side pagination data or fall back to client-side for backward compatibility
+    const currentPage = pagination?.currentPage || parseInt(searchParams.get('page') || '1', 10)
+    const totalPages = pagination?.totalPages || Math.ceil(materialAnalytics.length / 20)
+    const itemsPerPage = pagination?.pageSize || 20
+    const totalItems = pagination?.totalCount || materialAnalytics.length
 
-    // Apply filters and sorting to material analytics
-    const filteredMaterials = materialAnalytics
+    // For server-side pagination, materials are already filtered and paginated
+    // For client-side (backward compatibility), apply filtering and pagination
+    const displayMaterials = pagination ? materialAnalytics : materialAnalytics
         .sort((a, b) => {
             let aValue: number, bValue: number
             switch (sortBy) {
@@ -80,16 +90,10 @@ export function MaterialAnalyticsSection({
             }
             return sortOrder === 'asc' ? aValue - bValue : bValue - aValue
         })
+        .slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage)
 
-    // Pagination logic
-    const totalItems = filteredMaterials.length
-    const totalPages = Math.ceil(totalItems / itemsPerPage)
-    const startIndex = (currentPage - 1) * itemsPerPage
-    const endIndex = startIndex + itemsPerPage
-    const paginatedMaterials = filteredMaterials.slice(startIndex, endIndex)
-
-    // Prepare chart data
-    const topMaterialsChart = filteredMaterials.slice(0, 10).map(material => ({
+    // Prepare chart data from display materials
+    const topMaterialsChart = displayMaterials.slice(0, 10).map(material => ({
         name: material.materialName.length > 15 ? material.materialName.substring(0, 15) + '...' : material.materialName,
         fullName: material.materialName,
         cost: material.totalCost,
@@ -98,7 +102,7 @@ export function MaterialAnalyticsSection({
     }))
 
     // Prepare quantity chart data (sorted by quantity)
-    const topQuantityChart = [...filteredMaterials]
+    const topQuantityChart = [...displayMaterials]
         .sort((a, b) => b.totalQuantity - a.totalQuantity)
         .slice(0, 10)
         .map(material => ({
@@ -118,7 +122,7 @@ export function MaterialAnalyticsSection({
                 <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                         <Badge variant="secondary">
-                            {filteredMaterials.length} de {materialAnalytics.length} materiales
+                            {totalItems} de {materialAnalytics.length} materiales
                         </Badge>
                         {hasActiveFilters && (
                             <Badge variant="outline">
@@ -229,7 +233,7 @@ export function MaterialAnalyticsSection({
                             </TableRow>
                         </TableHeader>
                         <TableBody>
-                            {paginatedMaterials.map((material) => (
+                            {displayMaterials.map((material) => (
                                 <TableRow key={material.materialId}>
                                     <TableCell>
                                         <div className="space-y-1">

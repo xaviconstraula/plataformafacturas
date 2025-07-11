@@ -1,10 +1,9 @@
 "use server"
 
 import { prisma } from "@/lib/db"
-import { unstable_noStore as noStore } from 'next/cache'
 
 export async function getDashboardStats() {
-    noStore()
+    // Removed noStore() - dashboard stats can be cached for better performance
     try {
         const [totalInvoices, totalProviders, totalMaterials, pendingAlerts] = await Promise.all([
             prisma.invoice.count(),
@@ -30,7 +29,7 @@ export async function getDashboardStats() {
 }
 
 export async function getOverviewData() {
-    noStore()
+    // Removed noStore() - overview data can be cached for better performance
     try {
         const sixMonthsAgo = new Date()
         sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6)
@@ -78,7 +77,7 @@ interface MaterialBySupplierType {
 }
 
 export async function getMaterialsBySupplierType(): Promise<MaterialBySupplierType[]> {
-    noStore()
+    // Removed noStore() - materials by supplier type can be cached for better performance
     try {
         // Get all materials with their invoice items and provider information
         const materials = await prisma.material.findMany({

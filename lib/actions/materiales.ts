@@ -1,12 +1,11 @@
 "use server"
 
 import { prisma } from "@/lib/db"
-import { unstable_noStore as noStore } from 'next/cache'
 import { revalidatePath } from 'next/cache'
 import { z } from 'zod'
 
 export async function getMaterials() {
-    noStore() // Opt out of caching
+    // Removed noStore() - materials don't change frequently, caching is beneficial
     try {
         const materials = await prisma.material.findMany({
             include: {
@@ -110,7 +109,7 @@ export async function createMaterial(
 
 // Server Action: getMaterialById
 export async function getMaterialById(id: string) {
-    noStore(); // Opt out of caching for this specific query if needed for fresh data
+    // Removed noStore(); // Opt out of caching for this specific query if needed for fresh data
     try {
         const material = await prisma.material.findUnique({
             where: { id },

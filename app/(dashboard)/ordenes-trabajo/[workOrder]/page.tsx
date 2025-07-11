@@ -152,7 +152,7 @@ export default async function WorkOrderDetailPage({ params }: PageProps) {
                     </p>
                 </div>
                 <div className="flex items-center gap-2">
-                    <ExcelExportButton filters={{ workOrder }} includeDetails />
+                    <ExcelExportButton filters={{ workOrder: data.workOrder }} includeDetails />
                     <GoBackButton
                         fallbackUrl="/ordenes-trabajo"
                         label="Volver a Órdenes de Trabajo"

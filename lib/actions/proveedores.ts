@@ -1,7 +1,6 @@
 "use server"
 
 import { prisma } from "@/lib/db"
-import { unstable_noStore as noStore } from 'next/cache'
 import { ProviderType } from '@/generated/prisma' // Assuming alias is correct
 import { revalidatePath } from 'next/cache'
 import { z } from 'zod'
@@ -9,7 +8,7 @@ import { type PrismaClient } from "@prisma/client"
 import { type Provider } from "@/generated/prisma"
 
 export async function getSuppliers() {
-    noStore() // Opt out of caching for this dynamic data
+    // Removed noStore() - providers don't change frequently, caching is beneficial
     try {
         const suppliers = await prisma.provider.findMany({
             select: {

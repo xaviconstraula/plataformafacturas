@@ -23,24 +23,34 @@ interface SupplierAnalyticsSectionProps {
     supplierAnalytics: SupplierAnalytics[]
     categories: string[]
     workOrders: string[]
+    pagination?: {
+        currentPage: number
+        totalPages: number
+        pageSize: number
+        totalCount: number
+    }
 }
 
 export function SupplierAnalyticsSection({
     supplierAnalytics,
     categories,
-    workOrders
+    workOrders,
+    pagination
 }: SupplierAnalyticsSectionProps) {
     const searchParams = useSearchParams()
     const [filters, setFilters] = useState<ExportFilters>({})
     const [sortBy, setSortBy] = useState<'spent' | 'invoices' | 'materials' | 'name'>('spent')
     const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc')
 
-    // Pagination params
-    const currentPage = parseInt(searchParams.get('page') || '1', 10)
-    const itemsPerPage = 20
+    // Use server-side pagination data or fall back to client-side for backward compatibility
+    const currentPage = pagination?.currentPage || parseInt(searchParams.get('page') || '1', 10)
+    const totalPages = pagination?.totalPages || Math.ceil(supplierAnalytics.length / 20)
+    const itemsPerPage = pagination?.pageSize || 20
+    const totalItems = pagination?.totalCount || supplierAnalytics.length
 
-    // Apply filters and sorting to supplier analytics
-    const filteredSuppliers = supplierAnalytics
+    // For server-side pagination, suppliers are already filtered and paginated
+    // For client-side (backward compatibility), apply filtering and pagination
+    const displaySuppliers = pagination ? supplierAnalytics : supplierAnalytics
         .filter(supplier => {
             if (filters.supplierId && supplier.supplierId !== filters.supplierId) return false
             if (filters.supplierCif && !supplier.supplierCif.toLowerCase().includes(filters.supplierCif.toLowerCase())) return false
@@ -78,16 +88,10 @@ export function SupplierAnalyticsSection({
             }
             return sortOrder === 'asc' ? aValue - bValue : bValue - aValue
         })
+        .slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage)
 
-    // Pagination logic
-    const totalItems = filteredSuppliers.length
-    const totalPages = Math.ceil(totalItems / itemsPerPage)
-    const startIndex = (currentPage - 1) * itemsPerPage
-    const endIndex = startIndex + itemsPerPage
-    const paginatedSuppliers = filteredSuppliers.slice(startIndex, endIndex)
-
-    // Prepare chart data
-    const topSuppliersChart = filteredSuppliers.slice(0, 10).map(supplier => ({
+    // Prepare chart data from display suppliers
+    const topSuppliersChart = displaySuppliers.slice(0, 10).map(supplier => ({
         name: supplier.supplierName.length > 15 ? supplier.supplierName.substring(0, 15) + '...' : supplier.supplierName,
         fullName: supplier.supplierName,
         spent: supplier.totalSpent,
@@ -107,7 +111,7 @@ export function SupplierAnalyticsSection({
                 <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                         <Badge variant="secondary">
-                            {filteredSuppliers.length} de {supplierAnalytics.length} proveedores
+                            {totalItems} de {supplierAnalytics.length} proveedores
                         </Badge>
                         {hasActiveFilters && (
                             <Badge variant="outline">
@@ -255,7 +259,7 @@ export function SupplierAnalyticsSection({
                             </TableRow>
                         </TableHeader>
                         <TableBody>
-                            {paginatedSuppliers.map((supplier) => (
+                            {displaySuppliers.map((supplier) => (
                                 <TableRow key={supplier.supplierId}>
                                     <TableCell>
                                         <Link
