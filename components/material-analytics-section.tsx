@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
+import { ComposedChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 import { formatCurrency } from "@/lib/utils"
 import { MaterialAnalytics } from "@/lib/actions/analytics"
 import { ProviderType } from "@/generated/prisma"
@@ -92,26 +92,14 @@ export function MaterialAnalyticsSection({
         })
         .slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage)
 
-    // Prepare chart data from display materials
-    const topMaterialsChart = displayMaterials.slice(0, 10).map(material => ({
+    // Prepare combined chart data (top 10 materials by cost, but showing both cost and quantity)
+    const combinedChartData = displayMaterials.slice(0, 10).map(material => ({
         name: material.materialName.length > 15 ? material.materialName.substring(0, 15) + '...' : material.materialName,
         fullName: material.materialName,
         cost: material.totalCost,
         quantity: material.totalQuantity,
         avgUnitPrice: material.averageUnitPrice
     }))
-
-    // Prepare quantity chart data (sorted by quantity)
-    const topQuantityChart = [...displayMaterials]
-        .sort((a, b) => b.totalQuantity - a.totalQuantity)
-        .slice(0, 10)
-        .map(material => ({
-            name: material.materialName.length > 15 ? material.materialName.substring(0, 15) + '...' : material.materialName,
-            fullName: material.materialName,
-            cost: material.totalCost,
-            quantity: material.totalQuantity,
-            avgUnitPrice: material.averageUnitPrice
-        }))
 
     const hasActiveFilters = Object.values(filters).some(value => value !== undefined && value !== '' && value !== 'all')
 
@@ -133,16 +121,19 @@ export function MaterialAnalyticsSection({
                 </div>
             )}
 
-            {/* Dedicated Quantity Chart */}
+            {/* Combined Chart - Quantity and Cost */}
             <Card>
                 <CardHeader>
                     <CardTitle>
-                        Top 10 Materiales por Cantidad Total Comprada
+                        Top 10 Materiales - Cantidad y Coste Total
                     </CardTitle>
+                    <p className="text-sm text-muted-foreground">
+                        Comparación de cantidad comprada y coste total por material
+                    </p>
                 </CardHeader>
                 <CardContent>
-                    <ResponsiveContainer width="100%" height={300}>
-                        <BarChart data={topQuantityChart}>
+                    <ResponsiveContainer width="100%" height={400}>
+                        <ComposedChart data={combinedChartData} margin={{ top: 20, right: 80, bottom: 80, left: 20 }}>
                             <CartesianGrid strokeDasharray="3 3" />
                             <XAxis
                                 dataKey="name"
@@ -152,54 +143,23 @@ export function MaterialAnalyticsSection({
                                 tick={{ fontSize: 10 }}
                             />
                             <YAxis
+                                yAxisId="quantity"
+                                orientation="left"
                                 tickFormatter={(value) => value.toString()}
                                 tick={{ fontSize: 11 }}
-                            />
-                            <Tooltip
-                                formatter={(value: number) => [value.toString(), 'Cantidad Total']}
-                                labelFormatter={(label: string, payload: Array<{ payload?: { fullName?: string } }>) => {
-                                    const entry = payload?.[0]?.payload
-                                    return entry?.fullName || label
-                                }}
-                            />
-                            <Bar
-                                dataKey="quantity"
-                                fill="#10b981"
-                            />
-                        </BarChart>
-                    </ResponsiveContainer>
-                </CardContent>
-            </Card>
-
-            {/* Dynamic Chart - Original */}
-            <Card>
-                <CardHeader>
-                    <CardTitle>
-                        Top 10 Materiales por {sortBy === 'cost' ? 'Coste' : sortBy === 'quantity' ? 'Cantidad' : 'Precio Promedio'}
-                    </CardTitle>
-                </CardHeader>
-                <CardContent>
-                    <ResponsiveContainer width="100%" height={300}>
-                        <BarChart data={topMaterialsChart}>
-                            <CartesianGrid strokeDasharray="3 3" />
-                            <XAxis
-                                dataKey="name"
-                                angle={-45}
-                                textAnchor="end"
-                                height={80}
-                                tick={{ fontSize: 10 }}
+                                label={{ value: 'Cantidad', angle: -90, position: 'insideLeft' }}
                             />
                             <YAxis
-                                tickFormatter={(value) =>
-                                    sortBy === 'quantity' ? value.toString() : formatCurrency(value)
-                                }
+                                yAxisId="cost"
+                                orientation="right"
+                                tickFormatter={(value) => formatCurrency(value)}
                                 tick={{ fontSize: 11 }}
+                                label={{ value: 'Coste Total', angle: 90, position: 'insideRight' }}
                             />
                             <Tooltip
                                 formatter={(value: number, name: string) => {
                                     if (name === 'cost') return [formatCurrency(value), 'Coste Total']
                                     if (name === 'quantity') return [value.toString(), 'Cantidad Total']
-                                    if (name === 'avgUnitPrice') return [formatCurrency(value), 'Precio Promedio']
                                     return [value, name]
                                 }}
                                 labelFormatter={(label: string, payload: Array<{ payload?: { fullName?: string } }>) => {
@@ -208,15 +168,33 @@ export function MaterialAnalyticsSection({
                                 }}
                             />
                             <Bar
-                                dataKey={sortBy === 'quantity' ? 'quantity' : sortBy === 'avgUnitPrice' ? 'avgUnitPrice' : 'cost'}
-                                fill="#8884d8"
+                                yAxisId="quantity"
+                                dataKey="quantity"
+                                fill="#10b981"
+                                name="quantity"
+                                radius={[2, 2, 0, 0]}
                             />
-                        </BarChart>
+                            <Bar
+                                yAxisId="cost"
+                                dataKey="cost"
+                                fill="#8884d8"
+                                name="cost"
+                                radius={[2, 2, 0, 0]}
+                            />
+                        </ComposedChart>
                     </ResponsiveContainer>
+                    <div className="flex items-center justify-center gap-6 mt-4">
+                        <div className="flex items-center gap-2">
+                            <div className="w-3 h-3 bg-[#10b981] rounded"></div>
+                            <span className="text-sm text-muted-foreground">Cantidad Total</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <div className="w-3 h-3 bg-[#8884d8] rounded"></div>
+                            <span className="text-sm text-muted-foreground">Coste Total</span>
+                        </div>
+                    </div>
                 </CardContent>
             </Card>
-
-
 
             {/* Analytics Table */}
             <Card className="py-8">
