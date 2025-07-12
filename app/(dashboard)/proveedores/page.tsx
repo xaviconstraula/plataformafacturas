@@ -6,6 +6,7 @@ import { MergeProvidersDialog } from "@/components/merge-providers-dialog"
 import { SupplierAnalyticsSection } from "@/components/supplier-analytics-section"
 import { HelpTooltip, helpContent } from "@/components/help-tooltip"
 import { prisma } from "@/lib/db"
+import { ProviderType } from "@/generated/prisma"
 import { DollarSign, Users, FileText, TrendingUp } from "lucide-react"
 import { formatCurrency } from "@/lib/utils"
 
@@ -24,13 +25,29 @@ async function getSuppliersData(params: { [key: string]: string | string[] | und
   const sortBy = (getString("sortBy") as "spent" | "invoices" | "materials" | "name") || "spent"
   const sortOrder = (getString("sortOrder") as "asc" | "desc") || "desc"
 
-  const [supplierData, categories, workOrders] = await Promise.all([
+  // Parse filter parameters
+  const supplierId = getString("supplierId") && getString("supplierId") !== "all" ? getString("supplierId") : undefined
+  const supplierCif = getString("supplierCif")
+  const supplierType = getString("supplierType") && getString("supplierType") !== "all" ? getString("supplierType") as ProviderType : undefined
+  const workOrder = getString("workOrder")
+  const materialCategory = getString("materialCategory") && getString("materialCategory") !== "all" ? getString("materialCategory") : undefined
+  const startDate = getString("startDate") ? new Date(getString("startDate")!) : undefined
+  const endDate = getString("endDate") ? new Date(getString("endDate")!) : undefined
+
+  const [supplierData, categories, workOrders, allSuppliers] = await Promise.all([
     getSupplierAnalyticsPaginated({
       includeMonthlyBreakdown: true,
       page,
       pageSize,
       sortBy,
-      sortOrder
+      sortOrder,
+      supplierId,
+      supplierCif,
+      supplierType,
+      workOrder,
+      materialCategory,
+      startDate,
+      endDate
     }),
     prisma.material.findMany({
       select: { category: true },
@@ -43,7 +60,13 @@ async function getSuppliersData(params: { [key: string]: string | string[] | und
       where: { workOrder: { not: null } },
       distinct: ['workOrder'],
       take: 500 // Limit work orders for performance
-    }).then(results => results.map(r => r.workOrder!).filter(Boolean))
+    }).then(results => results.map(r => r.workOrder!).filter(Boolean)),
+    // Get all suppliers for the dropdown
+    prisma.provider.findMany({
+      select: { id: true, name: true },
+      orderBy: { name: 'asc' },
+      take: 1000 // Limit for performance
+    })
   ])
 
   // Calculate summary stats from current page data
@@ -56,6 +79,7 @@ async function getSuppliersData(params: { [key: string]: string | string[] | und
     supplierAnalytics: supplierData.suppliers,
     categories,
     workOrders,
+    allSuppliers,
     pagination: {
       currentPage: supplierData.currentPage,
       totalPages: supplierData.totalPages,
@@ -84,9 +108,11 @@ export default async function SuppliersPage({ searchParams }: SuppliersPageProps
 
   // Extract filters for Excel export
   const exportFilters = {
+    supplierId: getString('supplierId') && getString('supplierId') !== 'all' ? getString('supplierId') : undefined,
     supplierCif: getString('supplierCif'),
-    category: getString('category') && getString('category') !== 'all' ? getString('category') : undefined,
-    workOrder: getString('workOrder') && getString('workOrder') !== 'all' ? getString('workOrder') : undefined,
+    supplierType: getString('supplierType') && getString('supplierType') !== 'all' ? getString('supplierType') : undefined,
+    workOrder: getString('workOrder'),
+    materialCategory: getString('materialCategory') && getString('materialCategory') !== 'all' ? getString('materialCategory') : undefined,
     startDate: getString('startDate') ? new Date(getString('startDate')!) : undefined,
     endDate: getString('endDate') ? new Date(getString('endDate')!) : undefined,
   }
@@ -117,6 +143,7 @@ export default async function SuppliersPage({ searchParams }: SuppliersPageProps
           supplierAnalytics={data.supplierAnalytics}
           categories={data.categories}
           workOrders={data.workOrders}
+          allSuppliers={data.allSuppliers}
           pagination={data.pagination}
         />
       </Suspense>

@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { ArrowUpDownIcon, PackageIcon, DollarSignIcon, CalendarIcon, TruckIcon } from "lucide-react"
-import { formatCurrency, formatDate } from "@/lib/utils"
+import { formatCurrency, formatDate, normalizeSearch } from "@/lib/utils"
 import { prisma } from "@/lib/db"
 import { Prisma } from "@/generated/prisma"
 import { WorkOrderFilters } from "@/components/work-order-filters"
@@ -37,11 +37,14 @@ async function getWorkOrdersData(params: SearchParams) {
     const pageSize = 50 // Generous page size for performance
     const skip = (currentPage - 1) * pageSize
 
+    // Normalize search term for consistent filtering
+    const normalizedSearch = normalizeSearch(search)
+
     // Build where clause for filtering
     const baseWhere: Prisma.InvoiceItemWhereInput = {
         workOrder: {
             not: null,
-            ...(search && { contains: search, mode: Prisma.QueryMode.insensitive })
+            ...(normalizedSearch && { contains: normalizedSearch, mode: Prisma.QueryMode.insensitive })
         },
         ...(provider && provider !== 'all' && {
             invoice: {
@@ -51,6 +54,7 @@ async function getWorkOrdersData(params: SearchParams) {
     }
 
     // First, get work order aggregations for pagination and sorting
+    // Note: This aggregation now respects the provider filter in baseWhere
     const workOrderAggregation = await prisma.invoiceItem.groupBy({
         by: ['workOrder'],
         where: baseWhere,
@@ -154,6 +158,7 @@ async function getWorkOrdersData(params: SearchParams) {
         const workOrderCode = wo.workOrder!
         const items = itemsByWorkOrder.get(workOrderCode) || []
 
+        // These are already filtered by the baseWhere clause, so they respect the provider filter
         const uniqueProviders = [...new Set(items.map(item => item.invoice.provider.name))]
         const uniqueMaterials = [...new Set(items.map(item => item.material.name))]
 
@@ -164,7 +169,7 @@ async function getWorkOrdersData(params: SearchParams) {
 
         return {
             workOrder: workOrderCode,
-            totalCost: (wo._sum?.totalPrice?.toNumber() || 0) * 1.21, // Add 21% IVA
+            totalCost: (wo._sum?.totalPrice?.toNumber() || 0) * 1.21, // Add 21% IVA - now filtered by provider
             totalQuantity: wo._sum?.quantity?.toNumber() || 0,
             itemCount: wo._count?.id || 0,
             providers: uniqueProviders,
@@ -336,7 +341,17 @@ export default async function WorkOrdersPage({ searchParams }: PageProps) {
                                                 </TableCell>
                                                 <TableCell>
                                                     <Button size="sm" variant="outline" asChild>
-                                                        <Link href={`/ordenes-trabajo/${encodeURIComponent(workOrder.workOrder)}`}>
+                                                        <Link
+                                                            href={{
+                                                                pathname: `/ordenes-trabajo/${encodeURIComponent(workOrder.workOrder)}`,
+                                                                query: {
+                                                                    ...(params.search && { search: params.search }),
+                                                                    ...(params.provider && params.provider !== 'all' && { provider: params.provider }),
+                                                                    ...(params.sortBy && { sortBy: params.sortBy }),
+                                                                    ...(params.sortOrder && { sortOrder: params.sortOrder })
+                                                                }
+                                                            }}
+                                                        >
                                                             Ver Detalle
                                                         </Link>
                                                     </Button>

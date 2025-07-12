@@ -1,7 +1,6 @@
 'use client'
 
-import { useState } from "react"
-import { useSearchParams } from "next/navigation"
+import { useSearchParams, useRouter, usePathname } from "next/navigation"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Input } from "@/components/ui/input"
@@ -12,17 +11,18 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 import { formatCurrency } from "@/lib/utils"
 import { SupplierAnalytics } from "@/lib/actions/analytics"
-import { ExportFilters } from "@/lib/actions/export"
 import Link from "next/link"
 import { ArrowUpRight, Filter, PencilIcon, TrashIcon, X } from "lucide-react"
 import { DeleteProviderDialog } from "./delete-provider-dialog"
 import { EditProviderDialog } from "./edit-provider-dialog"
 import { Pagination } from "./pagination"
+import { useCallback, useRef, useState, useEffect } from "react"
 
 interface SupplierAnalyticsSectionProps {
     supplierAnalytics: SupplierAnalytics[]
     categories: string[]
     workOrders: string[]
+    allSuppliers: { id: string; name: string }[]
     pagination?: {
         currentPage: number
         totalPages: number
@@ -35,12 +35,94 @@ export function SupplierAnalyticsSection({
     supplierAnalytics,
     categories,
     workOrders,
+    allSuppliers,
     pagination
 }: SupplierAnalyticsSectionProps) {
     const searchParams = useSearchParams()
-    const [filters, setFilters] = useState<ExportFilters>({})
-    const [sortBy, setSortBy] = useState<'spent' | 'invoices' | 'materials' | 'name'>('spent')
-    const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc')
+    const router = useRouter()
+    const pathname = usePathname()
+
+    // Local state for text inputs to enable debouncing
+    const [localCif, setLocalCif] = useState(searchParams.get('supplierCif') || '')
+    const [localWorkOrder, setLocalWorkOrder] = useState(searchParams.get('workOrder') || '')
+    const [localStartDate, setLocalStartDate] = useState(searchParams.get('startDate') || '')
+    const [localEndDate, setLocalEndDate] = useState(searchParams.get('endDate') || '')
+
+    // Debounce timers
+    const cifTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined)
+    const workOrderTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined)
+    const startDateTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined)
+    const endDateTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined)
+
+    // Extract current filter values from URL
+    const currentSupplier = searchParams.get('supplierId') || 'all'
+    const currentSupplierType = searchParams.get('supplierType') || 'all'
+    const currentMaterialCategory = searchParams.get('materialCategory') || 'all'
+    const currentSortBy = searchParams.get('sortBy') || 'spent'
+    const currentSortOrder = searchParams.get('sortOrder') || 'desc'
+
+    // Update local state when URL changes (e.g., when filters are cleared)
+    useEffect(() => {
+        setLocalCif(searchParams.get('supplierCif') || '')
+        setLocalWorkOrder(searchParams.get('workOrder') || '')
+        setLocalStartDate(searchParams.get('startDate') || '')
+        setLocalEndDate(searchParams.get('endDate') || '')
+    }, [searchParams])
+
+    // Function to update URL with new search params
+    const updateSearchParams = useCallback((updates: Record<string, string | undefined>) => {
+        const params = new URLSearchParams(searchParams.toString())
+
+        Object.entries(updates).forEach(([key, value]) => {
+            if (value && value !== 'all' && value !== '') {
+                params.set(key, value)
+            } else {
+                params.delete(key)
+            }
+        })
+
+        // Reset to page 1 when filters change
+        if (Object.keys(updates).some(key => key !== 'page' && key !== 'sortBy' && key !== 'sortOrder')) {
+            params.delete('page')
+        }
+
+        router.push(`${pathname}?${params.toString()}`)
+    }, [searchParams, router, pathname])
+
+    // Debounced update function for text inputs
+    const debouncedUpdate = useCallback((key: string, value: string, timeoutRef: React.MutableRefObject<NodeJS.Timeout | undefined>) => {
+        if (timeoutRef.current) {
+            clearTimeout(timeoutRef.current)
+        }
+
+        timeoutRef.current = setTimeout(() => {
+            updateSearchParams({ [key]: value })
+        }, 500) // 500ms delay
+    }, [updateSearchParams])
+
+    // Handle CIF input change
+    const handleCifChange = useCallback((value: string) => {
+        setLocalCif(value)
+        debouncedUpdate('supplierCif', value, cifTimeoutRef)
+    }, [debouncedUpdate])
+
+    // Handle Work Order input change
+    const handleWorkOrderChange = useCallback((value: string) => {
+        setLocalWorkOrder(value)
+        debouncedUpdate('workOrder', value, workOrderTimeoutRef)
+    }, [debouncedUpdate])
+
+    // Handle Start Date change
+    const handleStartDateChange = useCallback((value: string) => {
+        setLocalStartDate(value)
+        debouncedUpdate('startDate', value, startDateTimeoutRef)
+    }, [debouncedUpdate])
+
+    // Handle End Date change
+    const handleEndDateChange = useCallback((value: string) => {
+        setLocalEndDate(value)
+        debouncedUpdate('endDate', value, endDateTimeoutRef)
+    }, [debouncedUpdate])
 
     // Use server-side pagination data or fall back to client-side for backward compatibility
     const currentPage = pagination?.currentPage || parseInt(searchParams.get('page') || '1', 10)
@@ -49,46 +131,7 @@ export function SupplierAnalyticsSection({
     const totalItems = pagination?.totalCount || supplierAnalytics.length
 
     // For server-side pagination, suppliers are already filtered and paginated
-    // For client-side (backward compatibility), apply filtering and pagination
-    const displaySuppliers = pagination ? supplierAnalytics : supplierAnalytics
-        .filter(supplier => {
-            if (filters.supplierId && supplier.supplierId !== filters.supplierId) return false
-            if (filters.supplierCif && !supplier.supplierCif.toLowerCase().includes(filters.supplierCif.toLowerCase())) return false
-            if (filters.category) {
-                const hasCategory = supplier.topMaterialsByCost.some(m =>
-                    m.materialName.toLowerCase().includes(filters.category!.toLowerCase())
-                )
-                if (!hasCategory) return false
-            }
-            if (filters.workOrder && !supplier.workOrders.some(wo => wo.toLowerCase().includes(filters.workOrder!.toLowerCase()))) return false
-            return true
-        })
-        .sort((a, b) => {
-            let aValue: number, bValue: number
-            switch (sortBy) {
-                case 'spent':
-                    aValue = a.totalSpent
-                    bValue = b.totalSpent
-                    break
-                case 'invoices':
-                    aValue = a.invoiceCount
-                    bValue = b.invoiceCount
-                    break
-                case 'materials':
-                    aValue = a.materialCount
-                    bValue = b.materialCount
-                    break
-                case 'name':
-                    return sortOrder === 'asc'
-                        ? a.supplierName.localeCompare(b.supplierName)
-                        : b.supplierName.localeCompare(a.supplierName)
-                default:
-                    aValue = a.totalSpent
-                    bValue = b.totalSpent
-            }
-            return sortOrder === 'asc' ? aValue - bValue : bValue - aValue
-        })
-        .slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage)
+    const displaySuppliers = supplierAnalytics
 
     // Prepare chart data from display suppliers
     const topSuppliersChart = displaySuppliers.slice(0, 10).map(supplier => ({
@@ -99,10 +142,34 @@ export function SupplierAnalyticsSection({
     }))
 
     const clearFilters = () => {
-        setFilters({})
+        // Clear any pending timeouts
+        if (cifTimeoutRef.current) {
+            clearTimeout(cifTimeoutRef.current)
+        }
+        if (workOrderTimeoutRef.current) {
+            clearTimeout(workOrderTimeoutRef.current)
+        }
+        if (startDateTimeoutRef.current) {
+            clearTimeout(startDateTimeoutRef.current)
+        }
+        if (endDateTimeoutRef.current) {
+            clearTimeout(endDateTimeoutRef.current)
+        }
+
+        // Reset local state
+        setLocalCif('')
+        setLocalWorkOrder('')
+        setLocalStartDate('')
+        setLocalEndDate('')
+
+        // Navigate to clean URL
+        router.push(pathname)
     }
 
-    const hasActiveFilters = Object.values(filters).some(value => value !== undefined && value !== '')
+    const hasActiveFilters = searchParams.toString() !== '' &&
+        Array.from(searchParams.entries()).some(([key, value]) =>
+            !['page', 'sortBy', 'sortOrder'].includes(key) && value !== 'all' && value !== ''
+        )
 
     return (
         <div className="space-y-6">
@@ -111,7 +178,7 @@ export function SupplierAnalyticsSection({
                 <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                         <Badge variant="secondary">
-                            {totalItems} de {supplierAnalytics.length} proveedores
+                            {totalItems} de {allSuppliers.length} proveedores
                         </Badge>
                         {hasActiveFilters && (
                             <Badge variant="outline">
@@ -127,7 +194,9 @@ export function SupplierAnalyticsSection({
                 <div className="flex items-center gap-2">
                     {hasActiveFilters && (
                         <Badge variant="secondary">
-                            {Object.values(filters).filter(v => v !== undefined && v !== '').length} activos
+                            {Array.from(searchParams.entries()).filter(([key, value]) =>
+                                !['page', 'sortBy', 'sortOrder'].includes(key) && value !== 'all' && value !== ''
+                            ).length} activos
                         </Badge>
                     )}
                 </div>
@@ -140,68 +209,115 @@ export function SupplierAnalyticsSection({
                     )}
                 </div>
             </div>
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-                <div className="space-y-2">
-                    <Label>Proveedor</Label>
-                    <Select
-                        value={filters.supplierId || 'all'}
-                        onValueChange={(value) => setFilters(prev => ({ ...prev, supplierId: value === 'all' ? undefined : value }))}
-                    >
-                        <SelectTrigger>
-                            <SelectValue placeholder="Todos los proveedores" />
-                        </SelectTrigger>
-                        <SelectContent>
-                            <SelectItem value="all">Todos los proveedores</SelectItem>
-                            {supplierAnalytics.map(supplier => (
-                                <SelectItem key={supplier.supplierId} value={supplier.supplierId}>
-                                    {supplier.supplierName}
-                                </SelectItem>
-                            ))}
-                        </SelectContent>
-                    </Select>
-                </div>
-
-                <div className="space-y-2">
-                    <Label>CIF</Label>
-                    <Input
-                        placeholder="Buscar por CIF..."
-                        value={filters.supplierCif || ''}
-                        onChange={(e) => setFilters(prev => ({ ...prev, supplierCif: e.target.value || undefined }))}
-                    />
-                </div>
-
-                <div className="space-y-2">
-                    <Label>OT/CECO</Label>
-                    <Input
-                        placeholder="Buscar OT/CECO..."
-                        value={filters.workOrder || ''}
-                        onChange={(e) => setFilters(prev => ({ ...prev, workOrder: e.target.value || undefined }))}
-                    />
-                </div>
-
-                <div className="space-y-2">
-                    <Label>Ordenar por</Label>
-                    <div className="flex gap-2">
-                        <Select value={sortBy} onValueChange={(value) => setSortBy(value as 'spent' | 'invoices' | 'materials' | 'name')}>
-                            <SelectTrigger className="flex-1">
-                                <SelectValue />
+            <div className="space-y-4">
+                {/* First row - Main filters */}
+                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                    <div className="space-y-2">
+                        <Label>Proveedor</Label>
+                        <Select
+                            value={currentSupplier}
+                            onValueChange={(value) => updateSearchParams({ supplierId: value })}
+                        >
+                            <SelectTrigger>
+                                <SelectValue placeholder="Todos los proveedores" />
                             </SelectTrigger>
                             <SelectContent>
-                                <SelectItem value="spent">Gasto Total</SelectItem>
-                                <SelectItem value="invoices">Nº Facturas</SelectItem>
-                                <SelectItem value="materials">Nº Materiales</SelectItem>
-                                <SelectItem value="name">Nombre</SelectItem>
+                                <SelectItem value="all">Todos los proveedores</SelectItem>
+                                {allSuppliers.map(supplier => (
+                                    <SelectItem key={supplier.id} value={supplier.id}>
+                                        {supplier.name}
+                                    </SelectItem>
+                                ))}
                             </SelectContent>
                         </Select>
-                        <Select value={sortOrder} onValueChange={(value) => setSortOrder(value as 'asc' | 'desc')}>
-                            <SelectTrigger className="w-24">
-                                <SelectValue />
+                    </div>
+
+                    <div className="space-y-2">
+                        <Label>CIF</Label>
+                        <Input
+                            placeholder="Buscar por CIF..."
+                            value={localCif}
+                            onChange={(e) => handleCifChange(e.target.value)}
+                        />
+                    </div>
+
+                    <div className="space-y-2">
+                        <Label>Tipo</Label>
+                        <Select
+                            value={currentSupplierType}
+                            onValueChange={(value) => updateSearchParams({ supplierType: value })}
+                        >
+                            <SelectTrigger>
+                                <SelectValue placeholder="Todos los tipos" />
                             </SelectTrigger>
                             <SelectContent>
-                                <SelectItem value="desc">Desc</SelectItem>
-                                <SelectItem value="asc">Asc</SelectItem>
+                                <SelectItem value="all">Todos los tipos</SelectItem>
+                                <SelectItem value="MATERIAL_SUPPLIER">Material</SelectItem>
+                                <SelectItem value="MACHINERY_RENTAL">Maquinaria</SelectItem>
                             </SelectContent>
                         </Select>
+                    </div>
+
+                    <div className="space-y-2">
+                        <Label>OT/CECO</Label>
+                        <Input
+                            placeholder="Buscar OT/CECO..."
+                            value={localWorkOrder}
+                            onChange={(e) => handleWorkOrderChange(e.target.value)}
+                        />
+                    </div>
+                </div>
+
+                {/* Second row - Date filters and sorting */}
+                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                    <div className="space-y-2">
+                        <Label>Fecha desde</Label>
+                        <Input
+                            type="date"
+                            value={localStartDate}
+                            onChange={(e) => handleStartDateChange(e.target.value)}
+                        />
+                    </div>
+
+                    <div className="space-y-2">
+                        <Label>Fecha hasta</Label>
+                        <Input
+                            type="date"
+                            value={localEndDate}
+                            onChange={(e) => handleEndDateChange(e.target.value)}
+                        />
+                    </div>
+
+                    <div className="space-y-2">
+                        <Label>Ordenar por</Label>
+                        <div className="flex gap-2">
+                            <Select
+                                value={currentSortBy}
+                                onValueChange={(value) => updateSearchParams({ sortBy: value })}
+                            >
+                                <SelectTrigger className="flex-1">
+                                    <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    <SelectItem value="spent">Gasto Total</SelectItem>
+                                    <SelectItem value="invoices">Nº Facturas</SelectItem>
+                                    <SelectItem value="materials">Nº Materiales</SelectItem>
+                                    <SelectItem value="name">Nombre</SelectItem>
+                                </SelectContent>
+                            </Select>
+                            <Select
+                                value={currentSortOrder}
+                                onValueChange={(value) => updateSearchParams({ sortOrder: value })}
+                            >
+                                <SelectTrigger className="w-24">
+                                    <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    <SelectItem value="desc">Desc</SelectItem>
+                                    <SelectItem value="asc">Asc</SelectItem>
+                                </SelectContent>
+                            </Select>
+                        </div>
                     </div>
                 </div>
             </div>

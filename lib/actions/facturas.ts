@@ -3,11 +3,7 @@
 import { prisma } from "@/lib/db"
 import { Prisma } from "@/generated/prisma"
 import { revalidatePath } from "next/cache"
-
-// Helper function to process workOrder search terms
-function processWorkOrderSearch(workOrder: string): string {
-    return workOrder.replace(/\s+/g, '-');
-}
+import { normalizeSearch, processWorkOrderSearch } from "@/lib/utils"
 
 export interface GetInvoicesParams {
     page?: number
@@ -43,6 +39,11 @@ export async function getInvoices(params: GetInvoicesParams) {
         const cleanSupplier = params.supplier && params.supplier !== 'all' ? params.supplier : undefined
         const cleanMaterial = params.material && params.material !== 'all' ? params.material : undefined
         const cleanCategory = params.category && params.category !== 'all' ? params.category : undefined
+
+        // Normalize search parameters
+        const normalizedSearch = normalizeSearch(params.search)
+        const normalizedWorkOrder = processWorkOrderSearch(params.workOrder)
+        const normalizedCategory = normalizeSearch(cleanCategory)
 
         let dateFilter: Prisma.InvoiceWhereInput = {}
 
@@ -100,21 +101,21 @@ export async function getInvoices(params: GetInvoicesParams) {
             ...dateFilter,
             ...amountFilter,
             ...(cleanSupplier ? { providerId: cleanSupplier } : {}),
-            ...(params.search ? {
+            ...(normalizedSearch ? {
                 OR: [
-                    { invoiceCode: { contains: params.search, mode: Prisma.QueryMode.insensitive } },
-                    { provider: { name: { contains: params.search, mode: Prisma.QueryMode.insensitive } } },
-                    { items: { some: { material: { name: { contains: params.search, mode: Prisma.QueryMode.insensitive } } } } }
+                    { invoiceCode: { contains: normalizedSearch, mode: Prisma.QueryMode.insensitive } },
+                    { provider: { name: { contains: normalizedSearch, mode: Prisma.QueryMode.insensitive } } },
+                    { items: { some: { material: { name: { contains: normalizedSearch, mode: Prisma.QueryMode.insensitive } } } } }
                 ]
             } : {}),
-            ...(params.workOrder ? {
-                items: { some: { workOrder: { contains: processWorkOrderSearch(params.workOrder), mode: Prisma.QueryMode.insensitive } } }
+            ...(normalizedWorkOrder ? {
+                items: { some: { workOrder: { contains: normalizedWorkOrder, mode: Prisma.QueryMode.insensitive } } }
             } : {}),
             ...(cleanMaterial ? {
                 items: { some: { materialId: cleanMaterial } }
             } : {}),
-            ...(cleanCategory ? {
-                items: { some: { material: { category: { contains: cleanCategory, mode: Prisma.QueryMode.insensitive } } } }
+            ...(normalizedCategory ? {
+                items: { some: { material: { category: { contains: normalizedCategory, mode: Prisma.QueryMode.insensitive } } } }
             } : {}),
             ...((params.minUnitPrice !== undefined || params.maxUnitPrice !== undefined) ? {
                 items: {

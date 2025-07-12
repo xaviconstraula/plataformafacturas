@@ -28,7 +28,13 @@ export function ExcelExportButton({
     async function handleExport() {
         try {
             setIsExporting(true)
-            toast.loading('Generando reporte Excel...', { id: 'excel-export' })
+
+            // Show different loading message for work order exports
+            const loadingMessage = filters?.workOrder
+                ? `Generando reporte completo de OT ${filters.workOrder}...`
+                : 'Generando reporte Excel...'
+
+            toast.loading(loadingMessage, { id: 'excel-export' })
 
             const response = await fetch('/api/export', {
                 method: 'POST',
@@ -60,7 +66,12 @@ export function ExcelExportButton({
             document.body.removeChild(link)
             window.URL.revokeObjectURL(url)
 
-            toast.success('Reporte Excel descargado correctamente', { id: 'excel-export' })
+            // Show different success message for work order exports
+            const successMessage = filters?.workOrder
+                ? `Reporte completo de OT ${filters.workOrder} descargado correctamente`
+                : 'Reporte Excel descargado correctamente'
+
+            toast.success(successMessage, { id: 'excel-export' })
         } catch (error) {
             console.error('Export error:', error)
             toast.error('Error al generar el reporte Excel', { id: 'excel-export' })
@@ -84,7 +95,12 @@ export function ExcelExportButton({
             )}
             {children || (size !== 'icon' && (
                 <span className="ml-2">
-                    {isExporting ? 'Exportando...' : 'Exportar Excel'}
+                    {isExporting
+                        ? 'Exportando...'
+                        : filters?.workOrder
+                            ? 'Exportar Análisis Completo'
+                            : 'Exportar Excel'
+                    }
                 </span>
             ))}
         </Button>

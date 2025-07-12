@@ -30,10 +30,15 @@ export async function POST(request: NextRequest) {
 
         const buffer = await generateExcelReport(filters, includeDetails);
 
-        // Generate filename with current date
+        // Generate filename with current date and work order info
         const now = new Date();
         const dateStr = now.toISOString().split('T')[0];
-        const filename = `facturas_reporte_${dateStr}.xlsx`;
+        let filename = `facturas_reporte_${dateStr}.xlsx`;
+
+        if (filters.workOrder) {
+            const sanitizedWorkOrder = filters.workOrder.replace(/[^a-zA-Z0-9-_]/g, '_');
+            filename = `OT_${sanitizedWorkOrder}_${dateStr}.xlsx`;
+        }
 
         return new NextResponse(buffer, {
             status: 200,

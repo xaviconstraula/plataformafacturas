@@ -1,10 +1,6 @@
 import { prisma } from "@/lib/db";
 import { Prisma, ProviderType } from "@/generated/prisma";
-
-// Helper function to process workOrder search terms
-function processWorkOrderSearch(workOrder: string): string {
-    return workOrder.replace(/\s+/g, '-');
-}
+import { normalizeSearch, processWorkOrderSearch } from "@/lib/utils";
 
 export interface MaterialAnalytics {
     materialId: string;
@@ -100,17 +96,22 @@ export interface PaginatedMaterialAnalytics {
 }
 
 export async function getMaterialAnalytics(params: GetMaterialAnalyticsParams = {}): Promise<MaterialAnalytics[]> {
+    // Normalize search parameters
+    const normalizedCategory = normalizeSearch(params.category);
+    const normalizedWorkOrder = processWorkOrderSearch(params.workOrder);
+    const normalizedMaterialSearch = normalizeSearch(params.materialSearch);
+
     const where: Prisma.InvoiceItemWhereInput = {
         ...(params.materialId ? { materialId: params.materialId } : {}),
-        ...(params.category ? { material: { category: { contains: params.category, mode: 'insensitive' } } } : {}),
-        ...(params.workOrder ? { workOrder: { contains: processWorkOrderSearch(params.workOrder), mode: 'insensitive' } } : {}),
+        ...(normalizedCategory ? { material: { category: { contains: normalizedCategory, mode: 'insensitive' } } } : {}),
+        ...(normalizedWorkOrder ? { workOrder: { contains: normalizedWorkOrder, mode: 'insensitive' } } : {}),
         ...(params.supplierId ? { invoice: { providerId: params.supplierId } } : {}),
-        ...(params.materialSearch ? {
+        ...(normalizedMaterialSearch ? {
             material: {
                 OR: [
-                    { name: { contains: params.materialSearch, mode: 'insensitive' } },
-                    { code: { contains: params.materialSearch, mode: 'insensitive' } },
-                    { referenceCode: { contains: params.materialSearch, mode: 'insensitive' } },
+                    { name: { contains: normalizedMaterialSearch, mode: 'insensitive' } },
+                    { code: { contains: normalizedMaterialSearch, mode: 'insensitive' } },
+                    { referenceCode: { contains: normalizedMaterialSearch, mode: 'insensitive' } },
                 ]
             }
         } : {}),
@@ -271,18 +272,23 @@ export async function getMaterialAnalyticsPaginated(params: GetMaterialAnalytics
     const pageSize = params.pageSize || 50; // Generous page size
     const skip = (page - 1) * pageSize;
 
+    // Normalize search parameters
+    const normalizedCategory = normalizeSearch(params.category);
+    const normalizedWorkOrder = processWorkOrderSearch(params.workOrder);
+    const normalizedMaterialSearch = normalizeSearch(params.materialSearch);
+
     // Build where clause for filtering
     const baseWhere: Prisma.InvoiceItemWhereInput = {
         ...(params.materialId ? { materialId: params.materialId } : {}),
-        ...(params.category ? { material: { category: { contains: params.category, mode: 'insensitive' } } } : {}),
-        ...(params.workOrder ? { workOrder: { contains: processWorkOrderSearch(params.workOrder), mode: 'insensitive' } } : {}),
+        ...(normalizedCategory ? { material: { category: { contains: normalizedCategory, mode: 'insensitive' } } } : {}),
+        ...(normalizedWorkOrder ? { workOrder: { contains: normalizedWorkOrder, mode: 'insensitive' } } : {}),
         ...(params.supplierId ? { invoice: { providerId: params.supplierId } } : {}),
-        ...(params.materialSearch ? {
+        ...(normalizedMaterialSearch ? {
             material: {
                 OR: [
-                    { name: { contains: params.materialSearch, mode: 'insensitive' } },
-                    { code: { contains: params.materialSearch, mode: 'insensitive' } },
-                    { referenceCode: { contains: params.materialSearch, mode: 'insensitive' } },
+                    { name: { contains: normalizedMaterialSearch, mode: 'insensitive' } },
+                    { code: { contains: normalizedMaterialSearch, mode: 'insensitive' } },
+                    { referenceCode: { contains: normalizedMaterialSearch, mode: 'insensitive' } },
                 ]
             }
         } : {}),
@@ -486,7 +492,7 @@ export async function getMaterialAnalyticsPaginated(params: GetMaterialAnalytics
 
 export interface GetSupplierAnalyticsParams {
     supplierId?: string;
-    supplierType?: string;
+    supplierType?: ProviderType;
     supplierCif?: string;
     workOrder?: string;
     materialCategory?: string;
@@ -508,12 +514,17 @@ export interface PaginatedSupplierAnalytics {
 }
 
 export async function getSupplierAnalytics(params: GetSupplierAnalyticsParams = {}): Promise<SupplierAnalytics[]> {
+    // Normalize search parameters
+    const normalizedSupplierCif = normalizeSearch(params.supplierCif);
+    const normalizedWorkOrder = processWorkOrderSearch(params.workOrder);
+    const normalizedMaterialCategory = normalizeSearch(params.materialCategory);
+
     const where: Prisma.InvoiceWhereInput = {
         ...(params.supplierId ? { providerId: params.supplierId } : {}),
-        ...(params.supplierType ? { provider: { type: params.supplierType as 'MATERIAL_SUPPLIER' | 'MACHINERY_RENTAL' } } : {}),
-        ...(params.supplierCif ? { provider: { cif: { contains: params.supplierCif, mode: 'insensitive' } } } : {}),
-        ...(params.workOrder ? { items: { some: { workOrder: { contains: processWorkOrderSearch(params.workOrder), mode: 'insensitive' } } } } : {}),
-        ...(params.materialCategory ? { items: { some: { material: { category: { contains: params.materialCategory, mode: 'insensitive' } } } } } : {}),
+        ...(params.supplierType ? { provider: { type: params.supplierType } } : {}),
+        ...(normalizedSupplierCif ? { provider: { cif: { contains: normalizedSupplierCif, mode: 'insensitive' } } } : {}),
+        ...(normalizedWorkOrder ? { items: { some: { workOrder: { contains: normalizedWorkOrder, mode: 'insensitive' } } } } : {}),
+        ...(normalizedMaterialCategory ? { items: { some: { material: { category: { contains: normalizedMaterialCategory, mode: 'insensitive' } } } } } : {}),
         ...(params.startDate || params.endDate ? {
             issueDate: {
                 ...(params.startDate ? { gte: params.startDate } : {}),
@@ -668,12 +679,17 @@ export async function getSupplierAnalyticsPaginated(params: GetSupplierAnalytics
     const pageSize = params.pageSize || 50; // Generous page size
     const skip = (page - 1) * pageSize;
 
+    // Normalize search parameters
+    const normalizedSupplierCif = normalizeSearch(params.supplierCif);
+    const normalizedWorkOrder = processWorkOrderSearch(params.workOrder);
+    const normalizedMaterialCategory = normalizeSearch(params.materialCategory);
+
     const baseWhere: Prisma.InvoiceWhereInput = {
         ...(params.supplierId ? { providerId: params.supplierId } : {}),
-        ...(params.supplierType ? { provider: { type: params.supplierType as 'MATERIAL_SUPPLIER' | 'MACHINERY_RENTAL' } } : {}),
-        ...(params.supplierCif ? { provider: { cif: { contains: params.supplierCif, mode: 'insensitive' } } } : {}),
-        ...(params.workOrder ? { items: { some: { workOrder: { contains: processWorkOrderSearch(params.workOrder), mode: 'insensitive' } } } } : {}),
-        ...(params.materialCategory ? { items: { some: { material: { category: { contains: params.materialCategory, mode: 'insensitive' } } } } } : {}),
+        ...(params.supplierType ? { provider: { type: params.supplierType } } : {}),
+        ...(normalizedSupplierCif ? { provider: { cif: { contains: normalizedSupplierCif, mode: 'insensitive' } } } : {}),
+        ...(normalizedWorkOrder ? { items: { some: { workOrder: { contains: normalizedWorkOrder, mode: 'insensitive' } } } } : {}),
+        ...(normalizedMaterialCategory ? { items: { some: { material: { category: { contains: normalizedMaterialCategory, mode: 'insensitive' } } } } } : {}),
         ...(params.startDate || params.endDate ? {
             issueDate: {
                 ...(params.startDate ? { gte: params.startDate } : {}),
@@ -696,7 +712,7 @@ export async function getSupplierAnalyticsPaginated(params: GetSupplierAnalytics
             issueDate: true,
         },
         orderBy: params.sortBy === 'spent' ? { _sum: { totalAmount: params.sortOrder || 'desc' } }
-            : params.sortBy === 'invoices' ? { _count: { id: params.sortOrder || 'desc' } }
+            : params.sortBy === 'invoices' ? { _count: { providerId: params.sortOrder || 'desc' } }
                 : { _sum: { totalAmount: params.sortOrder || 'desc' } }
     });
 

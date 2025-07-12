@@ -568,7 +568,7 @@ export function filterInvoices({
   let filtered = [...invoices]
 
   if (searchTerm) {
-    const term = searchTerm.toLowerCase()
+    const term = searchTerm.trim().toLowerCase()
     filtered = filtered.filter(
       (invoice) =>
         invoice.supplier.toLowerCase().includes(term) ||

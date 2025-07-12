@@ -196,3 +196,24 @@ export function areMaterialNamesSimilar(name1: string, name2: string): boolean {
 
   return false;
 }
+
+/**
+ * Normalizes search terms for consistent filtering
+ * Trims whitespace and converts to lowercase for case-insensitive searches
+ */
+export function normalizeSearch(searchTerm: string | undefined | null): string | undefined {
+  if (!searchTerm) return undefined;
+
+  const trimmed = searchTerm.trim();
+  return trimmed === '' ? undefined : trimmed.toLowerCase();
+}
+
+/**
+ * Processes work order search terms by normalizing and replacing spaces with dashes
+ */
+export function processWorkOrderSearch(workOrder: string | undefined | null): string | undefined {
+  if (!workOrder) return undefined;
+
+  const normalized = normalizeSearch(workOrder);
+  return normalized ? normalized.replace(/\s+/g, '-') : undefined;
+}
