@@ -6,9 +6,20 @@ import { HelpTooltip, helpContent } from "@/components/help-tooltip"
 import { getMaterialAnalytics, getSupplierAnalytics } from "@/lib/actions/analytics"
 import { getMaterialsBySupplierType } from "@/lib/actions/dashboard"
 import { prisma } from "@/lib/db"
+import { ErrorBoundary } from "@/components/ui/error-boundary"
+import { MaterialAnalyticsSkeleton, SupplierAnalyticsSkeleton, ChartSkeleton } from "@/components/ui/skeleton"
 
-async function getAnalyticsData() {
-    const [materialAnalytics, supplierAnalytics, suppliers, materials, categories, workOrders, materialsBySupplierData] = await Promise.all([
+// Separate component for analytics data to enable individual loading
+function AnalyticsContent() {
+    return (
+        <Suspense fallback={<MaterialAnalyticsSkeleton />}>
+            <AnalyticsDataContent />
+        </Suspense>
+    )
+}
+
+async function AnalyticsDataContent() {
+    const [materialAnalytics, supplierAnalytics, suppliers, materials, categories, workOrders] = await Promise.all([
         getMaterialAnalytics({ sortBy: 'cost', sortOrder: 'desc', limit: 50 }),
         getSupplierAnalytics({ includeMonthlyBreakdown: true }),
         prisma.provider.findMany({
@@ -29,30 +40,42 @@ async function getAnalyticsData() {
             where: { workOrder: { not: null } },
             distinct: ['workOrder']
         }).then(results => results.map(r => r.workOrder!).filter(Boolean)),
-        getMaterialsBySupplierType()
     ])
 
-    return {
-        materialAnalytics,
-        supplierAnalytics,
-        suppliers,
-        materials,
-        categories,
-        workOrders,
-        materialsBySupplierData
-    }
+    return (
+        <AnalyticsDashboard
+            materialAnalytics={materialAnalytics}
+            supplierAnalytics={supplierAnalytics}
+            suppliers={suppliers}
+            materials={materials}
+            categories={categories}
+            workOrders={workOrders}
+        />
+    )
 }
 
-export default async function AnalyticsPage() {
-    const data = await getAnalyticsData()
+// Separate component for materials by supplier chart
+function MaterialsBySupplierContent() {
+    return (
+        <Suspense fallback={<ChartSkeleton className="h-[400px]" />}>
+            <MaterialsBySupplierDataContent />
+        </Suspense>
+    )
+}
 
+async function MaterialsBySupplierDataContent() {
+    const materialsBySupplierData = await getMaterialsBySupplierType()
+    return <MaterialsBySupplier data={materialsBySupplierData} />
+}
+
+export default function AnalyticsPage() {
     return (
         <div className="flex flex-col gap-6">
             <div className="flex items-center justify-between">
                 <div>
                     <h1 className="text-3xl font-bold">Analíticas</h1>
                     <p className="text-muted-foreground">
-                        Resumen general y tendencias de compra.
+                        Análisis detallado de materiales y proveedores
                     </p>
                 </div>
                 <HelpTooltip
@@ -62,20 +85,15 @@ export default async function AnalyticsPage() {
                 />
             </div>
 
-            <Suspense fallback={<div className="h-96 rounded-lg bg-muted animate-pulse" />}>
-                <AnalyticsDashboard
-                    materialAnalytics={data.materialAnalytics}
-                    supplierAnalytics={data.supplierAnalytics}
-                    suppliers={data.suppliers}
-                    materials={data.materials}
-                    categories={data.categories}
-                    workOrders={data.workOrders}
-                />
-            </Suspense>
+            {/* Materials by Supplier Chart */}
 
-            <Suspense fallback={<div className="h-80 rounded-lg bg-muted animate-pulse" />}>
-                <MaterialsBySupplier data={data.materialsBySupplierData} />
-            </Suspense>
+            {/* Main Analytics Dashboard */}
+            <ErrorBoundary>
+                <AnalyticsContent />
+            </ErrorBoundary>
+            <ErrorBoundary>
+                <MaterialsBySupplierContent />
+            </ErrorBoundary>
         </div>
     )
 } 

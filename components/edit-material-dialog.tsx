@@ -1,186 +1,177 @@
-'use client'
+"use client"
 
-import { useEffect, useState } from 'react'
-import { useActionState } from 'react'
-import { Button } from '@/components/ui/button'
-import {
-    Dialog, DialogClose, DialogContent,
-    DialogDescription, DialogFooter,
-    DialogHeader, DialogTitle, DialogTrigger,
-} from '@/components/ui/dialog'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Textarea } from '@/components/ui/textarea'
-import { getMaterialById, updateMaterial, type MaterialFormState } from '@/lib/actions/materiales'
-import { useToast } from '@/hooks/use-toast'
-import type { Material } from '@/generated/prisma' // Corrected Prisma type import path again
-import { Loader2 } from 'lucide-react'
+import { useState, useEffect } from "react"
+import { useActionState } from "react"
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Textarea } from "@/components/ui/textarea"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { updateMaterial, type MaterialFormState } from "@/lib/actions/materiales"
+import { useMaterial } from "@/hooks/use-analytics"
+import { useToast } from "@/hooks/use-toast"
+import type { Material } from "@/generated/prisma"
 
 interface EditMaterialDialogProps {
     materialId: string
-    children: React.ReactNode // Trigger element
+    children: React.ReactNode
 }
 
 const initialState: MaterialFormState = { message: '', errors: {} }
 
 export function EditMaterialDialog({ materialId, children }: EditMaterialDialogProps) {
     const [isOpen, setIsOpen] = useState(false)
-    const [materialData, setMaterialData] = useState<Material | null>(null)
-    const [isLoading, setIsLoading] = useState(false)
-    const [errorLoading, setErrorLoading] = useState<string | null>(null)
     const { toast } = useToast()
-
     const [state, formAction, isPending] = useActionState(updateMaterial, initialState)
 
-    // Fetch material data when dialog opens
-    useEffect(() => {
-        if (isOpen && materialId && !materialData) {
-            setIsLoading(true)
-            setErrorLoading(null)
-            getMaterialById(materialId)
-                .then(data => {
-                    if (data.material) {
-                        setMaterialData(data.material)
-                    } else {
-                        setErrorLoading(data.error || 'No se pudo cargar el material.')
-                        toast({ title: 'Error', description: data.error || 'No se pudo cargar el material.', variant: 'destructive' })
-                        // Optionally close dialog if material not found
-                        // setIsOpen(false)
-                    }
-                })
-                .catch(err => {
-                    console.error("Fetch error:", err)
-                    setErrorLoading('Error al buscar el material.')
-                    toast({ title: 'Error', description: 'Error al buscar el material.', variant: 'destructive' })
-                })
-                .finally(() => setIsLoading(false))
-        }
-        // Reset material data when dialog closes
-        if (!isOpen) {
-            setMaterialData(null)
-            // Reset action state? Usually handled by form reset or re-render
-        }
-    }, [isOpen, materialId, materialData, toast])
+    // Use TanStack Query to fetch material data
+    const {
+        data: materialData,
+        isLoading,
+        error
+    } = useMaterial(isOpen ? materialId : null)
 
-    // Show toast based on form submission state
+    // Handle form submission success
     useEffect(() => {
-        if (state.message && !state.errors?.code && !state.errors?.name && !state.errors?.description && !state.errors?.referenceCode) {
-            // Success message
+        if (state.message && !state.errors) {
             toast({ title: 'Éxito', description: state.message })
-            setIsOpen(false) // Close dialog on success
-        } else if (state.message && (state.errors?.code || state.errors?.name || state.errors?.description || state.errors?.referenceCode)) {
-            // Validation or other error message
-            toast({ title: 'Error de Validación', description: state.message, variant: 'destructive' })
+            setIsOpen(false)
         }
-    }, [state, toast])
+    }, [state.message, state.errors, toast])
+
+    // Handle errors
+    useEffect(() => {
+        if (error) {
+            toast({
+                title: 'Error',
+                description: error.message || 'No se pudo cargar el material.',
+                variant: 'destructive'
+            })
+        }
+    }, [error, toast])
 
     return (
         <Dialog open={isOpen} onOpenChange={setIsOpen}>
-            <DialogTrigger asChild>{children}</DialogTrigger>
-            <DialogContent className="sm:max-w-[425px]">
+            <DialogTrigger asChild>
+                {children}
+            </DialogTrigger>
+            <DialogContent className="sm:max-w-md">
                 <DialogHeader>
                     <DialogTitle>Editar Material</DialogTitle>
-                    <DialogDescription>
-                        Modifica los detalles del material. Haz clic en guardar cuando termines.
-                    </DialogDescription>
                 </DialogHeader>
-                {isLoading && (
-                    <div className="flex items-center justify-center p-8">
-                        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-                        <span className="ml-2">Cargando datos...</span>
-                    </div>
-                )}
-                {errorLoading && !isLoading && (
-                    <p className="text-center text-destructive p-4">{errorLoading}</p>
-                )}
-                {!isLoading && !errorLoading && materialData && (
-                    <form action={formAction}>
-                        <input type="hidden" name="id" value={materialData.id} />
-                        <div className="grid gap-4 py-4">
-                            <div className="grid grid-cols-4 items-center gap-4">
-                                <Label htmlFor="code" className="text-right">
-                                    Código
-                                </Label>
-                                <Input
-                                    id="code"
-                                    name="code"
-                                    defaultValue={materialData.code}
-                                    className="col-span-3"
-                                    aria-describedby="code-error"
-                                    required
-                                />
-                                {state.errors?.code && (
-                                    <p id="code-error" className="col-span-4 text-sm text-destructive text-right">
-                                        {state.errors.code.join(', ')}
-                                    </p>
-                                )}
-                            </div>
-                            <div className="grid grid-cols-4 items-center gap-4">
-                                <Label htmlFor="name" className="text-right">
-                                    Nombre
-                                </Label>
+                <div className="py-4">
+                    {isLoading && (
+                        <div className="space-y-4">
+                            <div className="h-4 bg-muted animate-pulse rounded"></div>
+                            <div className="h-4 bg-muted animate-pulse rounded"></div>
+                            <div className="h-4 bg-muted animate-pulse rounded"></div>
+                        </div>
+                    )}
+
+                    {error && (
+                        <div className="text-center py-4 text-muted-foreground">
+                            <p>Error al cargar el material</p>
+                            <p className="text-sm">{error.message}</p>
+                        </div>
+                    )}
+
+                    {materialData && (
+                        <form action={formAction} className="space-y-4">
+                            <input type="hidden" name="id" value={materialData.id} />
+
+                            <div>
+                                <Label htmlFor="name">Nombre *</Label>
                                 <Input
                                     id="name"
                                     name="name"
                                     defaultValue={materialData.name}
-                                    className="col-span-3"
-                                    aria-describedby="name-error"
+                                    placeholder="Nombre del material"
                                     required
                                 />
                                 {state.errors?.name && (
-                                    <p id="name-error" className="col-span-4 text-sm text-destructive text-right">
-                                        {state.errors.name.join(', ')}
-                                    </p>
+                                    <p className="text-sm text-destructive mt-1">{state.errors.name}</p>
                                 )}
                             </div>
-                            <div className="grid grid-cols-4 items-center gap-4">
-                                <Label htmlFor="referenceCode" className="text-right">
-                                    Ref. Proveedor
-                                </Label>
+
+                            <div>
+                                <Label htmlFor="code">Código</Label>
                                 <Input
-                                    id="referenceCode"
-                                    name="referenceCode"
-                                    defaultValue={materialData.referenceCode || ''}
-                                    className="col-span-3"
-                                    aria-describedby="referenceCode-error"
+                                    id="code"
+                                    name="code"
+                                    defaultValue={materialData.code}
+                                    placeholder="Código del material"
                                 />
-                                {state.errors?.referenceCode && (
-                                    <p id="referenceCode-error" className="col-span-4 text-sm text-destructive text-right">
-                                        {state.errors.referenceCode.join(', ')}
-                                    </p>
+                                {state.errors?.code && (
+                                    <p className="text-sm text-destructive mt-1">{state.errors.code}</p>
                                 )}
                             </div>
-                            <div className="grid grid-cols-4 items-center gap-4">
-                                <Label htmlFor="description" className="text-right">
-                                    Descripción
-                                </Label>
+
+                            <div>
+                                <Label htmlFor="category">Categoría</Label>
+                                <Input
+                                    id="category"
+                                    name="category"
+                                    defaultValue={materialData.category || ''}
+                                    placeholder="Categoría del material"
+                                />
+                            </div>
+
+                            <div>
+                                <Label htmlFor="unit">Unidad</Label>
+                                <Select name="unit" defaultValue={materialData.unit || ''}>
+                                    <SelectTrigger>
+                                        <SelectValue placeholder="Selecciona una unidad" />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        <SelectItem value="kg">Kilogramo (kg)</SelectItem>
+                                        <SelectItem value="g">Gramo (g)</SelectItem>
+                                        <SelectItem value="l">Litro (l)</SelectItem>
+                                        <SelectItem value="ml">Mililitro (ml)</SelectItem>
+                                        <SelectItem value="m">Metro (m)</SelectItem>
+                                        <SelectItem value="cm">Centímetro (cm)</SelectItem>
+                                        <SelectItem value="mm">Milímetro (mm)</SelectItem>
+                                        <SelectItem value="m2">Metro cuadrado (m²)</SelectItem>
+                                        <SelectItem value="m3">Metro cúbico (m³)</SelectItem>
+                                        <SelectItem value="pcs">Piezas (pcs)</SelectItem>
+                                        <SelectItem value="ud">Unidades (ud)</SelectItem>
+                                        <SelectItem value="pack">Paquete (pack)</SelectItem>
+                                        <SelectItem value="caja">Caja</SelectItem>
+                                        <SelectItem value="saco">Saco</SelectItem>
+                                        <SelectItem value="bidón">Bidón</SelectItem>
+                                    </SelectContent>
+                                </Select>
+                            </div>
+
+                            <div>
+                                <Label htmlFor="description">Descripción</Label>
                                 <Textarea
                                     id="description"
                                     name="description"
                                     defaultValue={materialData.description || ''}
-                                    className="col-span-3"
+                                    placeholder="Descripción del material"
                                     rows={3}
-                                    aria-describedby="description-error"
                                 />
                                 {state.errors?.description && (
-                                    <p id="description-error" className="col-span-4 text-sm text-destructive text-right">
-                                        {state.errors.description.join(', ')}
-                                    </p>
+                                    <p className="text-sm text-destructive mt-1">{state.errors.description}</p>
                                 )}
                             </div>
-                        </div>
-                        <DialogFooter>
-                            <DialogClose asChild>
-                                <Button type="button" variant="secondary" disabled={isPending}>
+
+                            {state.message && state.errors && (
+                                <div className="text-sm text-destructive">{state.message}</div>
+                            )}
+
+                            <div className="flex justify-end space-x-2">
+                                <Button type="button" variant="outline" onClick={() => setIsOpen(false)}>
                                     Cancelar
                                 </Button>
-                            </DialogClose>
-                            <Button type="submit" disabled={isPending}>
-                                {isPending ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Guardando...</> : 'Guardar Cambios'}
-                            </Button>
-                        </DialogFooter>
-                    </form>
-                )}
+                                <Button type="submit" disabled={isPending}>
+                                    {isPending ? 'Guardando...' : 'Guardar'}
+                                </Button>
+                            </div>
+                        </form>
+                    )}
+                </div>
             </DialogContent>
         </Dialog>
     )

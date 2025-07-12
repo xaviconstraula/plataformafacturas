@@ -4,8 +4,7 @@ import { AlertTriangleIcon } from "lucide-react"
 import Link from "next/link"
 import { Badge } from "@/components/ui/badge"
 import { formatCurrency, formatPercentage } from "@/lib/utils"
-import { getPendingPriceAlerts } from "@/lib/actions/dashboard"
-import { useEffect, useState } from "react"
+import { usePriceAlerts } from "@/hooks/use-analytics"
 
 interface PriceAlert {
   id: string
@@ -20,22 +19,7 @@ interface PriceAlert {
 }
 
 export function PriceAlerts() {
-  const [alerts, setAlerts] = useState<PriceAlert[]>([])
-  const [isLoading, setIsLoading] = useState(true)
-
-  useEffect(() => {
-    async function fetchAlerts() {
-      try {
-        const pendingAlerts = await getPendingPriceAlerts()
-        setAlerts(pendingAlerts)
-      } catch (error) {
-        console.error('Error fetching price alerts:', error)
-      } finally {
-        setIsLoading(false)
-      }
-    }
-    fetchAlerts()
-  }, [])
+  const { data: alerts = [], isLoading, error } = usePriceAlerts()
 
   if (isLoading) {
     return <div className="space-y-4">
@@ -43,6 +27,16 @@ export function PriceAlerts() {
         <div key={i} className="h-24 rounded-lg bg-muted animate-pulse" />
       ))}
     </div>
+  }
+
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center h-[350px] text-muted-foreground">
+        <AlertTriangleIcon className="h-12 w-12 mb-4 opacity-50" />
+        <p className="text-lg font-medium">Error al cargar las alertas</p>
+        <p className="text-sm">Por favor, intenta de nuevo más tarde</p>
+      </div>
+    )
   }
 
   if (alerts.length === 0) {

@@ -1,5 +1,6 @@
 import Sidebar from "@/components/sidebar"
-import { getUser } from "@/lib/user";
+import { BatchProgressBanner } from "@/components/batch-progress-banner"
+import { getUser } from "@/lib/user"
 import type { ReactNode } from "react"
 
 export default async function DashboardLayout({
@@ -7,12 +8,17 @@ export default async function DashboardLayout({
 }: Readonly<{
     children: ReactNode
 }>) {
+    await getUser()
 
-    await getUser();
     return (
         <div className="flex min-h-screen h-screen">
             <Sidebar />
-            <main className="flex-1 overflow-y-auto p-6 bg-background">{children}</main>
+            <main className="flex-1 overflow-y-auto p-6 bg-background">
+                <BatchProgressBanner />
+                <div className="max-w-7xl mx-auto">
+                    {children}
+                </div>
+            </main>
         </div>
     )
 }
