@@ -906,11 +906,31 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
     const isMaterialsListExport = filters.exportType === 'materials-list';
     const isSuppliersListExport = filters.exportType === 'suppliers-list';
 
-    // If this is a work orders list export, create work orders summary
+    // If this is a work orders list export, create work orders summary and detailed sheets
     if (isWorkOrdersListExport) {
-        const workOrdersData = await exportWorkOrdersListSummary(filters);
-        if (workOrdersData.length > 0) {
-            const workOrdersSheet = createStyledWorksheet(workOrdersData, [
+        // First sheet: Summary by work order (one row per work order)
+        const workOrdersSummary = await exportWorkOrdersListSummary(filters);
+        if (workOrdersSummary.length > 0) {
+            const summarySheet = createStyledWorksheet(workOrdersSummary, [
+                { wch: 20 }, // Orden de Trabajo
+                { wch: 18 }, // Coste Total (c/IVA)
+                { wch: 18 }, // Coste Base Imponible
+                { wch: 15 }, // IVA (21%)
+                { wch: 12 }, // Total Items
+                { wch: 15 }, // Cantidad Total
+                { wch: 15 }, // Nº Proveedores
+                { wch: 15 }, // Nº Materiales
+                { wch: 12 }, // Fecha Inicio
+                { wch: 12 }, // Fecha Fin
+                { wch: 15 }  // Periodo (días)
+            ]);
+            XLSX.utils.book_append_sheet(workbook, summarySheet, 'Resumen por OT');
+        }
+
+        // Second sheet: Detailed breakdown (each material purchase gets its own row)
+        const workOrdersDetailed = await exportWorkOrdersListDetailed(filters);
+        if (workOrdersDetailed.length > 0) {
+            const detailedSheet = createStyledWorksheet(workOrdersDetailed, [
                 { wch: 20 }, // Código OT
                 { wch: 25 }, // Proveedor
                 { wch: 15 }, // CIF Proveedor
@@ -925,7 +945,7 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
                 { wch: 15 }, // Nº Factura
                 { wch: 12 }  // Fecha Factura
             ]);
-            XLSX.utils.book_append_sheet(workbook, workOrdersSheet, 'Análisis Materiales OT');
+            XLSX.utils.book_append_sheet(workbook, detailedSheet, 'Detalle por Material');
         }
     }
     // If this is a materials list export, create materials detailed analysis
@@ -1267,6 +1287,111 @@ export interface WorkOrderDetailedExport {
 }
 
 export async function exportWorkOrdersListSummary(filters: ExportFilters = {}) {
+    // Build where clause exactly like the work orders page
+    const normalizedSearch = normalizeSearch(filters.workOrder);
+
+    const baseWhere: Prisma.InvoiceItemWhereInput = {
+        workOrder: {
+            not: null,
+            ...(normalizedSearch && { contains: normalizedSearch, mode: Prisma.QueryMode.insensitive })
+        },
+        ...(filters.supplierId && filters.supplierId !== 'all' && {
+            invoice: {
+                providerId: filters.supplierId
+            }
+        })
+    };
+
+    // First, get work order aggregations for summary
+    const workOrderAggregation = await prisma.invoiceItem.groupBy({
+        by: ['workOrder'],
+        where: baseWhere,
+        _sum: {
+            totalPrice: true,
+            quantity: true
+        },
+        _count: {
+            id: true
+        },
+        _min: {
+            itemDate: true
+        },
+        _max: {
+            itemDate: true
+        },
+        orderBy: {
+            _sum: { totalPrice: 'desc' }
+        }
+    });
+
+    if (workOrderAggregation.length === 0) {
+        return [];
+    }
+
+    // Get work order codes
+    const workOrderCodes = workOrderAggregation.map(wo => wo.workOrder!).filter(Boolean);
+
+    // Get all items for these work orders to calculate additional stats
+    const allItems = await prisma.invoiceItem.findMany({
+        where: {
+            ...baseWhere,
+            workOrder: { in: workOrderCodes }
+        },
+        include: {
+            material: true,
+            invoice: {
+                include: {
+                    provider: true
+                }
+            }
+        }
+    });
+
+    // Group items by work order for detailed calculations
+    const itemsByWorkOrder = new Map<string, typeof allItems>();
+    for (const item of allItems) {
+        const workOrder = item.workOrder!;
+        if (!itemsByWorkOrder.has(workOrder)) {
+            itemsByWorkOrder.set(workOrder, []);
+        }
+        itemsByWorkOrder.get(workOrder)!.push(item);
+    }
+
+    // Build summary export data - one row per work order
+    const exportData: WorkOrderSummaryExport[] = workOrderAggregation.map(wo => {
+        const workOrderCode = wo.workOrder!;
+        const items = itemsByWorkOrder.get(workOrderCode) || [];
+        
+        const totalCostBase = wo._sum?.totalPrice?.toNumber() || 0;
+        const totalCostWithIva = totalCostBase * 1.21;
+        const iva = totalCostBase * 0.21;
+        
+        const uniqueProviders = [...new Set(items.map(item => item.invoice.provider.id))];
+        const uniqueMaterials = [...new Set(items.map(item => item.material.id))];
+        
+        const minDate = wo._min?.itemDate || new Date();
+        const maxDate = wo._max?.itemDate || new Date();
+        const periodDays = Math.ceil((maxDate.getTime() - minDate.getTime()) / (1000 * 60 * 60 * 24));
+
+        return {
+            'Orden de Trabajo': workOrderCode,
+            'Coste Total (c/IVA)': totalCostWithIva,
+            'Coste Base Imponible': totalCostBase,
+            'IVA (21%)': iva,
+            'Total Items': wo._count?.id || 0,
+            'Cantidad Total': wo._sum?.quantity?.toNumber() || 0,
+            'Nº Proveedores': uniqueProviders.length,
+            'Nº Materiales': uniqueMaterials.length,
+            'Fecha Inicio': minDate.toLocaleDateString('es-ES'),
+            'Fecha Fin': maxDate.toLocaleDateString('es-ES'),
+            'Periodo (días)': periodDays
+        };
+    });
+
+    return exportData;
+}
+
+export async function exportWorkOrdersListDetailed(filters: ExportFilters = {}) {
     // Build where clause exactly like the work orders page
     const normalizedSearch = normalizeSearch(filters.workOrder);
 
