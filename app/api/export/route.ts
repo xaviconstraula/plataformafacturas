@@ -53,6 +53,7 @@ export async function POST(request: NextRequest) {
             maxTotalCost: body.maxTotalCost ? Number(body.maxTotalCost) : undefined,
             minQuantity: body.minQuantity ? Number(body.minQuantity) : undefined,
             maxQuantity: body.maxQuantity ? Number(body.maxQuantity) : undefined,
+            exportType: body.exportType,
         };
 
         const includeDetails = body.includeDetails !== false; // Default to true
@@ -64,7 +65,16 @@ export async function POST(request: NextRequest) {
         const dateStr = now.toISOString().split('T')[0];
         let filename = `facturas_reporte_${dateStr}.xlsx`;
 
-        if (filters.workOrder) {
+        if (filters.exportType === 'workorders-list') {
+            filename = `ordenes_trabajo_${dateStr}.xlsx`;
+            if (filters.supplierId) {
+                filename = `ordenes_trabajo_proveedor_${dateStr}.xlsx`;
+            }
+        } else if (filters.exportType === 'materials-list') {
+            filename = `materiales_detallado_${dateStr}.xlsx`;
+        } else if (filters.exportType === 'suppliers-list') {
+            filename = `proveedores_detallado_${dateStr}.xlsx`;
+        } else if (filters.workOrder && filters.workOrder.match(/^[A-Za-z0-9-_]+$/)) {
             const sanitizedWorkOrder = filters.workOrder.replace(/[^a-zA-Z0-9-_]/g, '_');
             filename = `OT_${sanitizedWorkOrder}_${dateStr}.xlsx`;
         }

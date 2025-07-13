@@ -72,6 +72,8 @@ export interface ExportFilters {
     maxTotalCost?: number;
     minQuantity?: number;
     maxQuantity?: number;
+    // Export type indicator
+    exportType?: 'workorders-list' | 'materials-list' | 'suppliers-list' | 'specific-workorder' | 'general';
 }
 
 export interface InvoiceItemExport {
@@ -291,6 +293,88 @@ export async function exportDetailedInvoiceData(filters: ExportFilters = {}) {
     return exportData;
 }
 
+// Interface for detailed material analysis
+export interface MaterialDetailedExport {
+    'Material': string;
+    'Código Material': string;
+    'Proveedor': string;
+    'CIF Proveedor': string;
+    'Tipo Proveedor': string;
+    'OT/CECO': string;
+    'Cantidad': number;
+    'Precio Unitario': string;
+    'Total Material (s/IVA)': string;
+    'Total Material (c/IVA)': string;
+    'Fecha Item': string;
+    'Nº Factura': string;
+    'Fecha Factura': string;
+}
+
+// New detailed materials export function
+export async function exportMaterialsListDetailed(filters: ExportFilters = {}) {
+    const where: Prisma.InvoiceItemWhereInput = buildWhereClause(filters);
+
+    const items = await prisma.invoiceItem.findMany({
+        where,
+        include: {
+            material: true,
+            invoice: {
+                include: {
+                    provider: true
+                }
+            }
+        },
+        orderBy: [
+            { material: { name: 'asc' } },
+            { invoice: { provider: { name: 'asc' } } },
+            { itemDate: 'desc' }
+        ]
+    });
+
+    if (items.length === 0) {
+        return [];
+    }
+
+    // Build detailed export data - each material purchase gets its own row
+    const exportData: MaterialDetailedExport[] = items.map(item => {
+        const basePrice = item.totalPrice.toNumber();
+        const priceWithIva = basePrice * 1.21;
+
+        return {
+            'Material': item.material.name,
+            'Código Material': item.material.code,
+            'Proveedor': item.invoice.provider.name,
+            'CIF Proveedor': item.invoice.provider.cif,
+            'Tipo Proveedor': item.invoice.provider.type === 'MATERIAL_SUPPLIER' ? 'Suministro Material' : 'Alquiler Maquinaria',
+            'OT/CECO': item.workOrder || '',
+            'Cantidad': item.quantity.toNumber(),
+            'Precio Unitario': item.unitPrice.toNumber().toLocaleString('es-ES', {
+                style: 'currency',
+                currency: 'EUR',
+                minimumFractionDigits: 4,
+                maximumFractionDigits: 4
+            }),
+            'Total Material (s/IVA)': basePrice.toLocaleString('es-ES', {
+                style: 'currency',
+                currency: 'EUR',
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2
+            }),
+            'Total Material (c/IVA)': priceWithIva.toLocaleString('es-ES', {
+                style: 'currency',
+                currency: 'EUR',
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2
+            }),
+            'Fecha Item': item.itemDate.toLocaleDateString('es-ES'),
+            'Nº Factura': item.invoice.invoiceCode,
+            'Fecha Factura': item.invoice.issueDate.toLocaleDateString('es-ES')
+        };
+    });
+
+    return exportData;
+}
+
 export async function exportMaterialSummary(filters: ExportFilters = {}) {
     const where: Prisma.InvoiceItemWhereInput = buildWhereClause(filters);
 
@@ -347,6 +431,124 @@ export async function exportMaterialSummary(filters: ExportFilters = {}) {
     }
 
     return exportData.sort((a, b) => b['Coste Total'] - a['Coste Total']);
+}
+
+// Interface for detailed supplier analysis
+export interface SupplierDetailedExport {
+    'Proveedor': string;
+    'CIF Proveedor': string;
+    'Tipo Proveedor': string;
+    'Material': string;
+    'Código Material': string;
+    'OT/CECO': string;
+    'Cantidad': number;
+    'Precio Unitario': string;
+    'Total Material (s/IVA)': string;
+    'Total Material (c/IVA)': string;
+    'Fecha Item': string;
+    'Nº Factura': string;
+    'Fecha Factura': string;
+}
+
+// New detailed suppliers export function
+export async function exportSuppliersListDetailed(filters: ExportFilters = {}) {
+    // Normalize search parameters
+    const normalizedSupplierCif = normalizeSearch(filters.supplierCif);
+
+    const where: Prisma.InvoiceItemWhereInput = {
+        ...(filters.supplierId ? { invoice: { providerId: filters.supplierId } } : {}),
+        ...(normalizedSupplierCif ? { invoice: { provider: { cif: { contains: normalizedSupplierCif, mode: 'insensitive' } } } } : {}),
+        ...(filters.startDate || filters.endDate ? {
+            invoice: {
+                issueDate: {
+                    ...(filters.startDate ? { gte: filters.startDate } : {}),
+                    ...(filters.endDate ? { lte: filters.endDate } : {})
+                }
+            }
+        } : {}),
+        ...(filters.fiscalYear ? {
+            invoice: {
+                issueDate: {
+                    gte: new Date(filters.fiscalYear, 3, 1),
+                    lt: new Date(filters.fiscalYear + 1, 3, 1)
+                }
+            }
+        } : {}),
+        ...(filters.naturalYear ? {
+            invoice: {
+                issueDate: {
+                    gte: new Date(filters.naturalYear, 0, 1),
+                    lt: new Date(filters.naturalYear + 1, 0, 1)
+                }
+            }
+        } : {}),
+        ...(filters.workOrder || filters.materialId || filters.category || filters.materialSearch ? {
+            ...(processWorkOrderSearch(filters.workOrder) ? { workOrder: { contains: processWorkOrderSearch(filters.workOrder), mode: 'insensitive' } } : {}),
+            ...(filters.materialId ? { materialId: filters.materialId } : {}),
+            ...(normalizeSearch(filters.category) ? { material: { category: { contains: normalizeSearch(filters.category), mode: 'insensitive' } } } : {}),
+            ...(normalizeSearch(filters.materialSearch) ? { material: { name: { contains: normalizeSearch(filters.materialSearch), mode: 'insensitive' } } } : {})
+        } : {})
+    };
+
+    const items = await prisma.invoiceItem.findMany({
+        where,
+        include: {
+            material: true,
+            invoice: {
+                include: {
+                    provider: true
+                }
+            }
+        },
+        orderBy: [
+            { invoice: { provider: { name: 'asc' } } },
+            { material: { name: 'asc' } },
+            { itemDate: 'desc' }
+        ]
+    });
+
+    if (items.length === 0) {
+        return [];
+    }
+
+    // Build detailed export data - each supplier purchase gets its own row
+    const exportData: SupplierDetailedExport[] = items.map(item => {
+        const basePrice = item.totalPrice.toNumber();
+        const priceWithIva = basePrice * 1.21;
+
+        return {
+            'Proveedor': item.invoice.provider.name,
+            'CIF Proveedor': item.invoice.provider.cif,
+            'Tipo Proveedor': item.invoice.provider.type === 'MATERIAL_SUPPLIER' ? 'Suministro Material' : 'Alquiler Maquinaria',
+            'Material': item.material.name,
+            'Código Material': item.material.code,
+            'OT/CECO': item.workOrder || '',
+            'Cantidad': item.quantity.toNumber(),
+            'Precio Unitario': item.unitPrice.toNumber().toLocaleString('es-ES', {
+                style: 'currency',
+                currency: 'EUR',
+                minimumFractionDigits: 4,
+                maximumFractionDigits: 4
+            }),
+            'Total Material (s/IVA)': basePrice.toLocaleString('es-ES', {
+                style: 'currency',
+                currency: 'EUR',
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2
+            }),
+            'Total Material (c/IVA)': priceWithIva.toLocaleString('es-ES', {
+                style: 'currency',
+                currency: 'EUR',
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2
+            }),
+            'Fecha Item': item.itemDate.toLocaleDateString('es-ES'),
+            'Nº Factura': item.invoice.invoiceCode,
+            'Fecha Factura': item.invoice.issueDate.toLocaleDateString('es-ES')
+        };
+    });
+
+    return exportData;
 }
 
 export async function exportSupplierSummary(filters: ExportFilters = {}) {
@@ -699,8 +901,79 @@ export async function exportMaterialDetail(filters: ExportFilters = {}) {
 export async function generateExcelReport(filters: ExportFilters = {}, includeDetails = true) {
     const workbook = XLSX.utils.book_new();
 
+    // Check if this is a specific list export from dedicated pages
+    const isWorkOrdersListExport = filters.exportType === 'workorders-list';
+    const isMaterialsListExport = filters.exportType === 'materials-list';
+    const isSuppliersListExport = filters.exportType === 'suppliers-list';
+
+    // If this is a work orders list export, create work orders summary
+    if (isWorkOrdersListExport) {
+        const workOrdersData = await exportWorkOrdersListSummary(filters);
+        if (workOrdersData.length > 0) {
+            const workOrdersSheet = createStyledWorksheet(workOrdersData, [
+                { wch: 20 }, // Código OT
+                { wch: 25 }, // Proveedor
+                { wch: 15 }, // CIF Proveedor
+                { wch: 18 }, // Tipo Proveedor
+                { wch: 35 }, // Material
+                { wch: 15 }, // Código Material
+                { wch: 12 }, // Cantidad
+                { wch: 15 }, // Precio Unitario
+                { wch: 18 }, // Total Material (s/IVA)
+                { wch: 18 }, // Total Material (c/IVA)
+                { wch: 12 }, // Fecha Item
+                { wch: 15 }, // Nº Factura
+                { wch: 12 }  // Fecha Factura
+            ]);
+            XLSX.utils.book_append_sheet(workbook, workOrdersSheet, 'Análisis Materiales OT');
+        }
+    }
+    // If this is a materials list export, create materials detailed analysis
+    else if (isMaterialsListExport) {
+        const materialsData = await exportMaterialsListDetailed(filters);
+        if (materialsData.length > 0) {
+            const materialsSheet = createStyledWorksheet(materialsData, [
+                { wch: 35 }, // Material
+                { wch: 15 }, // Código Material
+                { wch: 25 }, // Proveedor
+                { wch: 15 }, // CIF Proveedor
+                { wch: 18 }, // Tipo Proveedor
+                { wch: 15 }, // OT/CECO
+                { wch: 12 }, // Cantidad
+                { wch: 15 }, // Precio Unitario
+                { wch: 18 }, // Total Material (s/IVA)
+                { wch: 18 }, // Total Material (c/IVA)
+                { wch: 12 }, // Fecha Item
+                { wch: 15 }, // Nº Factura
+                { wch: 12 }  // Fecha Factura
+            ]);
+            XLSX.utils.book_append_sheet(workbook, materialsSheet, 'Análisis Detallado Materiales');
+        }
+    }
+    // If this is a suppliers list export, create suppliers detailed analysis
+    else if (isSuppliersListExport) {
+        const suppliersData = await exportSuppliersListDetailed(filters);
+        if (suppliersData.length > 0) {
+            const suppliersSheet = createStyledWorksheet(suppliersData, [
+                { wch: 25 }, // Proveedor
+                { wch: 15 }, // CIF Proveedor
+                { wch: 18 }, // Tipo Proveedor
+                { wch: 35 }, // Material
+                { wch: 15 }, // Código Material
+                { wch: 15 }, // OT/CECO
+                { wch: 12 }, // Cantidad
+                { wch: 15 }, // Precio Unitario
+                { wch: 18 }, // Total Material (s/IVA)
+                { wch: 18 }, // Total Material (c/IVA)
+                { wch: 12 }, // Fecha Item
+                { wch: 15 }, // Nº Factura
+                { wch: 12 }  // Fecha Factura
+            ]);
+            XLSX.utils.book_append_sheet(workbook, suppliersSheet, 'Análisis Detallado Proveedores');
+        }
+    }
     // If this is a work order specific export, create comprehensive work order sheets
-    if (filters.workOrder) {
+    else if (filters.workOrder && filters.workOrder.match(/^[A-Za-z0-9-_]+$/)) {
         const workOrder = filters.workOrder;
 
         // 1. Analysis by Provider Sheet (with detailed items)
@@ -815,96 +1088,90 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
         const isMaterialFocused = filters.materialId || filters.category || filters.materialSearch;
 
         if (isSupplierFocused) {
-            // Comprehensive supplier export
-
-            // 1. Detailed Supplier Analysis
-            const supplierDetailData = await exportSupplierDetail(filters);
+            // Enhanced supplier export with detailed analysis
+            const supplierDetailData = await exportSuppliersListDetailed(filters);
             if (supplierDetailData.length > 0) {
                 const supplierDetailSheet = createStyledWorksheet(supplierDetailData, [
                     { wch: 25 }, // Proveedor
-                    { wch: 15 }, // CIF
-                    { wch: 18 }, // Tipo
-                    { wch: 15 }, // --- RESUMEN ---
-                    { wch: 15 }, // Gasto Total (c/IVA)
-                    { wch: 15 }, // Gasto Base
-                    { wch: 12 }, // IVA
-                    { wch: 12 }, // Nº Facturas
-                    { wch: 12 }, // Nº Items
-                    { wch: 12 }, // Nº Materiales
-                    { wch: 12 }, // Nº OTs
-                    { wch: 15 }, // Promedio Factura
-                    { wch: 15 }, // Última Factura
-                    { wch: 18 }, // --- DETALLE ITEMS ---
-                    { wch: 12 }, // Fecha Item
-                    { wch: 30 }, // Material
+                    { wch: 15 }, // CIF Proveedor
+                    { wch: 18 }, // Tipo Proveedor
+                    { wch: 35 }, // Material
                     { wch: 15 }, // Código Material
                     { wch: 15 }, // OT/CECO
                     { wch: 12 }, // Cantidad
                     { wch: 15 }, // Precio Unitario
-                    { wch: 15 }, // Total Item (c/IVA)
-                    { wch: 15 }  // Nº Factura
+                    { wch: 18 }, // Total Material (s/IVA)
+                    { wch: 18 }, // Total Material (c/IVA)
+                    { wch: 12 }, // Fecha Item
+                    { wch: 15 }, // Nº Factura
+                    { wch: 12 }  // Fecha Factura
                 ]);
-                XLSX.utils.book_append_sheet(workbook, supplierDetailSheet, 'Análisis Detallado');
-            }
-
-            // 2. Supplier Summary
-            const supplierData = await exportSupplierSummary(filters);
-            if (supplierData.length > 0) {
-                const supplierSheet = createStyledWorksheet(supplierData);
-                XLSX.utils.book_append_sheet(workbook, supplierSheet, 'Resumen Proveedores');
+                XLSX.utils.book_append_sheet(workbook, supplierDetailSheet, 'Análisis Detallado Proveedores');
             }
         } else if (isMaterialFocused) {
-            // Comprehensive material export
-
-            // 1. Detailed Material Analysis
-            const materialDetailData = await exportMaterialDetail(filters);
+            // Enhanced material export with detailed analysis
+            const materialDetailData = await exportMaterialsListDetailed(filters);
             if (materialDetailData.length > 0) {
                 const materialDetailSheet = createStyledWorksheet(materialDetailData, [
-                    { wch: 30 }, // Material
+                    { wch: 35 }, // Material
                     { wch: 15 }, // Código Material
-                    { wch: 15 }, // Categoría
-                    { wch: 15 }, // --- RESUMEN ---
-                    { wch: 15 }, // Coste Total (c/IVA)
-                    { wch: 15 }, // Coste Base
-                    { wch: 12 }, // IVA
-                    { wch: 15 }, // Cantidad Total
-                    { wch: 15 }, // Precio Promedio
-                    { wch: 12 }, // Nº Proveedores
-                    { wch: 12 }, // Nº Items
-                    { wch: 12 }, // Nº OTs
-                    { wch: 15 }, // Última Compra
-                    { wch: 18 }, // --- DETALLE ITEMS ---
-                    { wch: 12 }, // Fecha Item
                     { wch: 25 }, // Proveedor
-                    { wch: 12 }, // Cantidad Item
+                    { wch: 15 }, // CIF Proveedor
+                    { wch: 18 }, // Tipo Proveedor
+                    { wch: 15 }, // OT/CECO
+                    { wch: 12 }, // Cantidad
                     { wch: 15 }, // Precio Unitario
-                    { wch: 15 }, // Total Item (c/IVA)
-                    { wch: 15 }  // Nº Factura
+                    { wch: 18 }, // Total Material (s/IVA)
+                    { wch: 18 }, // Total Material (c/IVA)
+                    { wch: 12 }, // Fecha Item
+                    { wch: 15 }, // Nº Factura
+                    { wch: 12 }  // Fecha Factura
                 ]);
-                XLSX.utils.book_append_sheet(workbook, materialDetailSheet, 'Análisis Detallado');
-            }
-
-            // 2. Material Summary
-            const materialData = await exportMaterialSummary(filters);
-            if (materialData.length > 0) {
-                const materialSheet = createStyledWorksheet(materialData);
-                XLSX.utils.book_append_sheet(workbook, materialSheet, 'Resumen Materiales');
+                XLSX.utils.book_append_sheet(workbook, materialDetailSheet, 'Análisis Detallado Materiales');
             }
         } else {
-            // General export with both summaries
+            // General export with both detailed analyses
 
-            // Add supplier summary sheet
-            const supplierData = await exportSupplierSummary(filters);
-            if (supplierData.length > 0) {
-                const supplierSheet = createStyledWorksheet(supplierData);
-                XLSX.utils.book_append_sheet(workbook, supplierSheet, 'Resumen Proveedores');
+            // Add detailed supplier analysis
+            const supplierDetailData = await exportSuppliersListDetailed(filters);
+            if (supplierDetailData.length > 0) {
+                const supplierDetailSheet = createStyledWorksheet(supplierDetailData, [
+                    { wch: 25 }, // Proveedor
+                    { wch: 15 }, // CIF Proveedor
+                    { wch: 18 }, // Tipo Proveedor
+                    { wch: 35 }, // Material
+                    { wch: 15 }, // Código Material
+                    { wch: 15 }, // OT/CECO
+                    { wch: 12 }, // Cantidad
+                    { wch: 15 }, // Precio Unitario
+                    { wch: 18 }, // Total Material (s/IVA)
+                    { wch: 18 }, // Total Material (c/IVA)
+                    { wch: 12 }, // Fecha Item
+                    { wch: 15 }, // Nº Factura
+                    { wch: 12 }  // Fecha Factura
+                ]);
+                XLSX.utils.book_append_sheet(workbook, supplierDetailSheet, 'Análisis Detallado Proveedores');
             }
 
-            // Add material summary sheet
-            const materialData = await exportMaterialSummary(filters);
-            if (materialData.length > 0) {
-                const materialSheet = createStyledWorksheet(materialData);
-                XLSX.utils.book_append_sheet(workbook, materialSheet, 'Resumen Materiales');
+            // Add detailed material analysis
+            const materialDetailData = await exportMaterialsListDetailed(filters);
+            if (materialDetailData.length > 0) {
+                const materialDetailSheet = createStyledWorksheet(materialDetailData, [
+                    { wch: 35 }, // Material
+                    { wch: 15 }, // Código Material
+                    { wch: 25 }, // Proveedor
+                    { wch: 15 }, // CIF Proveedor
+                    { wch: 18 }, // Tipo Proveedor
+                    { wch: 15 }, // OT/CECO
+                    { wch: 12 }, // Cantidad
+                    { wch: 15 }, // Precio Unitario
+                    { wch: 18 }, // Total Material (s/IVA)
+                    { wch: 18 }, // Total Material (c/IVA)
+                    { wch: 12 }, // Fecha Item
+                    { wch: 15 }, // Nº Factura
+                    { wch: 12 }  // Fecha Factura
+                ]);
+                XLSX.utils.book_append_sheet(workbook, materialDetailSheet, 'Análisis Detallado Materiales');
             }
         }
 
@@ -980,6 +1247,119 @@ function buildWhereClause(filters: ExportFilters): Prisma.InvoiceItemWhereInput 
             }
         } : {})
     };
+}
+
+// Interface for detailed work order analysis with material breakdown
+export interface WorkOrderDetailedExport {
+    'Código OT': string;
+    'Proveedor': string;
+    'CIF Proveedor': string;
+    'Tipo Proveedor': string;
+    'Material': string;
+    'Código Material': string;
+    'Cantidad': number;
+    'Precio Unitario': string;
+    'Total Material (s/IVA)': string;
+    'Total Material (c/IVA)': string;
+    'Fecha Item': string;
+    'Nº Factura': string;
+    'Fecha Factura': string;
+}
+
+export async function exportWorkOrdersListSummary(filters: ExportFilters = {}) {
+    // Build where clause exactly like the work orders page
+    const normalizedSearch = normalizeSearch(filters.workOrder);
+
+    const baseWhere: Prisma.InvoiceItemWhereInput = {
+        workOrder: {
+            not: null,
+            ...(normalizedSearch && { contains: normalizedSearch, mode: Prisma.QueryMode.insensitive })
+        },
+        ...(filters.supplierId && filters.supplierId !== 'all' && {
+            invoice: {
+                providerId: filters.supplierId
+            }
+        })
+    };
+
+    // Get ALL invoice items with full details for analysis
+    const allItems = await prisma.invoiceItem.findMany({
+        where: baseWhere,
+        include: {
+            material: {
+                select: {
+                    id: true,
+                    name: true,
+                    code: true,
+                    category: true
+                }
+            },
+            invoice: {
+                select: {
+                    id: true,
+                    invoiceCode: true,
+                    issueDate: true,
+                    provider: {
+                        select: {
+                            id: true,
+                            name: true,
+                            cif: true,
+                            type: true
+                        }
+                    }
+                }
+            }
+        },
+        orderBy: [
+            { workOrder: 'asc' },
+            { invoice: { provider: { name: 'asc' } } },
+            { material: { name: 'asc' } },
+            { itemDate: 'desc' }
+        ]
+    });
+
+    if (allItems.length === 0) {
+        return [];
+    }
+
+    // Build detailed export data - each material gets its own row
+    const exportData: WorkOrderDetailedExport[] = allItems.map(item => {
+        const basePrice = item.totalPrice.toNumber();
+        const priceWithIva = basePrice * 1.21;
+
+        return {
+            'Código OT': item.workOrder || '',
+            'Proveedor': item.invoice.provider.name,
+            'CIF Proveedor': item.invoice.provider.cif,
+            'Tipo Proveedor': item.invoice.provider.type === 'MATERIAL_SUPPLIER' ? 'Suministro Material' : 'Alquiler Maquinaria',
+            'Material': item.material.name,
+            'Código Material': item.material.code,
+            'Cantidad': item.quantity.toNumber(),
+            'Precio Unitario': item.unitPrice.toNumber().toLocaleString('es-ES', {
+                style: 'currency',
+                currency: 'EUR',
+                minimumFractionDigits: 4,
+                maximumFractionDigits: 4
+            }),
+            'Total Material (s/IVA)': basePrice.toLocaleString('es-ES', {
+                style: 'currency',
+                currency: 'EUR',
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2
+            }),
+            'Total Material (c/IVA)': priceWithIva.toLocaleString('es-ES', {
+                style: 'currency',
+                currency: 'EUR',
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2
+            }),
+            'Fecha Item': item.itemDate.toLocaleDateString('es-ES'),
+            'Nº Factura': item.invoice.invoiceCode,
+            'Fecha Factura': item.invoice.issueDate.toLocaleDateString('es-ES')
+        };
+    });
+
+    return exportData;
 }
 
 export async function exportWorkOrderSummary(workOrder: string) {

@@ -11,6 +11,7 @@ import { Prisma } from "@/generated/prisma"
 import { WorkOrderFilters } from "@/components/work-order-filters"
 import { HelpTooltip, helpContent } from "@/components/help-tooltip"
 import { Pagination } from "@/components/pagination"
+import { ExcelExportButton } from "@/components/excel-export-button"
 
 interface SearchParams {
     sortBy?: string
@@ -218,11 +219,24 @@ export default async function WorkOrdersPage({ searchParams }: PageProps) {
                         Análisis detallado de costes y materiales por OT/CECO
                     </p>
                 </div>
-                <HelpTooltip
-                    title={helpContent.ordenesTrabajos.title}
-                    description={helpContent.ordenesTrabajos.description}
-                    content={helpContent.ordenesTrabajos.content}
-                />
+                <div className="flex items-center gap-2">
+                    <ExcelExportButton
+                        filters={{
+                            workOrder: params.search || '', // Always pass workOrder even if empty to indicate this is work orders page
+                            supplierId: params.provider && params.provider !== 'all' ? params.provider : undefined,
+                            exportType: 'workorders-list' // Add type indicator
+                        }}
+                        includeDetails={true}
+                        variant="outline"
+                    >
+                        Exportar Órdenes de Trabajo
+                    </ExcelExportButton>
+                    <HelpTooltip
+                        title={helpContent.ordenesTrabajos.title}
+                        description={helpContent.ordenesTrabajos.description}
+                        content={helpContent.ordenesTrabajos.content}
+                    />
+                </div>
             </div>
 
             {/* Summary Stats */}
@@ -268,12 +282,26 @@ export default async function WorkOrdersPage({ searchParams }: PageProps) {
             {/* Work Orders Table */}
             <Card>
                 <CardHeader>
-                    <CardTitle>Lista de Órdenes de Trabajo</CardTitle>
-                    <CardDescription>
-                        Mostrando {((data.pagination.currentPage - 1) * data.pagination.pageSize) + 1} a{' '}
-                        {Math.min(data.pagination.currentPage * data.pagination.pageSize, data.totalWorkOrders)} de{' '}
-                        {data.totalWorkOrders} órdenes de trabajo
-                    </CardDescription>
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <CardTitle>Lista de Órdenes de Trabajo</CardTitle>
+                            <CardDescription>
+                                Mostrando {((data.pagination.currentPage - 1) * data.pagination.pageSize) + 1} a{' '}
+                                {Math.min(data.pagination.currentPage * data.pagination.pageSize, data.totalWorkOrders)} de{' '}
+                                {data.totalWorkOrders} órdenes de trabajo
+                            </CardDescription>
+                        </div>
+                        <ExcelExportButton
+                            filters={{
+                                workOrder: params.search || '',
+                                supplierId: params.provider && params.provider !== 'all' ? params.provider : undefined,
+                                exportType: 'workorders-list'
+                            }}
+                            includeDetails={true}
+                            variant="outline"
+                            size="sm"
+                        />
+                    </div>
                 </CardHeader>
                 <CardContent>
                     <Suspense fallback={<div className="h-96 rounded-lg bg-muted animate-pulse" />}>
