@@ -372,7 +372,7 @@ export async function exportMaterialsListDetailed(filters: ExportFilters = {}) {
         };
     });
 
-    return exportData;
+    return exportData.sort((a, b) => a['Material'].localeCompare(b['Material'], 'es', { sensitivity: 'base' }));
 }
 
 export async function exportMaterialSummary(filters: ExportFilters = {}) {
@@ -430,7 +430,7 @@ export async function exportMaterialSummary(filters: ExportFilters = {}) {
         });
     }
 
-    return exportData.sort((a, b) => b['Coste Total'] - a['Coste Total']);
+    return exportData.sort((a, b) => a['Nombre Material'].localeCompare(b['Nombre Material'], 'es', { sensitivity: 'base' }));
 }
 
 // Interface for detailed supplier analysis
@@ -548,7 +548,7 @@ export async function exportSuppliersListDetailed(filters: ExportFilters = {}) {
         };
     });
 
-    return exportData;
+    return exportData.sort((a, b) => a['Material'].localeCompare(b['Material'], 'es', { sensitivity: 'base' }));
 }
 
 export async function exportSupplierSummary(filters: ExportFilters = {}) {
@@ -895,7 +895,15 @@ export async function exportMaterialDetail(filters: ExportFilters = {}) {
         });
     }
 
-    return exportData;
+    return exportData.sort((a, b) => {
+        // Sort summary rows before item rows, and by material name
+        if (a['Material'] && b['Material']) {
+            return a['Material'].localeCompare(b['Material'], 'es', { sensitivity: 'base' });
+        }
+        if (a['Material']) return -1;
+        if (b['Material']) return 1;
+        return 0;
+    });
 }
 
 export async function generateExcelReport(filters: ExportFilters = {}, includeDetails = true) {
@@ -1361,14 +1369,14 @@ export async function exportWorkOrdersListSummary(filters: ExportFilters = {}) {
     const exportData: WorkOrderSummaryExport[] = workOrderAggregation.map(wo => {
         const workOrderCode = wo.workOrder!;
         const items = itemsByWorkOrder.get(workOrderCode) || [];
-        
+
         const totalCostBase = wo._sum?.totalPrice?.toNumber() || 0;
         const totalCostWithIva = totalCostBase * 1.21;
         const iva = totalCostBase * 0.21;
-        
+
         const uniqueProviders = [...new Set(items.map(item => item.invoice.provider.id))];
         const uniqueMaterials = [...new Set(items.map(item => item.material.id))];
-        
+
         const minDate = wo._min?.itemDate || new Date();
         const maxDate = wo._max?.itemDate || new Date();
         const periodDays = Math.ceil((maxDate.getTime() - minDate.getTime()) / (1000 * 60 * 60 * 24));
@@ -1484,7 +1492,7 @@ export async function exportWorkOrdersListDetailed(filters: ExportFilters = {}) 
         };
     });
 
-    return exportData;
+    return exportData.sort((a, b) => a['Material'].localeCompare(b['Material'], 'es', { sensitivity: 'base' }));
 }
 
 export async function exportWorkOrderSummary(workOrder: string) {
@@ -1587,29 +1595,30 @@ export async function exportWorkOrderByProvider(workOrder: string) {
         });
 
         // Add items details
-        providerItems.forEach((item, index) => {
-            exportData.push({
-                'Orden de Trabajo': index === 0 ? '' : '', // Only show on first item
-                'Proveedor': '',
-                'CIF Proveedor': '',
-                'Tipo Proveedor': '',
-                '--- RESUMEN ---': '',
-                'Coste Total (c/IVA)': '',
-                'Coste Base': '',
-                'IVA': '',
-                'Total Items': '',
-                'Cantidad Total': '',
-                'Nº Materiales': '',
-                '--- DETALLE ITEMS ---': index === 0 ? '=== ITEMS ===' : '',
-                'Fecha Item': item.itemDate.toLocaleDateString('es-ES'),
-                'Material': item.material.name,
-                'Código Material': item.material.code,
-                'Cantidad Item': item.quantity.toNumber(),
-                'Precio Unitario': item.unitPrice.toNumber(),
-                'Total Item (c/IVA)': item.totalPrice.toNumber() * 1.21,
-                'Nº Factura': item.invoice.invoiceCode
+        providerItems.sort((a, b) => a.material.name.localeCompare(b.material.name, 'es', { sensitivity: 'base' }))
+            .forEach((item, index) => {
+                exportData.push({
+                    'Orden de Trabajo': index === 0 ? '' : '', // Only show on first item
+                    'Proveedor': '',
+                    'CIF Proveedor': '',
+                    'Tipo Proveedor': '',
+                    '--- RESUMEN ---': '',
+                    'Coste Total (c/IVA)': '',
+                    'Coste Base': '',
+                    'IVA': '',
+                    'Total Items': '',
+                    'Cantidad Total': '',
+                    'Nº Materiales': '',
+                    '--- DETALLE ITEMS ---': index === 0 ? '=== ITEMS ===' : '',
+                    'Fecha Item': item.itemDate.toLocaleDateString('es-ES'),
+                    'Material': item.material.name,
+                    'Código Material': item.material.code,
+                    'Cantidad Item': item.quantity.toNumber(),
+                    'Precio Unitario': item.unitPrice.toNumber(),
+                    'Total Item (c/IVA)': item.totalPrice.toNumber() * 1.21,
+                    'Nº Factura': item.invoice.invoiceCode
+                });
             });
-        });
 
         // Add separator row
         exportData.push({
@@ -1698,28 +1707,29 @@ export async function exportWorkOrderByMaterial(workOrder: string) {
         });
 
         // Add items details
-        materialItems.forEach((item, index) => {
-            exportData.push({
-                'Orden de Trabajo': '',
-                'Material': '',
-                'Código Material': '',
-                '--- RESUMEN ---': '',
-                'Coste Total (c/IVA)': '',
-                'Coste Base': '',
-                'IVA': '',
-                'Cantidad Total': '',
-                'Precio Promedio': '',
-                'Nº Proveedores': '',
-                'Nº Items': '',
-                '--- DETALLE ITEMS ---': index === 0 ? '=== ITEMS ===' : '',
-                'Fecha Item': item.itemDate.toLocaleDateString('es-ES'),
-                'Proveedor': item.invoice.provider.name,
-                'Cantidad Item': item.quantity.toNumber(),
-                'Precio Unitario': item.unitPrice.toNumber(),
-                'Total Item (c/IVA)': item.totalPrice.toNumber() * 1.21,
-                'Nº Factura': item.invoice.invoiceCode
+        materialItems.sort((a, b) => a.material.name.localeCompare(b.material.name, 'es', { sensitivity: 'base' }))
+            .forEach((item, index) => {
+                exportData.push({
+                    'Orden de Trabajo': '',
+                    'Material': '',
+                    'Código Material': '',
+                    '--- RESUMEN ---': '',
+                    'Coste Total (c/IVA)': '',
+                    'Coste Base': '',
+                    'IVA': '',
+                    'Cantidad Total': '',
+                    'Precio Promedio': '',
+                    'Nº Proveedores': '',
+                    'Nº Items': '',
+                    '--- DETALLE ITEMS ---': index === 0 ? '=== ITEMS ===' : '',
+                    'Fecha Item': item.itemDate.toLocaleDateString('es-ES'),
+                    'Proveedor': item.invoice.provider.name,
+                    'Cantidad Item': item.quantity.toNumber(),
+                    'Precio Unitario': item.unitPrice.toNumber(),
+                    'Total Item (c/IVA)': item.totalPrice.toNumber() * 1.21,
+                    'Nº Factura': item.invoice.invoiceCode
+                });
             });
-        });
 
         // Add separator row
         exportData.push({
@@ -1813,31 +1823,32 @@ export async function exportWorkOrderByMonth(workOrder: string) {
         });
 
         // Add items details
-        monthItems.forEach((item, index) => {
-            exportData.push({
-                'Orden de Trabajo': '',
-                'Año': '',
-                'Mes': '',
-                'Mes Nombre': '',
-                '--- RESUMEN ---': '',
-                'Coste Total (c/IVA)': '',
-                'Coste Base': '',
-                'IVA': '',
-                'Total Items': '',
-                'Cantidad Total': '',
-                'Nº Proveedores': '',
-                'Nº Materiales': '',
-                '--- DETALLE ITEMS ---': index === 0 ? '=== ITEMS ===' : '',
-                'Fecha Item': item.itemDate.toLocaleDateString('es-ES'),
-                'Material': item.material.name,
-                'Código Material': item.material.code,
-                'Proveedor': item.invoice.provider.name,
-                'Cantidad Item': item.quantity.toNumber(),
-                'Precio Unitario': item.unitPrice.toNumber(),
-                'Total Item (c/IVA)': item.totalPrice.toNumber() * 1.21,
-                'Nº Factura': item.invoice.invoiceCode
+        monthItems.sort((a, b) => a.material.name.localeCompare(b.material.name, 'es', { sensitivity: 'base' }))
+            .forEach((item, index) => {
+                exportData.push({
+                    'Orden de Trabajo': '',
+                    'Año': '',
+                    'Mes': '',
+                    'Mes Nombre': '',
+                    '--- RESUMEN ---': '',
+                    'Coste Total (c/IVA)': '',
+                    'Coste Base': '',
+                    'IVA': '',
+                    'Total Items': '',
+                    'Cantidad Total': '',
+                    'Nº Proveedores': '',
+                    'Nº Materiales': '',
+                    '--- DETALLE ITEMS ---': index === 0 ? '=== ITEMS ===' : '',
+                    'Fecha Item': item.itemDate.toLocaleDateString('es-ES'),
+                    'Material': item.material.name,
+                    'Código Material': item.material.code,
+                    'Proveedor': item.invoice.provider.name,
+                    'Cantidad Item': item.quantity.toNumber(),
+                    'Precio Unitario': item.unitPrice.toNumber(),
+                    'Total Item (c/IVA)': item.totalPrice.toNumber() * 1.21,
+                    'Nº Factura': item.invoice.invoiceCode
+                });
             });
-        });
 
         // Add separator row
         exportData.push({
