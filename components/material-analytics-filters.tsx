@@ -54,7 +54,7 @@ export function MaterialAnalyticsFilters({
     const [workOrder, setWorkOrder] = useState(searchParams.get("workOrder") || "")
     const [supplierId, setSupplierId] = useState(searchParams.get("supplierId") || "")
     const [supplierCif, setSupplierCif] = useState(searchParams.get("supplierCif") || "")
-    const [sortBy, setSortBy] = useState(searchParams.get("sortBy") || "cost")
+    const [sortBy, setSortBy] = useState(searchParams.get("sortBy") || "quantity")
     const [sortOrder, setSortOrder] = useState(searchParams.get("sortOrder") || "desc")
 
     // Advanced filters
