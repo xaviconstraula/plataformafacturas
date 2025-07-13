@@ -196,7 +196,7 @@ export function AnalyticsDashboard({
                                     Limpiar
                                 </Button>
                             )}
-                            <ExcelExportButton filters={filters} exportType="analytics-dashboard" />
+                            <ExcelExportButton filters={{ ...filters, exportType: 'analytics' }} />
                         </div>
                     </div>
                 </CardHeader>

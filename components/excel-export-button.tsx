@@ -13,7 +13,6 @@ interface ExcelExportButtonProps {
     size?: 'default' | 'sm' | 'lg' | 'icon'
     className?: string
     children?: React.ReactNode
-    exportType?: string
 }
 
 export function ExcelExportButton({
@@ -22,8 +21,7 @@ export function ExcelExportButton({
     variant = 'outline',
     size = 'default',
     className,
-    children,
-    exportType
+    children
 }: ExcelExportButtonProps) {
     const [isExporting, setIsExporting] = useState(false)
 
@@ -45,8 +43,7 @@ export function ExcelExportButton({
                 },
                 body: JSON.stringify({
                     ...filters,
-                    includeDetails,
-                    ...(exportType !== undefined ? { exportType } : {})
+                    includeDetails
                 })
             })
 
