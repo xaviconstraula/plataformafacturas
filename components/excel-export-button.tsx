@@ -46,7 +46,7 @@ export function ExcelExportButton({
                 body: JSON.stringify({
                     ...filters,
                     includeDetails,
-                    exportType
+                    ...(exportType !== undefined ? { exportType } : {})
                 })
             })
 
