@@ -161,7 +161,7 @@ export async function getMaterialAnalytics(params: GetMaterialAnalyticsParams = 
 
         const totalQuantity = materialItems.reduce((sum, item) => sum + item.quantity.toNumber(), 0);
         const totalCost = materialItems.reduce((sum, item) => sum + item.totalPrice.toNumber(), 0);
-        const averageUnitPrice = totalCost / totalQuantity;
+        const averageUnitPrice = totalQuantity > 0 ? totalCost / totalQuantity : 0;
 
         const workOrders = [...new Set(materialItems.map(item => item.workOrder).filter(Boolean))] as string[];
 
@@ -381,7 +381,7 @@ export async function getMaterialAnalyticsPaginated(params: GetMaterialAnalytics
 
         const totalQuantity = materialItems.reduce((sum, item) => sum + item.quantity.toNumber(), 0);
         const totalCost = materialItems.reduce((sum, item) => sum + item.totalPrice.toNumber(), 0);
-        const averageUnitPrice = totalCost / totalQuantity;
+        const averageUnitPrice = totalQuantity > 0 ? totalCost / totalQuantity : 0;
 
         const workOrders = [...new Set(materialItems.map(item => item.workOrder).filter(Boolean))] as string[];
 

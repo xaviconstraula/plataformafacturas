@@ -50,8 +50,10 @@ interface ProviderItemCardProps {
 }
 
 export function ProviderItemCard({ group }: ProviderItemCardProps) {
-    const [showAllItems, setShowAllItems] = useState(false)
-    const displayItems = showAllItems ? group.items : group.items.slice(0, 5)
+    const [visibleCount, setVisibleCount] = useState(5)
+    const displayItems = group.items.slice(0, visibleCount)
+    const remainingItems = group.items.length - visibleCount
+    const hasMoreItems = remainingItems > 0
 
     return (
         <Card>
@@ -104,9 +106,18 @@ export function ProviderItemCard({ group }: ProviderItemCardProps) {
                         <Button
                             variant="outline"
                             size="sm"
-                            onClick={() => setShowAllItems(!showAllItems)}
+                            onClick={() => {
+                                if (hasMoreItems) {
+                                    setVisibleCount(prev => Math.min(prev + 10, group.items.length))
+                                } else {
+                                    setVisibleCount(5)
+                                }
+                            }}
                         >
-                            {showAllItems ? 'Ver menos' : `Ver más (${group.items.length - 5} adicionales)`}
+                            {hasMoreItems
+                                ? `Ver más (${Math.min(10, remainingItems)} de ${remainingItems} adicionales)`
+                                : 'Ver menos'
+                            }
                         </Button>
                     </div>
                 )}

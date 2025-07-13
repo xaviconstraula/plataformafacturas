@@ -411,7 +411,7 @@ export async function exportMaterialSummary(filters: ExportFilters = {}) {
         const material = materialItems[0].material;
         const totalQuantity = materialItems.reduce((sum, item) => sum + item.quantity.toNumber(), 0);
         const totalCost = materialItems.reduce((sum, item) => sum + item.totalPrice.toNumber(), 0);
-        const averagePrice = totalCost / totalQuantity;
+        const averagePrice = totalQuantity > 0 ? totalCost / totalQuantity : 0;
         const uniqueSuppliers = new Set(materialItems.map(item => item.invoice.providerId));
         const uniqueInvoices = new Set(materialItems.map(item => item.invoiceId));
         const workOrders = [...new Set(materialItems.map(item => item.workOrder).filter(Boolean))];
@@ -810,7 +810,7 @@ export async function exportMaterialDetail(filters: ExportFilters = {}) {
         const totalQuantity = materialItems.reduce((sum, item) => sum + item.quantity.toNumber(), 0);
         const uniqueSuppliers = new Set(materialItems.map(item => item.invoice.providerId));
         const uniqueWorkOrders = new Set(materialItems.map(item => item.workOrder).filter(Boolean));
-        const averagePrice = totalCostBase / totalQuantity;
+        const averagePrice = totalQuantity > 0 ? totalCostBase / totalQuantity : 0;
         const lastPurchase = materialItems.reduce((latest, item) =>
             item.itemDate > latest ? item.itemDate : latest, materialItems[0].itemDate);
 
@@ -1547,7 +1547,7 @@ export async function exportWorkOrderByMaterial(workOrder: string) {
         const totalCostWithIva = totalCostBase * 1.21;
         const iva = totalCostBase * 0.21;
         const totalQuantity = materialItems.reduce((sum, item) => sum + item.quantity.toNumber(), 0);
-        const averagePrice = totalCostBase / totalQuantity;
+        const averagePrice = totalQuantity > 0 ? totalCostBase / totalQuantity : 0;
         const uniqueProviders = new Set(materialItems.map(item => item.invoice.provider.name));
 
         // Add summary row

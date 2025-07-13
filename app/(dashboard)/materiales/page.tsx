@@ -75,11 +75,11 @@ async function getMaterialsData(params: { [key: string]: string | string[] | und
     })
   ])
 
-  // Calculate summary stats from current page data
-  const totalCost = materialData.materials.reduce((sum, material) => sum + material.totalCost, 0)
-  const totalQuantity = materialData.materials.reduce((sum, material) => sum + material.totalQuantity, 0)
-  const totalSuppliers = [...new Set(materialData.materials.flatMap(m => m.topSuppliers.map(s => s.supplierId)))].length
-  const avgUnitPrice = totalCost / totalQuantity || 0
+  // Use filter totals for accurate summary stats across all filtered data, not just current page
+  const totalCost = filterTotals.totalCost
+  const totalQuantity = filterTotals.totalQuantity
+  const totalSuppliers = filterTotals.supplierCount
+  const avgUnitPrice = filterTotals.averageUnitPrice
 
   return {
     materialAnalytics: materialData.materials,

@@ -154,7 +154,7 @@ export function MaterialAnalyticsFilters({
         setWorkOrder("")
         setSupplierId("")
         setSupplierCif("")
-        setSortBy("cost")
+        setSortBy("quantity")
         setSortOrder("desc")
         setStartDate("")
         setEndDate("")
