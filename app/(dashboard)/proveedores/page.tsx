@@ -132,7 +132,7 @@ export default async function SuppliersPage({ searchParams }: SuppliersPageProps
             description={helpContent.proveedores.description}
             content={helpContent.proveedores.content}
           />
-          <ExcelExportButton filters={exportFilters} includeDetails exportType="suppliers-list" />
+          <ExcelExportButton filters={{ ...exportFilters, exportType: 'suppliers-list' }} includeDetails />
           <MergeProvidersDialog providers={data.supplierAnalytics.map(s => ({ id: s.supplierId, name: s.supplierName, cif: s.supplierCif }))} />
           <NewSupplierButton />
         </div>

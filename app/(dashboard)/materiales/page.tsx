@@ -145,7 +145,7 @@ export default async function MaterialsPage({ searchParams }: MaterialsPageProps
             description={helpContent.materiales.description}
             content={helpContent.materiales.content}
           />
-          <ExcelExportButton filters={exportFilters} includeDetails exportType="materials-list" />
+          <ExcelExportButton filters={{ ...exportFilters, exportType: 'materials-list' }} includeDetails />
           {/* <NewMaterialButton /> */}
         </div>
       </div>
