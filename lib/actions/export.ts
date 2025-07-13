@@ -1,8 +1,55 @@
-import * as XLSX from 'xlsx';
+import * as XLSX from 'xlsx-js-style';
 import { prisma } from '@/lib/db';
 import { Prisma } from '@/generated/prisma';
 import type { InvoiceItem, Material, Invoice, Provider, ProviderType } from '@/generated/prisma';
 import { normalizeSearch, processWorkOrderSearch } from '@/lib/utils';
+
+// Helper function to create worksheet with bold headers
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function createStyledWorksheet(data: Record<string, any>[], columnWidths?: { wch: number }[]) {
+    if (data.length === 0) {
+        return XLSX.utils.json_to_sheet([]);
+    }
+
+    // Create the worksheet
+    const worksheet = XLSX.utils.json_to_sheet(data);
+
+    // Get the headers (first row)
+    const headers = Object.keys(data[0]);
+
+    // Apply bold styling to header row
+    headers.forEach((header, index) => {
+        const cellAddress = XLSX.utils.encode_cell({ r: 0, c: index });
+        if (worksheet[cellAddress]) {
+            worksheet[cellAddress].s = {
+                font: {
+                    bold: true,
+                    sz: 12
+                },
+                fill: {
+                    fgColor: { rgb: "E8F4FD" } // Light blue background
+                },
+                border: {
+                    top: { style: "thin", color: { rgb: "000000" } },
+                    bottom: { style: "thin", color: { rgb: "000000" } },
+                    left: { style: "thin", color: { rgb: "000000" } },
+                    right: { style: "thin", color: { rgb: "000000" } }
+                },
+                alignment: {
+                    horizontal: "center",
+                    vertical: "center"
+                }
+            };
+        }
+    });
+
+    // Set column widths if provided
+    if (columnWidths) {
+        worksheet['!cols'] = columnWidths;
+    }
+
+    return worksheet;
+}
 
 export interface ExportFilters {
     materialId?: string;
@@ -659,9 +706,7 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
         // 1. Analysis by Provider Sheet (with detailed items)
         const providerData = await exportWorkOrderByProvider(workOrder);
         if (providerData.length > 0) {
-            const providerSheet = XLSX.utils.json_to_sheet(providerData);
-            // Set column widths for detailed provider sheet
-            providerSheet['!cols'] = [
+            const providerSheet = createStyledWorksheet(providerData, [
                 { wch: 20 }, // Orden de Trabajo
                 { wch: 25 }, // Proveedor
                 { wch: 15 }, // CIF Proveedor
@@ -681,16 +726,14 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
                 { wch: 15 }, // Precio Unitario
                 { wch: 15 }, // Total Item (c/IVA)
                 { wch: 15 }  // Nº Factura
-            ];
+            ]);
             XLSX.utils.book_append_sheet(workbook, providerSheet, 'Por Proveedor');
         }
 
         // 2. Analysis by Material Sheet (with detailed items)
         const materialData = await exportWorkOrderByMaterial(workOrder);
         if (materialData.length > 0) {
-            const materialSheet = XLSX.utils.json_to_sheet(materialData);
-            // Set column widths for detailed material sheet
-            materialSheet['!cols'] = [
+            const materialSheet = createStyledWorksheet(materialData, [
                 { wch: 20 }, // Orden de Trabajo
                 { wch: 30 }, // Material
                 { wch: 15 }, // Código Material
@@ -709,16 +752,14 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
                 { wch: 15 }, // Precio Unitario
                 { wch: 15 }, // Total Item (c/IVA)
                 { wch: 15 }  // Nº Factura
-            ];
+            ]);
             XLSX.utils.book_append_sheet(workbook, materialSheet, 'Por Material');
         }
 
         // 3. Analysis by Month Sheet (with detailed items)
         const monthData = await exportWorkOrderByMonth(workOrder);
         if (monthData.length > 0) {
-            const monthSheet = XLSX.utils.json_to_sheet(monthData);
-            // Set column widths for detailed month sheet
-            monthSheet['!cols'] = [
+            const monthSheet = createStyledWorksheet(monthData, [
                 { wch: 20 }, // Orden de Trabajo
                 { wch: 8 },  // Año
                 { wch: 8 },  // Mes
@@ -740,7 +781,7 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
                 { wch: 15 }, // Precio Unitario
                 { wch: 15 }, // Total Item (c/IVA)
                 { wch: 15 }  // Nº Factura
-            ];
+            ]);
             XLSX.utils.book_append_sheet(workbook, monthSheet, 'Por Mes');
         }
 
@@ -748,9 +789,7 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
         if (includeDetails) {
             const detailData = await exportDetailedInvoiceData(filters);
             if (detailData.length > 0) {
-                const detailSheet = XLSX.utils.json_to_sheet(detailData);
-                // Set column widths for detailed items sheet
-                detailSheet['!cols'] = [
+                const detailSheet = createStyledWorksheet(detailData, [
                     { wch: 15 }, // Código Factura
                     { wch: 25 }, // Proveedor
                     { wch: 15 }, // CIF Proveedor
@@ -764,7 +803,7 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
                     { wch: 15 }, // Total Línea
                     { wch: 15 }, // OT/CECO
                     { wch: 12 }  // Fecha Línea
-                ];
+                ]);
                 XLSX.utils.book_append_sheet(workbook, detailSheet, 'Items Detallados');
             }
         }
@@ -781,9 +820,7 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
             // 1. Detailed Supplier Analysis
             const supplierDetailData = await exportSupplierDetail(filters);
             if (supplierDetailData.length > 0) {
-                const supplierDetailSheet = XLSX.utils.json_to_sheet(supplierDetailData);
-                // Set column widths for supplier detail sheet
-                supplierDetailSheet['!cols'] = [
+                const supplierDetailSheet = createStyledWorksheet(supplierDetailData, [
                     { wch: 25 }, // Proveedor
                     { wch: 15 }, // CIF
                     { wch: 18 }, // Tipo
@@ -806,14 +843,14 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
                     { wch: 15 }, // Precio Unitario
                     { wch: 15 }, // Total Item (c/IVA)
                     { wch: 15 }  // Nº Factura
-                ];
+                ]);
                 XLSX.utils.book_append_sheet(workbook, supplierDetailSheet, 'Análisis Detallado');
             }
 
             // 2. Supplier Summary
             const supplierData = await exportSupplierSummary(filters);
             if (supplierData.length > 0) {
-                const supplierSheet = XLSX.utils.json_to_sheet(supplierData);
+                const supplierSheet = createStyledWorksheet(supplierData);
                 XLSX.utils.book_append_sheet(workbook, supplierSheet, 'Resumen Proveedores');
             }
         } else if (isMaterialFocused) {
@@ -822,9 +859,7 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
             // 1. Detailed Material Analysis
             const materialDetailData = await exportMaterialDetail(filters);
             if (materialDetailData.length > 0) {
-                const materialDetailSheet = XLSX.utils.json_to_sheet(materialDetailData);
-                // Set column widths for material detail sheet
-                materialDetailSheet['!cols'] = [
+                const materialDetailSheet = createStyledWorksheet(materialDetailData, [
                     { wch: 30 }, // Material
                     { wch: 15 }, // Código Material
                     { wch: 15 }, // Categoría
@@ -841,20 +876,18 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
                     { wch: 18 }, // --- DETALLE ITEMS ---
                     { wch: 12 }, // Fecha Item
                     { wch: 25 }, // Proveedor
-                    { wch: 15 }, // CIF Proveedor
-                    { wch: 15 }, // OT/CECO
-                    { wch: 12 }, // Cantidad
+                    { wch: 12 }, // Cantidad Item
                     { wch: 15 }, // Precio Unitario
                     { wch: 15 }, // Total Item (c/IVA)
                     { wch: 15 }  // Nº Factura
-                ];
+                ]);
                 XLSX.utils.book_append_sheet(workbook, materialDetailSheet, 'Análisis Detallado');
             }
 
             // 2. Material Summary
             const materialData = await exportMaterialSummary(filters);
             if (materialData.length > 0) {
-                const materialSheet = XLSX.utils.json_to_sheet(materialData);
+                const materialSheet = createStyledWorksheet(materialData);
                 XLSX.utils.book_append_sheet(workbook, materialSheet, 'Resumen Materiales');
             }
         } else {
@@ -863,14 +896,14 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
             // Add supplier summary sheet
             const supplierData = await exportSupplierSummary(filters);
             if (supplierData.length > 0) {
-                const supplierSheet = XLSX.utils.json_to_sheet(supplierData);
+                const supplierSheet = createStyledWorksheet(supplierData);
                 XLSX.utils.book_append_sheet(workbook, supplierSheet, 'Resumen Proveedores');
             }
 
             // Add material summary sheet
             const materialData = await exportMaterialSummary(filters);
             if (materialData.length > 0) {
-                const materialSheet = XLSX.utils.json_to_sheet(materialData);
+                const materialSheet = createStyledWorksheet(materialData);
                 XLSX.utils.book_append_sheet(workbook, materialSheet, 'Resumen Materiales');
             }
         }
@@ -879,7 +912,21 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
         if (includeDetails) {
             const detailData = await exportDetailedInvoiceData(filters);
             if (detailData.length > 0) {
-                const detailSheet = XLSX.utils.json_to_sheet(detailData);
+                const detailSheet = createStyledWorksheet(detailData, [
+                    { wch: 15 }, // Código Factura
+                    { wch: 25 }, // Proveedor
+                    { wch: 15 }, // CIF Proveedor
+                    { wch: 18 }, // Tipo Proveedor
+                    { wch: 12 }, // Fecha Factura
+                    { wch: 15 }, // Total Factura
+                    { wch: 15 }, // Código Material
+                    { wch: 30 }, // Nombre Material
+                    { wch: 12 }, // Cantidad
+                    { wch: 15 }, // Precio Unitario
+                    { wch: 15 }, // Total Línea
+                    { wch: 15 }, // OT/CECO
+                    { wch: 12 }  // Fecha Línea
+                ]);
                 XLSX.utils.book_append_sheet(workbook, detailSheet, 'Items Detallados');
             }
         }
@@ -1396,10 +1443,7 @@ export async function generateAlertsExcelReport(filters: AlertExportFilters = {}
     }));
 
     // Create workbook
-    const ws = XLSX.utils.json_to_sheet(exportData);
-
-    // Set column widths
-    const columnWidths = [
+    const ws = createStyledWorksheet(exportData, [
         { wch: 15 }, // Fecha Detección
         { wch: 30 }, // Material
         { wch: 15 }, // Código Material
@@ -1410,21 +1454,7 @@ export async function generateAlertsExcelReport(filters: AlertExportFilters = {}
         { wch: 12 }, // Estado
         { wch: 15 }, // Fecha Efectiva
         { wch: 15 }, // Factura
-    ];
-    ws['!cols'] = columnWidths;
-
-    // Style headers
-    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
-    for (let col = range.s.c; col <= range.e.c; col++) {
-        const cellAddress = XLSX.utils.encode_cell({ r: 0, c: col });
-        if (ws[cellAddress]) {
-            ws[cellAddress].s = {
-                font: { bold: true },
-                fill: { fgColor: { rgb: "CCCCCC" } },
-                alignment: { horizontal: 'center' }
-            };
-        }
-    }
+    ]);
 
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Alertas de Precios');

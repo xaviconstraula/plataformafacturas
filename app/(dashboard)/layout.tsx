@@ -1,5 +1,6 @@
 import Sidebar from "@/components/sidebar"
 import { BatchProgressBanner } from "@/components/batch-progress-banner"
+import { AnalyticsPrefetch } from "@/components/analytics-prefetch"
 import { getUser } from "@/lib/user"
 import type { ReactNode } from "react"
 
@@ -18,6 +19,8 @@ export default async function DashboardLayout({
                 <div className="max-w-7xl mx-auto">
                     {children}
                 </div>
+                {/* Prefetch analytics data in the background */}
+                <AnalyticsPrefetch />
             </main>
         </div>
     )

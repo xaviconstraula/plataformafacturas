@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { ComposedChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 import { formatCurrency } from "@/lib/utils"
-import { MaterialAnalytics } from "@/lib/actions/analytics"
+import { MaterialAnalytics, MaterialFilterTotals } from "@/lib/actions/analytics"
 import { ProviderType } from "@/generated/prisma"
 import Link from "next/link"
 import { ArrowUpRight, PencilIcon, TrashIcon, X } from "lucide-react"
@@ -26,6 +26,7 @@ interface MaterialAnalyticsSectionProps {
         pageSize: number
         totalCount: number
     }
+    filterTotals?: MaterialFilterTotals
 }
 
 export function MaterialAnalyticsSection({
@@ -33,7 +34,8 @@ export function MaterialAnalyticsSection({
     suppliers,
     categories,
     workOrders,
-    pagination
+    pagination,
+    filterTotals
 }: MaterialAnalyticsSectionProps) {
     const searchParams = useSearchParams()
 
@@ -214,6 +216,29 @@ export function MaterialAnalyticsSection({
                             </TableRow>
                         </TableHeader>
                         <TableBody>
+                            {/* Totals Row - Only show when filterTotals is available */}
+                            {filterTotals && (
+                                <TableRow className="bg-muted/50 font-semibold border-b-2">
+                                    <TableCell>
+                                        <div className="font-bold text-foreground">
+                                            TOTAL ({filterTotals.materialCount} materiales)
+                                        </div>
+                                    </TableCell>
+                                    <TableCell className="text-right font-semibold">
+                                        {filterTotals.totalQuantity.toLocaleString()}
+                                    </TableCell>
+                                    <TableCell className="text-right font-semibold">
+                                        {formatCurrency(filterTotals.totalCost)}
+                                    </TableCell>
+                                    <TableCell className="text-right font-semibold">
+                                        {/* Empty cell for Precio Promedio */}
+                                    </TableCell>
+                                    <TableCell className="text-right font-semibold">
+                                        {/* Empty cell for Proveedores */}
+                                    </TableCell>
+                                    <TableCell></TableCell>
+                                </TableRow>
+                            )}
                             {displayMaterials.map((material) => (
                                 <TableRow key={material.materialId}>
                                     <TableCell>

@@ -1,5 +1,5 @@
 import { Suspense } from "react"
-import { getMaterialAnalyticsPaginated } from "@/lib/actions/analytics"
+import { getMaterialAnalyticsPaginated, getMaterialFilterTotals } from "@/lib/actions/analytics"
 import { NewMaterialButton } from "@/components/new-material-button"
 import { ExcelExportButton } from "@/components/excel-export-button"
 import { MaterialAnalyticsSection } from "@/components/material-analytics-section"
@@ -35,7 +35,7 @@ async function getMaterialsData(params: { [key: string]: string | string[] | und
   const startDate = startDateStr ? new Date(startDateStr) : undefined
   const endDate = endDateStr ? new Date(endDateStr) : undefined
 
-  const [materialData, suppliers, categories, workOrders] = await Promise.all([
+  const [materialData, suppliers, categories, workOrders, filterTotals] = await Promise.all([
     getMaterialAnalyticsPaginated({
       category: category && category !== "all" ? category : undefined,
       workOrder: workOrder && workOrder !== "all" ? workOrder : undefined,
@@ -64,7 +64,15 @@ async function getMaterialsData(params: { [key: string]: string | string[] | und
       where: { workOrder: { not: null } },
       distinct: ['workOrder'],
       take: 500 // Limit work orders for performance
-    }).then(results => results.map(r => r.workOrder!).filter(Boolean))
+    }).then(results => results.map(r => r.workOrder!).filter(Boolean)),
+    getMaterialFilterTotals({
+      category: category && category !== "all" ? category : undefined,
+      workOrder: workOrder && workOrder !== "all" ? workOrder : undefined,
+      supplierId: supplierId && supplierId !== "all" ? supplierId : undefined,
+      materialSearch: materialSearch || undefined,
+      startDate,
+      endDate,
+    })
   ])
 
   // Calculate summary stats from current page data
@@ -90,7 +98,8 @@ async function getMaterialsData(params: { [key: string]: string | string[] | und
       totalSuppliers,
       avgUnitPrice,
       totalMaterials: materialData.totalCount // Use total count, not just current page
-    }
+    },
+    filterTotals
   }
 }
 
@@ -154,6 +163,7 @@ export default async function MaterialsPage({ searchParams }: MaterialsPageProps
           categories={data.categories}
           workOrders={data.workOrders}
           pagination={data.pagination}
+          filterTotals={data.filterTotals}
         />
       </Suspense>
     </div>

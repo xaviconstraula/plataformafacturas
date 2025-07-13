@@ -3,49 +3,161 @@ import Link from "next/link"
 import { AnalyticsDashboard } from "@/components/analytics-dashboard"
 import { MaterialsBySupplier } from "@/components/materials-by-supplier"
 import { HelpTooltip, helpContent } from "@/components/help-tooltip"
-import { getMaterialAnalytics, getSupplierAnalytics } from "@/lib/actions/analytics"
+import { getMaterialAnalyticsPaginated, getSupplierAnalyticsPaginated } from "@/lib/actions/analytics"
 import { getMaterialsBySupplierType } from "@/lib/actions/dashboard"
 import { prisma } from "@/lib/db"
 import { ErrorBoundary } from "@/components/ui/error-boundary"
-import { MaterialAnalyticsSkeleton, SupplierAnalyticsSkeleton, ChartSkeleton } from "@/components/ui/skeleton"
+import {
+    MaterialAnalyticsSkeleton,
+    SupplierAnalyticsSkeleton,
+    ChartSkeleton,
+    CardSkeleton
+} from "@/components/ui/skeleton"
+import { Package, Users, DollarSign } from "lucide-react"
 
-// Separate component for analytics data to enable individual loading
-function AnalyticsContent() {
-    return (
-        <Suspense fallback={<MaterialAnalyticsSkeleton />}>
-            <AnalyticsDataContent />
-        </Suspense>
-    )
-}
-
-async function AnalyticsDataContent() {
-    const [materialAnalytics, supplierAnalytics, suppliers, materials, categories, workOrders] = await Promise.all([
-        getMaterialAnalytics({ sortBy: 'cost', sortOrder: 'desc', limit: 50 }),
-        getSupplierAnalytics({ includeMonthlyBreakdown: true }),
+// Fast-loading filter options data fetcher
+async function getFilterOptions() {
+    // Load only essential filter data with smaller limits to ensure fast loading
+    const [suppliers, materials, categories, workOrders] = await Promise.all([
         prisma.provider.findMany({
             select: { id: true, name: true, type: true },
-            orderBy: { name: 'asc' }
+            orderBy: { name: 'asc' },
+            take: 200 // Reduced limit for faster loading
         }),
         prisma.material.findMany({
             select: { id: true, name: true, code: true, category: true },
-            orderBy: { name: 'asc' }
+            where: { isActive: true }, // Only active materials
+            orderBy: { name: 'asc' },
+            take: 200 // Reduced limit for faster loading
         }).then(materials => materials.map(m => ({ ...m, category: m.category || undefined }))),
+        // Get distinct categories using proper Prisma query
         prisma.material.findMany({
             select: { category: true },
-            where: { category: { not: null } },
-            distinct: ['category']
-        }).then(results => results.map(r => r.category!).filter(Boolean)),
+            where: {
+                category: { not: null },
+                isActive: true
+            },
+            distinct: ['category'],
+            orderBy: { category: 'asc' },
+            take: 30 // Reduced limit for faster loading
+        }).then(results => results.map(r => r.category).filter(Boolean) as string[]),
+        // Get distinct work orders using proper Prisma query
         prisma.invoiceItem.findMany({
             select: { workOrder: true },
             where: { workOrder: { not: null } },
-            distinct: ['workOrder']
-        }).then(results => results.map(r => r.workOrder!).filter(Boolean)),
+            distinct: ['workOrder'],
+            orderBy: { workOrder: 'asc' },
+            take: 50 // Reduced limit for faster loading
+        }).then(results => results.map(r => r.workOrder).filter(Boolean) as string[]),
+    ])
+
+    return {
+        suppliers,
+        materials,
+        categories,
+        workOrders
+    }
+}
+
+// Analytics dashboard component with streaming optimization
+function AnalyticsDataContent() {
+    return (
+        <div className="space-y-6">
+            {/* Load critical stats first */}
+            <Suspense fallback={<StatsCardsSkeleton />}>
+                <QuickStatsContent />
+            </Suspense>
+
+            {/* Load main analytics with comprehensive skeleton */}
+            <Suspense fallback={<AnalyticsLoadingSkeleton />}>
+                <AnalyticsDataInner />
+            </Suspense>
+        </div>
+    )
+}
+
+// Quick stats that load fast to give immediate feedback
+async function QuickStatsContent() {
+    // Load only essential summary stats quickly
+    const [materialCount, supplierCount, invoiceCount] = await Promise.all([
+        prisma.material.count({ where: { isActive: true } }),
+        prisma.provider.count(),
+        prisma.invoice.count()
     ])
 
     return (
+        <div className="grid gap-4 md:grid-cols-3">
+            <div className="rounded-lg border p-4">
+                <div className="flex items-center">
+                    <div className="p-2 bg-blue-100 rounded-full">
+                        <Package className="h-4 w-4 text-blue-600" />
+                    </div>
+                    <div className="ml-4">
+                        <p className="text-sm font-medium text-muted-foreground">Materiales Activos</p>
+                        <p className="text-2xl font-bold">{materialCount.toLocaleString()}</p>
+                    </div>
+                </div>
+            </div>
+            <div className="rounded-lg border p-4">
+                <div className="flex items-center">
+                    <div className="p-2 bg-green-100 rounded-full">
+                        <Users className="h-4 w-4 text-green-600" />
+                    </div>
+                    <div className="ml-4">
+                        <p className="text-sm font-medium text-muted-foreground">Proveedores</p>
+                        <p className="text-2xl font-bold">{supplierCount.toLocaleString()}</p>
+                    </div>
+                </div>
+            </div>
+            <div className="rounded-lg border p-4">
+                <div className="flex items-center">
+                    <div className="p-2 bg-orange-100 rounded-full">
+                        <DollarSign className="h-4 w-4 text-orange-600" />
+                    </div>
+                    <div className="ml-4">
+                        <p className="text-sm font-medium text-muted-foreground">Total Facturas</p>
+                        <p className="text-2xl font-bold">{invoiceCount.toLocaleString()}</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    )
+}
+
+// Stats cards skeleton for quick loading feedback
+function StatsCardsSkeleton() {
+    return (
+        <div className="grid gap-4 md:grid-cols-3">
+            {Array.from({ length: 3 }).map((_, i) => (
+                <CardSkeleton key={i} className="h-24" />
+            ))}
+        </div>
+    )
+}
+
+async function AnalyticsDataInner() {
+    // Load analytics data and filter options in parallel with smaller initial page size for faster loading
+    const [materialAnalyticsResult, supplierAnalyticsResult, filterOptions] = await Promise.all([
+        getMaterialAnalyticsPaginated({
+            sortBy: 'cost',
+            sortOrder: 'desc',
+            pageSize: 25, // Reduced initial page size for faster loading
+            page: 1
+        }),
+        getSupplierAnalyticsPaginated({
+            includeMonthlyBreakdown: true,
+            pageSize: 25, // Reduced initial page size for faster loading
+            page: 1
+        }),
+        getFilterOptions()
+    ])
+
+    const { suppliers, materials, categories, workOrders } = filterOptions
+
+    return (
         <AnalyticsDashboard
-            materialAnalytics={materialAnalytics}
-            supplierAnalytics={supplierAnalytics}
+            materialAnalytics={materialAnalyticsResult.materials}
+            supplierAnalytics={supplierAnalyticsResult.suppliers}
             suppliers={suppliers}
             materials={materials}
             categories={categories}
@@ -54,7 +166,7 @@ async function AnalyticsDataContent() {
     )
 }
 
-// Separate component for materials by supplier chart
+// Materials by supplier chart component
 function MaterialsBySupplierContent() {
     return (
         <Suspense fallback={<ChartSkeleton className="h-[400px]" />}>
@@ -66,6 +178,48 @@ function MaterialsBySupplierContent() {
 async function MaterialsBySupplierDataContent() {
     const materialsBySupplierData = await getMaterialsBySupplierType()
     return <MaterialsBySupplier data={materialsBySupplierData} />
+}
+
+// Custom analytics loading skeleton
+function AnalyticsLoadingSkeleton() {
+    return (
+        <div className="space-y-6">
+            {/* Filter section skeleton */}
+            <div className="grid gap-4 md:grid-cols-4">
+                {Array.from({ length: 4 }).map((_, i) => (
+                    <div key={i} className="space-y-2">
+                        <div className="h-4 w-20 bg-muted rounded animate-pulse" />
+                        <div className="h-10 w-full bg-muted rounded animate-pulse" />
+                    </div>
+                ))}
+            </div>
+
+            {/* Stats cards skeleton */}
+            <div className="grid gap-4 md:grid-cols-3">
+                {Array.from({ length: 3 }).map((_, i) => (
+                    <CardSkeleton key={i} className="h-32" />
+                ))}
+            </div>
+
+            {/* Analytics sections skeleton */}
+            <div className="grid gap-6 lg:grid-cols-2">
+                <div className="space-y-4">
+                    <div className="h-6 w-48 bg-muted rounded animate-pulse" />
+                    <ChartSkeleton className="h-[300px]" />
+                </div>
+                <div className="space-y-4">
+                    <div className="h-6 w-48 bg-muted rounded animate-pulse" />
+                    <ChartSkeleton className="h-[300px]" />
+                </div>
+            </div>
+
+            {/* Tables skeleton */}
+            <div className="grid gap-6 lg:grid-cols-2">
+                <MaterialAnalyticsSkeleton />
+                <SupplierAnalyticsSkeleton />
+            </div>
+        </div>
+    )
 }
 
 export default function AnalyticsPage() {
@@ -85,12 +239,12 @@ export default function AnalyticsPage() {
                 />
             </div>
 
-            {/* Materials by Supplier Chart */}
-
             {/* Main Analytics Dashboard */}
             <ErrorBoundary>
-                <AnalyticsContent />
+                <AnalyticsDataContent />
             </ErrorBoundary>
+
+            {/* Materials by Supplier Chart */}
             <ErrorBoundary>
                 <MaterialsBySupplierContent />
             </ErrorBoundary>

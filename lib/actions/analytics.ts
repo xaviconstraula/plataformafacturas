@@ -490,6 +490,86 @@ export async function getMaterialAnalyticsPaginated(params: GetMaterialAnalytics
     };
 }
 
+export interface MaterialFilterTotals {
+    totalQuantity: number;
+    totalCost: number;
+    averageUnitPrice: number;
+    materialCount: number;
+    supplierCount: number;
+}
+
+// Function to get aggregated totals for all materials matching the filters
+export async function getMaterialFilterTotals(params: GetMaterialAnalyticsParams = {}): Promise<MaterialFilterTotals> {
+    // Normalize search parameters
+    const normalizedCategory = normalizeSearch(params.category);
+    const normalizedWorkOrder = processWorkOrderSearch(params.workOrder);
+    const normalizedMaterialSearch = normalizeSearch(params.materialSearch);
+
+    // Build where clause for filtering (same as in getMaterialAnalyticsPaginated)
+    const baseWhere: Prisma.InvoiceItemWhereInput = {
+        ...(params.materialId ? { materialId: params.materialId } : {}),
+        ...(normalizedCategory ? { material: { category: { contains: normalizedCategory, mode: 'insensitive' } } } : {}),
+        ...(normalizedWorkOrder ? { workOrder: { contains: normalizedWorkOrder, mode: 'insensitive' } } : {}),
+        ...(params.supplierId ? { invoice: { providerId: params.supplierId } } : {}),
+        ...(normalizedMaterialSearch ? {
+            material: {
+                OR: [
+                    { name: { contains: normalizedMaterialSearch, mode: 'insensitive' } },
+                    { code: { contains: normalizedMaterialSearch, mode: 'insensitive' } },
+                    { referenceCode: { contains: normalizedMaterialSearch, mode: 'insensitive' } },
+                ]
+            }
+        } : {}),
+        ...(params.startDate || params.endDate ? {
+            itemDate: {
+                ...(params.startDate ? { gte: params.startDate } : {}),
+                ...(params.endDate ? { lte: params.endDate } : {})
+            }
+        } : {})
+    };
+
+    // Get aggregated data for ALL materials that match the filters
+    const materialTotals = await prisma.invoiceItem.groupBy({
+        by: ['materialId'],
+        where: baseWhere,
+        _sum: {
+            quantity: true,
+            totalPrice: true,
+        }
+    });
+
+    // For supplier count, we need to get all unique suppliers that have sold 
+    // any of the materials that match our filters
+    const uniqueSupplierIds = await prisma.invoiceItem.findMany({
+        where: baseWhere,
+        select: {
+            invoice: {
+                select: {
+                    providerId: true
+                }
+            }
+        },
+        distinct: ['invoiceId']  // Get distinct invoices first
+    }).then(items => {
+        const supplierIds = new Set(items.map(item => item.invoice.providerId));
+        return supplierIds.size;
+    });
+
+    // Calculate totals
+    const totalQuantity = materialTotals.reduce((sum, material) => sum + (material._sum.quantity?.toNumber() || 0), 0);
+    const totalCost = materialTotals.reduce((sum, material) => sum + (material._sum.totalPrice?.toNumber() || 0), 0);
+    const averageUnitPrice = totalCost / totalQuantity || 0;
+    const materialCount = materialTotals.length;
+
+    return {
+        totalQuantity,
+        totalCost,
+        averageUnitPrice,
+        materialCount,
+        supplierCount: uniqueSupplierIds
+    };
+}
+
 export interface GetSupplierAnalyticsParams {
     supplierId?: string;
     supplierType?: ProviderType;

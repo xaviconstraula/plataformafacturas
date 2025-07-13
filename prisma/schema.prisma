@@ -68,6 +68,10 @@ model Invoice {
   @@index([providerId])
   @@index([issueDate])
   @@index([invoiceCode])
+  // Composite indexes for supplier analytics performance
+  @@index([providerId, issueDate]) // For supplier analytics with date sorting
+  @@index([providerId, totalAmount]) // For supplier analytics with amount sorting
+  @@index([issueDate, providerId]) // For date-based supplier queries
 }
 
 // Modelo para Materiales
@@ -128,6 +132,11 @@ model InvoiceItem {
   @@index([materialId])
   @@index([workOrder]) // Índice para filtrar por OT/CECO
   @@index([itemDate])
+  // Composite indexes for analytics performance
+  @@index([materialId, itemDate]) // For material analytics with date sorting
+  @@index([materialId, totalPrice]) // For material analytics with cost sorting
+  @@index([materialId, quantity]) // For material analytics with quantity sorting
+  @@index([itemDate, materialId]) // For date-based material queries
 }
 
 // Tabla de relación entre Materiales y Proveedores
