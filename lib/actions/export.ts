@@ -1315,3 +1315,121 @@ export async function exportWorkOrderByMonth(workOrder: string) {
 
     return exportData;
 }
+
+// Price alert interfaces and export function
+export interface AlertExportFilters {
+    status?: string;
+    startDate?: Date;
+    endDate?: Date;
+    materialId?: string;
+    providerId?: string;
+}
+
+export interface AlertExport {
+    'Fecha Detección': string;
+    'Material': string;
+    'Código Material': string;
+    'Proveedor': string;
+    'Precio Anterior': number;
+    'Precio Nuevo': number;
+    'Variación %': string;
+    'Estado': string;
+    'Fecha Efectiva': string;
+    'Factura': string;
+}
+
+export async function generateAlertsExcelReport(filters: AlertExportFilters = {}) {
+    // Build the where clause
+    const where: Prisma.PriceAlertWhereInput = {};
+
+    if (filters.status) {
+        where.status = filters.status as 'PENDING' | 'APPROVED' | 'REJECTED';
+    }
+
+    if (filters.startDate || filters.endDate) {
+        where.createdAt = {};
+        if (filters.startDate) {
+            where.createdAt.gte = filters.startDate;
+        }
+        if (filters.endDate) {
+            where.createdAt.lte = filters.endDate;
+        }
+    }
+
+    if (filters.materialId) {
+        where.materialId = filters.materialId;
+    }
+
+    if (filters.providerId) {
+        where.providerId = filters.providerId;
+    }
+
+    // Fetch ALL alerts with related data (no pagination limit)
+    const alerts = await prisma.priceAlert.findMany({
+        where,
+        include: {
+            material: true,
+            provider: true,
+            invoice: true,
+        },
+        orderBy: {
+            createdAt: 'desc'
+        }
+    });
+
+    // Transform data for Excel export
+    const exportData: AlertExport[] = alerts.map(alert => ({
+        'Fecha Detección': alert.createdAt.toLocaleDateString('es-ES'),
+        'Material': alert.material.name,
+        'Código Material': alert.material.code || '',
+        'Proveedor': alert.provider.name,
+        'Precio Anterior': Number(alert.oldPrice),
+        'Precio Nuevo': Number(alert.newPrice),
+        'Variación %': `${Number(alert.percentage) > 0 ? '+' : ''}${Number(alert.percentage).toFixed(2)}%`,
+        'Estado': alert.status === 'PENDING'
+            ? 'Pendiente'
+            : alert.status === 'APPROVED'
+                ? 'Aprobado'
+                : 'Rechazado',
+        'Fecha Efectiva': alert.effectiveDate.toLocaleDateString('es-ES'),
+        'Factura': alert.invoice.invoiceCode
+    }));
+
+    // Create workbook
+    const ws = XLSX.utils.json_to_sheet(exportData);
+
+    // Set column widths
+    const columnWidths = [
+        { wch: 15 }, // Fecha Detección
+        { wch: 30 }, // Material
+        { wch: 15 }, // Código Material
+        { wch: 30 }, // Proveedor
+        { wch: 12 }, // Precio Anterior
+        { wch: 12 }, // Precio Nuevo
+        { wch: 12 }, // Variación %
+        { wch: 12 }, // Estado
+        { wch: 15 }, // Fecha Efectiva
+        { wch: 15 }, // Factura
+    ];
+    ws['!cols'] = columnWidths;
+
+    // Style headers
+    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+    for (let col = range.s.c; col <= range.e.c; col++) {
+        const cellAddress = XLSX.utils.encode_cell({ r: 0, c: col });
+        if (ws[cellAddress]) {
+            ws[cellAddress].s = {
+                font: { bold: true },
+                fill: { fgColor: { rgb: "CCCCCC" } },
+                alignment: { horizontal: 'center' }
+            };
+        }
+    }
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Alertas de Precios');
+
+    // Generate buffer
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    return buffer;
+}

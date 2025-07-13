@@ -24,10 +24,10 @@ async function getMaterialsData(params: { [key: string]: string | string[] | und
   const workOrder = getString("workOrder")
   const supplierId = getString("supplierId")
   const materialSearch = getString("materialSearch")
-  const sortBy = (getString("sortBy") as "quantity" | "cost" | "lastPurchase" | "name") || "cost"
+  const sortBy = (getString("sortBy") as "quantity" | "cost" | "lastPurchase" | "name") || "quantity"
   const sortOrder = (getString("sortOrder") as "asc" | "desc") || "desc"
   const page = parseInt(getString("page") || '1', 10)
-  const pageSize = 50 // Generous page size for performance
+  const pageSize = 10 // Standard page size for better user experience
 
   const startDateStr = getString("startDate")
   const endDateStr = getString("endDate")

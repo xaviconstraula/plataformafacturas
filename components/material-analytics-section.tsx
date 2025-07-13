@@ -53,7 +53,7 @@ export function MaterialAnalyticsSection({
         endDate: searchParams.get('endDate') || ''
     }
 
-    const sortBy = (searchParams.get('sortBy') || 'cost') as 'quantity' | 'cost' | 'name' | 'avgUnitPrice'
+    const sortBy = (searchParams.get('sortBy') || 'quantity') as 'quantity' | 'cost' | 'name' | 'avgUnitPrice'
     const sortOrder = (searchParams.get('sortOrder') || 'desc') as 'asc' | 'desc'
 
     // Use server-side pagination data or fall back to client-side for backward compatibility
@@ -92,14 +92,17 @@ export function MaterialAnalyticsSection({
         })
         .slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage)
 
-    // Prepare combined chart data (top 10 materials by cost, but showing both cost and quantity)
-    const combinedChartData = displayMaterials.slice(0, 10).map(material => ({
-        name: material.materialName.length > 15 ? material.materialName.substring(0, 15) + '...' : material.materialName,
-        fullName: material.materialName,
-        cost: material.totalCost,
-        quantity: material.totalQuantity,
-        avgUnitPrice: material.averageUnitPrice
-    }))
+    // Prepare combined chart data (top 10 materials by quantity, regardless of table sorting)
+    const combinedChartData = [...materialAnalytics]
+        .sort((a, b) => b.totalQuantity - a.totalQuantity) // Always sort by quantity desc for chart
+        .slice(0, 10)
+        .map(material => ({
+            name: material.materialName.length > 15 ? material.materialName.substring(0, 15) + '...' : material.materialName,
+            fullName: material.materialName,
+            cost: material.totalCost,
+            quantity: material.totalQuantity,
+            avgUnitPrice: material.averageUnitPrice
+        }))
 
     const hasActiveFilters = Object.values(filters).some(value => value !== undefined && value !== '' && value !== 'all')
 
@@ -133,7 +136,7 @@ export function MaterialAnalyticsSection({
                 </CardHeader>
                 <CardContent>
                     <ResponsiveContainer width="100%" height={400}>
-                        <ComposedChart data={combinedChartData} margin={{ top: 20, right: 80, bottom: 80, left: 20 }}>
+                        <ComposedChart data={combinedChartData} margin={{ top: 20, right: 100, bottom: 80, left: 60 }}>
                             <CartesianGrid strokeDasharray="3 3" />
                             <XAxis
                                 dataKey="name"
@@ -154,7 +157,7 @@ export function MaterialAnalyticsSection({
                                 orientation="right"
                                 tickFormatter={(value) => formatCurrency(value)}
                                 tick={{ fontSize: 11 }}
-                                label={{ value: 'Coste Total', angle: 90, position: 'insideRight' }}
+                                label={{ value: 'Coste Total', angle: 90, position: 'outside', offset: 40 }}
                             />
                             <Tooltip
                                 formatter={(value: number, name: string) => {

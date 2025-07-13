@@ -45,30 +45,30 @@ export function Overview({ data: initialData }: OverviewProps) {
   return (
     <ResponsiveContainer width="100%" height={320}>
       <BarChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
-        <CartesianGrid strokeDasharray="3 3" />
+        <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
         <XAxis
           dataKey="name"
-          tick={{ fontSize: 12 }}
+          tick={{ fontSize: 12, fill: 'var(--constraula-gray)' }}
           axisLine={false}
           tickLine={false}
         />
         <YAxis
-          tick={{ fontSize: 12 }}
+          tick={{ fontSize: 12, fill: 'var(--constraula-gray)' }}
           axisLine={false}
           tickLine={false}
         />
         <Tooltip
           formatter={(value) => [value, 'Total']}
-          labelStyle={{ color: '#000' }}
+          labelStyle={{ color: 'var(--constraula-black)' }}
           contentStyle={{
-            backgroundColor: '#fff',
-            border: '1px solid #e2e8f0',
+            backgroundColor: 'var(--constraula-white)',
+            border: '1px solid var(--border)',
             borderRadius: '6px'
           }}
         />
         <Bar
           dataKey="total"
-          fill="#3b82f6"
+          fill="var(--constraula-green)"
           radius={[4, 4, 0, 0]}
         />
       </BarChart>

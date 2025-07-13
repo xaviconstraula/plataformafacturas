@@ -1,9 +1,38 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { generateExcelReport, ExportFilters } from '@/lib/actions/export';
+import { generateExcelReport, ExportFilters, generateAlertsExcelReport, AlertExportFilters } from '@/lib/actions/export';
 
 export async function POST(request: NextRequest) {
     try {
         const body = await request.json();
+
+        // Check if this is an alerts export
+        if (body.exportType === 'alerts') {
+            const alertFilters: AlertExportFilters = {
+                status: body.status,
+                startDate: body.startDate ? new Date(body.startDate) : undefined,
+                endDate: body.endDate ? new Date(body.endDate) : undefined,
+                materialId: body.materialId,
+                providerId: body.providerId,
+            };
+
+            const buffer = await generateAlertsExcelReport(alertFilters);
+
+            // Generate filename for alerts
+            const now = new Date();
+            const dateStr = now.toISOString().split('T')[0];
+            const filename = `alertas_precios_${dateStr}.xlsx`;
+
+            return new NextResponse(buffer, {
+                status: 200,
+                headers: {
+                    'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    'Content-Disposition': `attachment; filename="${filename}"`,
+                    'Content-Length': buffer.length.toString(),
+                },
+            });
+        }
+
+        // Original export logic for invoices
         const filters: ExportFilters = {
             materialId: body.materialId,
             category: body.category,

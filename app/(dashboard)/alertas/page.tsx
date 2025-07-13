@@ -4,6 +4,7 @@ import { getPriceAlerts } from "@/lib/actions/alertas"
 import { Pagination } from "@/components/ui/pagination"
 import { AlertStatusFilter } from "@/components/alert-status-filter"
 import { HelpTooltip, helpContent } from "@/components/help-tooltip"
+import { AlertsExcelExportButton } from "@/components/alerts-excel-export-button"
 
 interface SearchParams {
   page?: string
@@ -37,8 +38,9 @@ export default async function AlertsPage({ searchParams }: PageProps) {
         />
       </div>
 
-      <div className="flex justify-end">
+      <div className="flex justify-between items-center">
         <AlertStatusFilter />
+        <AlertsExcelExportButton />
       </div>
 
       <Suspense fallback={<div className="h-96 rounded-lg bg-muted animate-pulse" />}>
