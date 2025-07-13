@@ -73,7 +73,7 @@ export interface ExportFilters {
     minQuantity?: number;
     maxQuantity?: number;
     // Export type indicator
-    exportType?: 'workorders-list' | 'materials-list' | 'suppliers-list' | 'specific-workorder' | 'general';
+    exportType?: 'workorders-list' | 'materials-list' | 'suppliers-list' | 'specific-workorder' | 'general' | 'analytics-dashboard';
 }
 
 export interface InvoiceItemExport {
@@ -913,6 +913,64 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
     const isWorkOrdersListExport = filters.exportType === 'workorders-list';
     const isMaterialsListExport = filters.exportType === 'materials-list';
     const isSuppliersListExport = filters.exportType === 'suppliers-list';
+    const isAnalyticsDashboardExport = filters.exportType === 'analytics-dashboard';
+
+    // If this is an analytics dashboard export, create material analysis sheets only
+    if (isAnalyticsDashboardExport) {
+        // For analytics dashboard, we want work order material breakdown if filters contain work orders
+        if (filters.workOrder && filters.workOrder.match(/^[A-Za-z0-9-_]+$/)) {
+            // Single work order - create material breakdown
+            const materialData = await exportWorkOrderByMaterial(filters.workOrder);
+            if (materialData.length > 0) {
+                const materialSheet = createStyledWorksheet(materialData, [
+                    { wch: 20 }, // Orden de Trabajo
+                    { wch: 30 }, // Material
+                    { wch: 15 }, // Código Material
+                    { wch: 15 }, // --- RESUMEN ---
+                    { wch: 15 }, // Coste Total (c/IVA)
+                    { wch: 15 }, // Coste Base
+                    { wch: 12 }, // IVA
+                    { wch: 15 }, // Cantidad Total
+                    { wch: 15 }, // Precio Promedio
+                    { wch: 12 }, // Nº Proveedores
+                    { wch: 12 }, // Nº Items
+                    { wch: 18 }, // --- DETALLE ITEMS ---
+                    { wch: 12 }, // Fecha Item
+                    { wch: 25 }, // Proveedor
+                    { wch: 12 }, // Cantidad Item
+                    { wch: 15 }, // Precio Unitario
+                    { wch: 15 }, // Total Item (c/IVA)
+                    { wch: 15 }  // Nº Factura
+                ]);
+                XLSX.utils.book_append_sheet(workbook, materialSheet, 'Detalle por Material');
+            }
+        } else {
+            // General material analysis for analytics dashboard
+            const materialDetailData = await exportMaterialsListDetailed(filters);
+            if (materialDetailData.length > 0) {
+                const materialDetailSheet = createStyledWorksheet(materialDetailData, [
+                    { wch: 35 }, // Material
+                    { wch: 15 }, // Código Material
+                    { wch: 25 }, // Proveedor
+                    { wch: 15 }, // CIF Proveedor
+                    { wch: 18 }, // Tipo Proveedor
+                    { wch: 15 }, // OT/CECO
+                    { wch: 12 }, // Cantidad
+                    { wch: 15 }, // Precio Unitario
+                    { wch: 18 }, // Total Material (s/IVA)
+                    { wch: 18 }, // Total Material (c/IVA)
+                    { wch: 12 }, // Fecha Item
+                    { wch: 15 }, // Nº Factura
+                    { wch: 12 }  // Fecha Factura
+                ]);
+                XLSX.utils.book_append_sheet(workbook, materialDetailSheet, 'Detalle por Material');
+            }
+        }
+
+        // Convert workbook to buffer and return
+        const buffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'buffer' });
+        return buffer;
+    }
 
     // If this is a work orders list export, create work orders summary and detailed sheets
     if (isWorkOrdersListExport) {
