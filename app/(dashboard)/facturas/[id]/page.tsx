@@ -22,6 +22,7 @@ export default async function InvoicePage({ params }: InvoicePageProps) {
           <GoBackButton
             fallbackUrl="/facturas"
             label="Volver a Facturas"
+            forceUrl={false}
           />
         </div>
         <InvoiceDetails invoice={invoice} />

@@ -694,11 +694,9 @@ export async function getSupplierAnalytics(params: GetSupplierAnalyticsParams = 
 
         const topMaterialsByQuantity = [...materialStats]
             .sort((a, b) => b.totalQuantity - a.totalQuantity)
-            .slice(0, 10);
 
         const topMaterialsByCost = [...materialStats]
             .sort((a, b) => b.totalCost - a.totalCost)
-            .slice(0, 10);
 
         // Monthly breakdown
         const monthlySpending: SupplierAnalytics['monthlySpending'] = [];
@@ -900,11 +898,9 @@ export async function getSupplierAnalyticsPaginated(params: GetSupplierAnalytics
 
         const topMaterialsByQuantity = [...materialStats]
             .sort((a, b) => b.totalQuantity - a.totalQuantity)
-            .slice(0, 10);
 
         const topMaterialsByCost = [...materialStats]
             .sort((a, b) => b.totalCost - a.totalCost)
-            .slice(0, 10);
 
         // Monthly breakdown
         const monthlySpending: SupplierAnalytics['monthlySpending'] = [];
@@ -1036,6 +1032,327 @@ export async function getWorkOrderAnalytics(workOrder: string) {
             invoiceCode: item.invoice.invoiceCode,
             itemDate: item.itemDate
         }))
+    };
+}
+
+// Function to get work orders data for suppliers page with pagination
+export async function getWorkOrdersForSuppliers(filters: GetSupplierAnalyticsParams = {}) {
+    const page = filters.page || 1;
+    const pageSize = filters.pageSize || 20; // Reasonable page size for work orders
+    const skip = (page - 1) * pageSize;
+
+    const normalizedSupplierCif = normalizeSearch(filters.supplierCif);
+    const normalizedWorkOrder = processWorkOrderSearch(filters.workOrder);
+    const normalizedMaterialCategory = normalizeSearch(filters.materialCategory);
+
+    // Build where clause similar to suppliers filtering
+    const baseWhere: Prisma.InvoiceItemWhereInput = {
+        workOrder: { not: null },
+        ...(filters.supplierId ? { invoice: { providerId: filters.supplierId } } : {}),
+        ...(filters.supplierType ? { invoice: { provider: { type: filters.supplierType } } } : {}),
+        ...(normalizedSupplierCif ? { invoice: { provider: { cif: { contains: normalizedSupplierCif, mode: 'insensitive' } } } } : {}),
+        ...(normalizedWorkOrder ? { workOrder: { contains: normalizedWorkOrder, mode: 'insensitive' } } : {}),
+        ...(normalizedMaterialCategory ? { material: { category: { contains: normalizedMaterialCategory, mode: 'insensitive' } } } : {}),
+        ...(filters.startDate || filters.endDate ? {
+            itemDate: {
+                ...(filters.startDate ? { gte: filters.startDate } : {}),
+                ...(filters.endDate ? { lte: filters.endDate } : {})
+            }
+        } : {})
+    };
+
+    // Get work order aggregations
+    const workOrderAggregation = await prisma.invoiceItem.groupBy({
+        by: ['workOrder'],
+        where: baseWhere,
+        _sum: {
+            totalPrice: true,
+            quantity: true
+        },
+        _count: {
+            id: true
+        },
+        _min: {
+            itemDate: true
+        },
+        _max: {
+            itemDate: true
+        },
+        orderBy: { _sum: { totalPrice: 'desc' } }
+    });
+
+    // Apply pagination to work orders
+    const totalCount = workOrderAggregation.length;
+    const totalPages = Math.ceil(totalCount / pageSize);
+    const paginatedWorkOrders = workOrderAggregation.slice(skip, skip + pageSize);
+    const workOrderCodes = paginatedWorkOrders.map(wo => wo.workOrder!).filter(Boolean);
+
+    if (workOrderCodes.length === 0) {
+        return {
+            workOrders: [],
+            totalWorkOrders: totalCount,
+            totalCost: 0,
+            totalItems: 0,
+            currentPage: page,
+            pageSize,
+            totalPages
+        };
+    }
+
+    // Get all invoice items for these work orders
+    const allItems = await prisma.invoiceItem.findMany({
+        where: {
+            ...baseWhere,
+            workOrder: { in: workOrderCodes }
+        },
+        include: {
+            material: {
+                select: {
+                    id: true,
+                    name: true,
+                    code: true,
+                    category: true
+                }
+            },
+            invoice: {
+                select: {
+                    id: true,
+                    provider: {
+                        select: {
+                            id: true,
+                            name: true,
+                            cif: true
+                        }
+                    }
+                }
+            }
+        },
+        orderBy: {
+            totalPrice: 'desc'
+        }
+    });
+
+    // Group items by work order
+    const itemsByWorkOrder = new Map<string, typeof allItems>();
+    for (const item of allItems) {
+        const workOrder = item.workOrder!;
+        if (!itemsByWorkOrder.has(workOrder)) {
+            itemsByWorkOrder.set(workOrder, []);
+        }
+        itemsByWorkOrder.get(workOrder)!.push(item);
+    }
+
+    // Build the final work orders data structure
+    const workOrdersWithDetails = paginatedWorkOrders.map(wo => {
+        const workOrderCode = wo.workOrder!;
+        const items = itemsByWorkOrder.get(workOrderCode) || [];
+
+        const uniqueProviders = [...new Set(items.map(item => item.invoice.provider.name))];
+        const uniqueMaterials = [...new Set(items.map(item => item.material.name))];
+
+        const dateRange = {
+            earliest: wo._min?.itemDate || new Date(),
+            latest: wo._max?.itemDate || new Date()
+        };
+
+        return {
+            workOrder: workOrderCode,
+            totalCost: (wo._sum?.totalPrice?.toNumber() || 0) * 1.21, // Add 21% IVA
+            totalQuantity: wo._sum?.quantity?.toNumber() || 0,
+            itemCount: wo._count?.id || 0,
+            providers: uniqueProviders,
+            materials: uniqueMaterials,
+            dateRange
+        };
+    });
+
+    // Calculate summary stats from ALL work orders (not just current page)
+    const totalCostSum = workOrderAggregation.reduce((sum, wo) => sum + (wo._sum?.totalPrice?.toNumber() || 0) * 1.21, 0);
+    const totalItemsSum = workOrderAggregation.reduce((sum, wo) => sum + (wo._count?.id || 0), 0);
+
+    return {
+        workOrders: workOrdersWithDetails,
+        totalWorkOrders: totalCount,
+        totalCost: totalCostSum,
+        totalItems: totalItemsSum,
+        currentPage: page,
+        pageSize,
+        totalPages
+    };
+}
+
+// Function to get materials data for suppliers page with pagination
+export async function getMaterialsForSuppliers(filters: GetSupplierAnalyticsParams = {}) {
+    const page = filters.page || 1;
+    const pageSize = filters.pageSize || 20; // Reasonable page size for materials
+    const skip = (page - 1) * pageSize;
+
+    const normalizedSupplierCif = normalizeSearch(filters.supplierCif);
+    const normalizedWorkOrder = processWorkOrderSearch(filters.workOrder);
+    const normalizedMaterialCategory = normalizeSearch(filters.materialCategory);
+
+    // Build where clause similar to suppliers filtering
+    const baseWhere: Prisma.InvoiceItemWhereInput = {
+        ...(filters.supplierId ? { invoice: { providerId: filters.supplierId } } : {}),
+        ...(filters.supplierType ? { invoice: { provider: { type: filters.supplierType } } } : {}),
+        ...(normalizedSupplierCif ? { invoice: { provider: { cif: { contains: normalizedSupplierCif, mode: 'insensitive' } } } } : {}),
+        ...(normalizedWorkOrder ? { workOrder: { contains: normalizedWorkOrder, mode: 'insensitive' } } : {}),
+        ...(normalizedMaterialCategory ? { material: { category: { contains: normalizedMaterialCategory, mode: 'insensitive' } } } : {}),
+        ...(filters.startDate || filters.endDate ? {
+            itemDate: {
+                ...(filters.startDate ? { gte: filters.startDate } : {}),
+                ...(filters.endDate ? { lte: filters.endDate } : {})
+            }
+        } : {})
+    };
+
+    // Get material aggregations
+    const materialAggregation = await prisma.invoiceItem.groupBy({
+        by: ['materialId'],
+        where: baseWhere,
+        _sum: {
+            totalPrice: true,
+            quantity: true
+        },
+        _count: {
+            id: true
+        },
+        _max: {
+            itemDate: true
+        },
+        orderBy: { _sum: { totalPrice: 'desc' } }
+    });
+
+    // Apply pagination to materials
+    const totalCount = materialAggregation.length;
+    const totalPages = Math.ceil(totalCount / pageSize);
+    const paginatedMaterials = materialAggregation.slice(skip, skip + pageSize);
+    const materialIds = paginatedMaterials.map(m => m.materialId);
+
+    if (materialIds.length === 0) {
+        return {
+            materials: [],
+            totalMaterials: totalCount,
+            totalCost: 0,
+            totalQuantity: 0,
+            avgUnitPrice: 0,
+            currentPage: page,
+            pageSize,
+            totalPages
+        };
+    }
+
+    // Get all invoice items for these materials
+    const allItems = await prisma.invoiceItem.findMany({
+        where: {
+            ...baseWhere,
+            materialId: { in: materialIds }
+        },
+        include: {
+            material: {
+                select: {
+                    id: true,
+                    name: true,
+                    code: true,
+                    category: true,
+                    unit: true
+                }
+            },
+            invoice: {
+                select: {
+                    id: true,
+                    provider: {
+                        select: {
+                            id: true,
+                            name: true,
+                            cif: true
+                        }
+                    }
+                }
+            }
+        },
+        orderBy: {
+            itemDate: 'desc'
+        }
+    });
+
+    // Group items by material
+    const itemsByMaterial = new Map<string, typeof allItems>();
+    for (const item of allItems) {
+        const materialId = item.materialId;
+        if (!itemsByMaterial.has(materialId)) {
+            itemsByMaterial.set(materialId, []);
+        }
+        itemsByMaterial.get(materialId)!.push(item);
+    }
+
+    // Build the final materials data structure
+    const materialsWithDetails = paginatedMaterials.map(m => {
+        const materialId = m.materialId;
+        const items = itemsByMaterial.get(materialId) || [];
+        const material = items[0]?.material;
+
+        if (!material) return null;
+
+        const totalCost = m._sum?.totalPrice?.toNumber() || 0;
+        const totalQuantity = m._sum?.quantity?.toNumber() || 0;
+        const averageUnitPrice = totalQuantity > 0 ? totalCost / totalQuantity : 0;
+
+        // Get unique suppliers
+        const supplierMap = new Map<string, { supplierId: string; supplierName: string; totalCost: number; totalQuantity: number }>();
+        for (const item of items) {
+            const supplierId = item.invoice.provider.id;
+            const supplierName = item.invoice.provider.name;
+
+            if (!supplierMap.has(supplierId)) {
+                supplierMap.set(supplierId, {
+                    supplierId,
+                    supplierName,
+                    totalCost: 0,
+                    totalQuantity: 0
+                });
+            }
+
+            const supplier = supplierMap.get(supplierId)!;
+            supplier.totalCost += item.totalPrice.toNumber();
+            supplier.totalQuantity += item.quantity.toNumber();
+        }
+
+        const topSuppliers = Array.from(supplierMap.values())
+            .sort((a, b) => b.totalCost - a.totalCost);
+
+        // Get unique work orders
+        const workOrders = [...new Set(items.map(item => item.workOrder).filter(Boolean))] as string[];
+
+        return {
+            materialId,
+            materialName: material.name,
+            materialCode: material.code || '',
+            category: material.category || undefined,
+            totalCost,
+            totalQuantity,
+            averageUnitPrice,
+            supplierCount: supplierMap.size,
+            lastPurchaseDate: m._max?.itemDate || new Date(),
+            workOrders,
+            topSuppliers
+        };
+    }).filter((material): material is NonNullable<typeof material> => material !== null);
+
+    // Calculate summary stats from ALL materials (not just current page)
+    const totalCostSum = materialAggregation.reduce((sum, m) => sum + (m._sum?.totalPrice?.toNumber() || 0), 0);
+    const totalQuantitySum = materialAggregation.reduce((sum, m) => sum + (m._sum?.quantity?.toNumber() || 0), 0);
+    const avgUnitPrice = totalQuantitySum > 0 ? totalCostSum / totalQuantitySum : 0;
+
+    return {
+        materials: materialsWithDetails,
+        totalMaterials: totalCount,
+        totalCost: totalCostSum,
+        totalQuantity: totalQuantitySum,
+        avgUnitPrice,
+        currentPage: page,
+        pageSize,
+        totalPages
     };
 }
 

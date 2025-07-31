@@ -106,6 +106,7 @@ export default async function AlertDetailPage({ params }: PageProps) {
                 <GoBackButton
                     fallbackUrl="/alertas"
                     label="Volver a Alertas"
+                    forceUrl={false}
                 />
             </div>
 

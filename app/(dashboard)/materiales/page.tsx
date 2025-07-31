@@ -5,8 +5,9 @@ import { ExcelExportButton } from "@/components/excel-export-button"
 import { MaterialAnalyticsSection } from "@/components/material-analytics-section"
 import { MaterialAnalyticsFilters } from "@/components/material-analytics-filters"
 import { HelpTooltip, helpContent } from "@/components/help-tooltip"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { prisma } from "@/lib/db"
-import { DollarSign, Package, Users, TrendingUp } from "lucide-react"
+import { DollarSign, Package, Users, TrendingUp, BarChart3, Building2 } from "lucide-react"
 import { formatCurrency } from "@/lib/utils"
 
 interface MaterialsPageProps {
@@ -27,7 +28,7 @@ async function getMaterialsData(params: { [key: string]: string | string[] | und
   const sortBy = (getString("sortBy") as "quantity" | "cost" | "lastPurchase" | "name") || "quantity"
   const sortOrder = (getString("sortOrder") as "asc" | "desc") || "desc"
   const page = parseInt(getString("page") || '1', 10)
-  const pageSize = 10 // Standard page size for better user experience
+  const pageSize = 25 // Optimized page size for better performance with large datasets
 
   const startDateStr = getString("startDate")
   const endDateStr = getString("endDate")
@@ -51,19 +52,19 @@ async function getMaterialsData(params: { [key: string]: string | string[] | und
     prisma.provider.findMany({
       select: { id: true, name: true, type: true },
       orderBy: { name: 'asc' },
-      take: 1000 // Limit providers for filters dropdown to avoid performance issues
+      take: 2000 // Optimized limit for thousands of providers
     }),
     prisma.material.findMany({
       select: { category: true },
       where: { category: { not: null } },
       distinct: ['category'],
-      take: 100 // Limit categories to reasonable amount
+      take: 200 // Increased limit for more categories
     }).then(results => results.map(r => r.category!).filter(Boolean)),
     prisma.invoiceItem.findMany({
       select: { workOrder: true },
       where: { workOrder: { not: null } },
       distinct: ['workOrder'],
-      take: 500 // Limit work orders for performance
+      take: 1000 // Increased limit for more work orders
     }).then(results => results.map(r => r.workOrder!).filter(Boolean)),
     getMaterialFilterTotals({
       category: category && category !== "all" ? category : undefined,
@@ -157,6 +158,8 @@ export default async function MaterialsPage({ searchParams }: MaterialsPageProps
       />
 
       <Suspense fallback={<div className="h-96 rounded-lg bg-muted animate-pulse" />}>
+
+
         <MaterialAnalyticsSection
           materialAnalytics={data.materialAnalytics}
           suppliers={data.suppliers}
@@ -165,6 +168,10 @@ export default async function MaterialsPage({ searchParams }: MaterialsPageProps
           pagination={data.pagination}
           filterTotals={data.filterTotals}
         />
+
+
+
+
       </Suspense>
     </div>
   )

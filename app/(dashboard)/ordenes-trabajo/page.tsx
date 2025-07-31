@@ -90,7 +90,7 @@ async function getWorkOrdersData(params: SearchParams) {
         const providers = await prisma.provider.findMany({
             select: { id: true, name: true },
             orderBy: { name: 'asc' },
-            take: 1000 // Limit for performance
+            take: 2000 // Optimized limit for thousands of providers
         })
 
         return {
@@ -184,7 +184,7 @@ async function getWorkOrdersData(params: SearchParams) {
     const providers = await prisma.provider.findMany({
         select: { id: true, name: true },
         orderBy: { name: 'asc' },
-        take: 1000 // Limit for performance
+        take: 2000 // Optimized limit for thousands of providers
     })
 
     // Calculate summary stats

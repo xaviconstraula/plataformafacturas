@@ -86,6 +86,7 @@ export default async function MaterialDetailPage({ params }: MaterialDetailPageP
                 <GoBackButton
                     fallbackUrl="/materiales"
                     label="Volver a Materiales"
+                    forceUrl={false}
                 />
             </div>
 
@@ -165,6 +166,8 @@ export default async function MaterialDetailPage({ params }: MaterialDetailPageP
                                                 <Link
                                                     href={`/proveedores/${item.invoice.provider.id}`}
                                                     className="text-blue-600 hover:text-blue-800 hover:underline font-medium"
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
                                                 >
                                                     {item.invoice.provider.name}
                                                 </Link>
@@ -173,6 +176,8 @@ export default async function MaterialDetailPage({ params }: MaterialDetailPageP
                                                 <Link
                                                     href={`/facturas/${item.invoice.id}`}
                                                     className="text-blue-600 hover:text-blue-800 hover:underline font-mono text-sm"
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
                                                 >
                                                     {item.invoice.invoiceCode}
                                                 </Link>

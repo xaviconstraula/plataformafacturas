@@ -567,6 +567,8 @@ export default async function WorkOrderDetailPage({ params, searchParams }: Page
                                                             <Link
                                                                 href={`/facturas/${item.invoice.id}`}
                                                                 className="text-blue-600 hover:underline text-sm"
+                                                                target="_blank"
+                                                                rel="noopener noreferrer"
                                                             >
                                                                 {item.invoice.invoiceCode}
                                                             </Link>

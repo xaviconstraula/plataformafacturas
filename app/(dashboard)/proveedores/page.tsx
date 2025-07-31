@@ -1,14 +1,17 @@
 import { Suspense } from "react"
-import { getSupplierAnalyticsPaginated } from "@/lib/actions/analytics"
+import { getSupplierAnalyticsPaginated, getWorkOrdersForSuppliers, getMaterialsForSuppliers } from "@/lib/actions/analytics"
 import { NewSupplierButton } from "@/components/new-supplier-button"
 import { ExcelExportButton } from "@/components/excel-export-button"
 import { MergeProvidersDialog } from "@/components/merge-providers-dialog"
 import { SupplierAnalyticsSection } from "@/components/supplier-analytics-section"
+import { SupplierWorkOrdersSection } from "@/components/supplier-work-orders-section"
+import { SupplierMaterialsSection } from "@/components/supplier-materials-section"
 import { HelpTooltip, helpContent } from "@/components/help-tooltip"
 import { prisma } from "@/lib/db"
 import { ProviderType } from "@/generated/prisma"
-import { DollarSign, Users, FileText, TrendingUp } from "lucide-react"
+import { DollarSign, Users, FileText, TrendingUp, Box } from "lucide-react"
 import { formatCurrency } from "@/lib/utils"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 
 interface SuppliersPageProps {
   searchParams: Promise<{ [key: string]: string | string[] | undefined }>
@@ -20,8 +23,14 @@ async function getSuppliersData(params: { [key: string]: string | string[] | und
     return typeof value === "string" ? value : undefined
   }
 
+  // Pagination parameters for different tabs
   const page = parseInt(getString("page") || '1', 10)
   const pageSize = 50 // Generous page size for performance
+  const workOrdersPage = parseInt(getString("workOrdersPage") || '1', 10)
+  const workOrdersPageSize = parseInt(getString("workOrdersPageSize") || '20', 10)
+  const materialsPage = parseInt(getString("materialsPage") || '1', 10)
+  const materialsPageSize = parseInt(getString("materialsPageSize") || '20', 10)
+
   const sortBy = (getString("sortBy") as "spent" | "invoices" | "materials" | "name") || "spent"
   const sortOrder = (getString("sortOrder") as "asc" | "desc") || "desc"
 
@@ -34,7 +43,18 @@ async function getSuppliersData(params: { [key: string]: string | string[] | und
   const startDate = getString("startDate") ? new Date(getString("startDate")!) : undefined
   const endDate = getString("endDate") ? new Date(getString("endDate")!) : undefined
 
-  const [supplierData, categories, workOrders, allSuppliers] = await Promise.all([
+  // Build the filters for sub-queries
+  const queryFilters = {
+    supplierId,
+    supplierCif,
+    supplierType,
+    workOrder,
+    materialCategory,
+    startDate,
+    endDate
+  }
+
+  const [supplierData, categories, workOrders, allSuppliers, workOrdersData, materialsData] = await Promise.all([
     getSupplierAnalyticsPaginated({
       includeMonthlyBreakdown: true,
       page,
@@ -66,6 +86,18 @@ async function getSuppliersData(params: { [key: string]: string | string[] | und
       select: { id: true, name: true },
       orderBy: { name: 'asc' },
       take: 1000 // Limit for performance
+    }),
+    // Get work orders data for suppliers with pagination
+    getWorkOrdersForSuppliers({
+      ...queryFilters,
+      page: workOrdersPage,
+      pageSize: workOrdersPageSize
+    }),
+    // Get materials data for suppliers with pagination
+    getMaterialsForSuppliers({
+      ...queryFilters,
+      page: materialsPage,
+      pageSize: materialsPageSize
     })
   ])
 
@@ -92,6 +124,22 @@ async function getSuppliersData(params: { [key: string]: string | string[] | und
       totalMaterials,
       avgInvoiceAmount,
       totalSuppliers: supplierData.totalCount // Use total count, not just current page
+    },
+    workOrdersData: {
+      ...workOrdersData,
+      pagination: {
+        currentPage: workOrdersData.currentPage,
+        totalPages: workOrdersData.totalPages,
+        pageSize: workOrdersData.pageSize
+      }
+    },
+    materialsData: {
+      ...materialsData,
+      pagination: {
+        currentPage: materialsData.currentPage,
+        totalPages: materialsData.totalPages,
+        pageSize: materialsData.pageSize
+      }
     }
   }
 }
@@ -139,13 +187,56 @@ export default async function SuppliersPage({ searchParams }: SuppliersPageProps
       </div>
 
       <Suspense fallback={<div className="h-96 rounded-lg bg-muted animate-pulse" />}>
-        <SupplierAnalyticsSection
-          supplierAnalytics={data.supplierAnalytics}
-          categories={data.categories}
-          workOrders={data.workOrders}
-          allSuppliers={data.allSuppliers}
-          pagination={data.pagination}
-        />
+        <Tabs defaultValue="suppliers" className="w-full">
+          <TabsList className="grid w-full grid-cols-3">
+            <TabsTrigger value="suppliers" className="flex items-center gap-2">
+              <Users className="h-4 w-4" />
+              Proveedores ({data.stats.totalSuppliers})
+            </TabsTrigger>
+            <TabsTrigger value="workorders" className="flex items-center gap-2">
+              <FileText className="h-4 w-4" />
+              Órdenes de Trabajo ({data.workOrdersData.totalWorkOrders})
+            </TabsTrigger>
+            <TabsTrigger value="materials" className="flex items-center gap-2">
+              <Box className="h-4 w-4" />
+              Materiales ({data.materialsData.totalMaterials})
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="suppliers" className="mt-6">
+            <SupplierAnalyticsSection
+              supplierAnalytics={data.supplierAnalytics}
+              categories={data.categories}
+              workOrders={data.workOrders}
+              allSuppliers={data.allSuppliers}
+              pagination={data.pagination}
+            />
+          </TabsContent>
+
+          <TabsContent value="workorders" className="mt-6">
+            <SupplierWorkOrdersSection
+              workOrders={data.workOrdersData.workOrders}
+              totalWorkOrders={data.workOrdersData.totalWorkOrders}
+              totalCost={data.workOrdersData.totalCost}
+              totalItems={data.workOrdersData.totalItems}
+              pagination={data.workOrdersData.pagination}
+              showAll={false}
+            />
+          </TabsContent>
+
+          <TabsContent value="materials" className="mt-6">
+            <SupplierMaterialsSection
+              materials={data.materialsData.materials.filter(Boolean)}
+              totalMaterials={data.materialsData.totalMaterials}
+              totalCost={data.materialsData.totalCost}
+              totalQuantity={data.materialsData.totalQuantity}
+              totalSuppliers={data.stats.totalSuppliers}
+              avgUnitPrice={data.materialsData.avgUnitPrice}
+              pagination={data.materialsData.pagination}
+              showAll={false}
+            />
+          </TabsContent>
+        </Tabs>
       </Suspense>
     </div>
   )

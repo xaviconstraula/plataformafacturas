@@ -7,9 +7,12 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ExcelExportButton } from "@/components/excel-export-button"
 import { formatCurrency } from "@/lib/utils"
-import { getSupplierAnalytics } from "@/lib/actions/analytics"
+import { getSupplierAnalytics, getWorkOrdersForSuppliers } from "@/lib/actions/analytics"
 import { prisma } from "@/lib/db"
 import Link from "next/link"
+import { TopMaterialsList } from "@/components/top-materials-list"
+import { SupplierWorkOrdersSection } from "@/components/supplier-work-orders-section"
+import { SupplierDetailFilters } from "@/components/supplier-detail-filters"
 import {
     Building2Icon,
     PhoneIcon,
@@ -26,6 +29,7 @@ import { GoBackButton } from "@/components/go-back-button"
 
 interface SupplierDetailPageProps {
     params: Promise<{ id: string }>
+    searchParams: Promise<{ [key: string]: string | string[] | undefined }>
 }
 
 async function getSupplier(id: string) {
@@ -53,21 +57,100 @@ async function getSupplier(id: string) {
     return supplier
 }
 
-export default async function SupplierDetailPage({ params }: SupplierDetailPageProps) {
-    const resolvedParams = await params
+export default async function SupplierDetailPage({ params, searchParams }: SupplierDetailPageProps) {
+    const [resolvedParams, resolvedSearchParams] = await Promise.all([params, searchParams])
     const supplier = await getSupplier(resolvedParams.id)
 
     if (!supplier) {
         notFound()
     }
 
-    const [supplierAnalytics] = await getSupplierAnalytics({
+    // Helper function to extract string values from search params
+    const getString = (key: string) => {
+        const value = resolvedSearchParams[key]
+        return typeof value === "string" ? value : undefined
+    }
+
+    // Extract filters
+    const filters = {
         supplierId: resolvedParams.id,
+        workOrder: getString('workOrder'),
+        materialCategory: getString('category') && getString('category') !== 'all' ? getString('category') : undefined,
+        startDate: getString('startDate') ? new Date(getString('startDate')!) : undefined,
+        endDate: getString('endDate') ? new Date(getString('endDate')!) : undefined,
         includeMonthlyBreakdown: true
-    })
+    }
+
+    const [supplierAnalytics, workOrdersData, categories, workOrdersForFilters, filteredInvoices] = await Promise.all([
+        getSupplierAnalytics(filters).then(analytics => analytics[0]),
+        getWorkOrdersForSuppliers(filters),
+        // Get material categories for filters
+        prisma.material.findMany({
+            select: { category: true },
+            where: {
+                category: { not: null },
+                invoiceItems: {
+                    some: {
+                        invoice: {
+                            providerId: resolvedParams.id
+                        }
+                    }
+                }
+            },
+            distinct: ['category'],
+            take: 100
+        }).then(results => results.map(r => r.category!).filter(Boolean)),
+        // Get work orders for this supplier for filters
+        prisma.invoiceItem.findMany({
+            select: { workOrder: true },
+            where: {
+                workOrder: { not: null },
+                invoice: {
+                    providerId: resolvedParams.id
+                }
+            },
+            distinct: ['workOrder'],
+            take: 500
+        }).then(results => results.map(r => r.workOrder!).filter(Boolean)),
+        // Get filtered invoices for the invoices tab
+        prisma.invoice.findMany({
+            where: {
+                providerId: resolvedParams.id,
+                ...(filters.startDate || filters.endDate ? {
+                    issueDate: {
+                        ...(filters.startDate ? { gte: filters.startDate } : {}),
+                        ...(filters.endDate ? { lte: filters.endDate } : {})
+                    }
+                } : {}),
+                ...(filters.workOrder || filters.materialCategory ? {
+                    items: {
+                        some: {
+                            ...(filters.workOrder ? { workOrder: { contains: filters.workOrder, mode: 'insensitive' } } : {}),
+                            ...(filters.materialCategory ? { material: { category: { contains: filters.materialCategory, mode: 'insensitive' } } } : {})
+                        }
+                    }
+                } : {})
+            },
+            include: {
+                items: {
+                    include: {
+                        material: true
+                    },
+                    ...(filters.workOrder || filters.materialCategory ? {
+                        where: {
+                            ...(filters.workOrder ? { workOrder: { contains: filters.workOrder, mode: 'insensitive' } } : {}),
+                            ...(filters.materialCategory ? { material: { category: { contains: filters.materialCategory, mode: 'insensitive' } } } : {})
+                        }
+                    } : {})
+                }
+            },
+            orderBy: { issueDate: 'desc' },
+            take: 20 // Limit to recent invoices
+        })
+    ])
 
     // Calculate additional metrics
-    const recentInvoices = supplier.invoices.slice(0, 10)
+    const recentInvoices = filteredInvoices.slice(0, 10)
     const allItems = supplier.invoices.flatMap(invoice => invoice.items)
 
     // Get unique work orders
@@ -99,13 +182,21 @@ export default async function SupplierDetailPage({ params }: SupplierDetailPageP
                 </div>
                 <div className="flex items-center gap-2">
                     <ExcelExportButton
-                        filters={{ supplierId: supplier.id }}
+                        filters={{
+                            supplierId: supplier.id,
+                            workOrder: filters.workOrder,
+                            category: filters.materialCategory,
+                            startDate: filters.startDate,
+                            endDate: filters.endDate,
+                            exportType: 'suppliers-list'
+                        }}
                         includeDetails={true}
                         variant="outline"
                     />
                     <GoBackButton
                         fallbackUrl="/proveedores"
                         label="Volver a Proveedores"
+                        forceUrl={false}
                     />
                 </div>
             </div>
@@ -232,6 +323,12 @@ export default async function SupplierDetailPage({ params }: SupplierDetailPageP
                 </Card>
             )}
 
+            {/* Filters */}
+            <SupplierDetailFilters
+                categories={categories}
+                workOrders={workOrdersForFilters}
+            />
+
             {/* Detailed Information Tabs */}
             <Tabs defaultValue="invoices" className="w-full">
                 <TabsList className="grid w-full grid-cols-3">
@@ -239,14 +336,15 @@ export default async function SupplierDetailPage({ params }: SupplierDetailPageP
                         <FileTextIcon className="h-4 w-4" />
                         Facturas Recientes
                     </TabsTrigger>
+                    <TabsTrigger value="workorders" className="flex items-center gap-2">
+                        <ClipboardListIcon className="h-4 w-4" />
+                        Órdenes de Trabajo
+                    </TabsTrigger>
                     <TabsTrigger value="materials" className="flex items-center gap-2">
                         <PackageIcon className="h-4 w-4" />
-                        Materiales Top
+                        Materiales
                     </TabsTrigger>
-                    <TabsTrigger value="analytics" className="flex items-center gap-2">
-                        <TrendingUpIcon className="h-4 w-4" />
-                        Análisis
-                    </TabsTrigger>
+
                 </TabsList>
 
                 <TabsContent value="invoices" className="mt-6">
@@ -310,109 +408,36 @@ export default async function SupplierDetailPage({ params }: SupplierDetailPageP
                     </Card>
                 </TabsContent>
 
+                <TabsContent value="workorders" className="mt-6">
+                    <SupplierWorkOrdersSection
+                        workOrders={workOrdersData.workOrders}
+                        totalWorkOrders={workOrdersData.totalWorkOrders}
+                        totalCost={workOrdersData.totalCost}
+                        totalItems={workOrdersData.totalItems}
+                        showAll={true}
+                    />
+                </TabsContent>
+
                 <TabsContent value="materials" className="mt-6">
                     <div className="grid gap-6 md:grid-cols-2">
-                        <Card>
-                            <CardHeader>
-                                <CardTitle>Top Materiales por Coste</CardTitle>
-                            </CardHeader>
-                            <CardContent>
-                                <div className="space-y-3">
-                                    {supplierAnalytics.topMaterialsByCost.slice(0, 10).map((material, index) => (
-                                        <div key={material.materialId} className="flex items-center justify-between p-3 rounded-lg bg-gray-50">
-                                            <div className="flex items-center gap-3">
-                                                <div className="w-6 h-6 rounded-full bg-blue-100 flex items-center justify-center">
-                                                    <span className="text-xs font-medium text-blue-600">{index + 1}</span>
-                                                </div>
-                                                <div>
-                                                    <Link
-                                                        href={`/materiales/${material.materialId}`}
-                                                        className="font-medium text-gray-900 hover:text-blue-600 hover:underline"
-                                                    >
-                                                        {material.materialName}
-                                                    </Link>
-                                                    <p className="text-xs text-gray-500">
-                                                        {material.totalQuantity.toFixed(2)} unidades
-                                                    </p>
-                                                </div>
-                                            </div>
-                                            <div className="text-right">
-                                                <div className="font-medium text-gray-900">{formatCurrency(material.totalCost)}</div>
-                                                <div className="text-xs text-gray-500">{formatCurrency(material.averagePrice)}/ud</div>
-                                            </div>
-                                        </div>
-                                    ))}
-                                </div>
-                            </CardContent>
-                        </Card>
-
-                        <Card>
-                            <CardHeader>
-                                <CardTitle>Top Materiales por Cantidad</CardTitle>
-                            </CardHeader>
-                            <CardContent>
-                                <div className="space-y-3">
-                                    {supplierAnalytics.topMaterialsByQuantity.slice(0, 10).map((material, index) => (
-                                        <div key={material.materialId} className="flex items-center justify-between p-3 rounded-lg bg-gray-50">
-                                            <div className="flex items-center gap-3">
-                                                <div className="w-6 h-6 rounded-full bg-green-100 flex items-center justify-center">
-                                                    <span className="text-xs font-medium text-green-600">{index + 1}</span>
-                                                </div>
-                                                <div>
-                                                    <Link
-                                                        href={`/materiales/${material.materialId}`}
-                                                        className="font-medium text-gray-900 hover:text-blue-600 hover:underline"
-                                                    >
-                                                        {material.materialName}
-                                                    </Link>
-                                                    <p className="text-xs text-gray-500">
-                                                        {formatCurrency(material.totalCost)} total
-                                                    </p>
-                                                </div>
-                                            </div>
-                                            <div className="text-right">
-                                                <div className="font-medium text-gray-900">{material.totalQuantity.toFixed(2)}</div>
-                                                <div className="text-xs text-gray-500">{formatCurrency(material.averagePrice)}/ud</div>
-                                            </div>
-                                        </div>
-                                    ))}
-                                </div>
-                            </CardContent>
-                        </Card>
+                        <TopMaterialsList
+                            title="Top Materiales por Coste"
+                            materials={supplierAnalytics.topMaterialsByCost}
+                            variant="cost"
+                            initialSize={10}
+                            batchSize={20}
+                        />
+                        <TopMaterialsList
+                            title="Top Materiales por Cantidad"
+                            materials={supplierAnalytics.topMaterialsByQuantity}
+                            variant="quantity"
+                            initialSize={10}
+                            batchSize={20}
+                        />
                     </div>
                 </TabsContent>
 
-                <TabsContent value="analytics" className="mt-6">
-                    <Card>
-                        <CardHeader>
-                            <CardTitle>Evolución del Gasto Mensual</CardTitle>
-                        </CardHeader>
-                        <CardContent>
-                            {monthlyData.length > 0 ? (
-                                <div className="space-y-4">
-                                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-                                        {monthlyData.map((month) => (
-                                            <div key={month.month} className="p-4 rounded-lg border bg-gray-50">
-                                                <div className="text-sm text-gray-600 mb-1">
-                                                    {new Date(month.month + '-01').toLocaleDateString('es-ES', {
-                                                        year: 'numeric',
-                                                        month: 'long'
-                                                    })}
-                                                </div>
-                                                <div className="text-lg font-semibold text-gray-900">{formatCurrency(month.totalSpent)}</div>
-                                                <div className="text-xs text-gray-500">{month.invoiceCount} facturas</div>
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-                            ) : (
-                                <div className="text-center py-8 text-gray-500">
-                                    No hay datos de gasto mensual disponibles.
-                                </div>
-                            )}
-                        </CardContent>
-                    </Card>
-                </TabsContent>
+
             </Tabs>
         </div>
     )

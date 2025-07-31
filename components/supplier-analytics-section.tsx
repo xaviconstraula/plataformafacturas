@@ -370,7 +370,9 @@ export function SupplierAnalyticsSection({
                                 <TableHead >Gasto Total</TableHead>
                                 <TableHead >Nº Facturas</TableHead>
                                 <TableHead >Nº Materiales</TableHead>
+                                <TableHead>Nº OT</TableHead>
                                 <TableHead >Promedio/Factura</TableHead>
+                                <TableHead>Top Materiales</TableHead>
                                 <TableHead className="w-[100px]">Acciones</TableHead>
                             </TableRow>
                         </TableHeader>
@@ -379,6 +381,7 @@ export function SupplierAnalyticsSection({
                                 <TableRow key={supplier.supplierId}>
                                     <TableCell>
                                         <Link
+                                            target="_blank"
                                             href={`/proveedores/${supplier.supplierId}`}
                                             className="font-medium hover:underline flex items-center gap-1"
                                         >
@@ -394,7 +397,22 @@ export function SupplierAnalyticsSection({
                                     <TableCell className="font-medium text-center">{formatCurrency(supplier.totalSpent)}</TableCell>
                                     <TableCell className="font-medium text-center">{supplier.invoiceCount}</TableCell>
                                     <TableCell className="font-medium text-center">{supplier.materialCount}</TableCell>
+                                    <TableCell className="font-medium text-center">{supplier.workOrderCount}</TableCell>
                                     <TableCell className="font-medium text-center">{formatCurrency(supplier.averageInvoiceAmount)}</TableCell>
+                                    <TableCell>
+                                        <div className="flex flex-wrap gap-1">
+                                            {supplier.topMaterialsByCost.slice(0, 2).map((material) => (
+                                                <Badge key={material.materialId} variant="outline" className="text-xs max-w-[120px] truncate">
+                                                    {material.materialName}
+                                                </Badge>
+                                            ))}
+                                            {supplier.topMaterialsByCost.length > 2 && (
+                                                <Badge variant="secondary" className="text-xs">
+                                                    +{supplier.topMaterialsByCost.length - 2} más
+                                                </Badge>
+                                            )}
+                                        </div>
+                                    </TableCell>
                                     <TableCell className="space-x-1">
                                         <EditProviderDialog
                                             providerId={supplier.supplierId}
