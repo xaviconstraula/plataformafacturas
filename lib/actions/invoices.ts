@@ -474,7 +474,6 @@ async function callPdfExtractAPI(file: File): Promise<CallPdfExtractAPIResponse>
                 disableFontFace: true,
                 useSystemFonts: false,
                 viewportScale: 1.5,
-                strictPagesToProcess: false,
                 verbosityLevel: 0,
             });
 
@@ -2337,7 +2336,6 @@ async function prepareBatchLine(file: File): Promise<string> {
         disableFontFace: true,
         useSystemFonts: false,
         viewportScale: 1.5,
-        strictPagesToProcess: false,
         verbosityLevel: 0,
     });
 

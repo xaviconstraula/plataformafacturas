@@ -54,7 +54,6 @@ export async function POST(request: NextRequest): Promise<NextResponse<Conversio
                 disableFontFace: true,
                 useSystemFonts: false,
                 viewportScale: 2.0,
-                strictPagesToProcess: false,
                 verbosityLevel: 0,
             })
         } catch (conversionError: unknown) {
