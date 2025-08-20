@@ -94,7 +94,7 @@ export default function SignupPage() {
                 setGeneralError(error.message || "Error al crear la cuenta")
             } else if (data) {
                 // Successful signup, redirect will be handled by callbackURL
-                router.push("/dashboard")
+                router.push("/")
             }
         } catch (error) {
             console.error("Signup error:", error)
