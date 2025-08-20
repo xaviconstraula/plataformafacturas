@@ -12,12 +12,15 @@ import { ProviderType } from "@/generated/prisma"
 import { DollarSign, Users, FileText, TrendingUp, Box } from "lucide-react"
 import { formatCurrency } from "@/lib/utils"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { requireAuth } from "@/lib/auth-utils"
 
 interface SuppliersPageProps {
   searchParams: Promise<{ [key: string]: string | string[] | undefined }>
 }
 
 async function getSuppliersData(params: { [key: string]: string | string[] | undefined }) {
+  const user = await requireAuth()
+
   const getString = (key: string) => {
     const value = params[key]
     return typeof value === "string" ? value : undefined
@@ -70,19 +73,27 @@ async function getSuppliersData(params: { [key: string]: string | string[] | und
       endDate
     }),
     prisma.material.findMany({
+      where: {
+        userId: user.id,
+        category: { not: null }
+      },
       select: { category: true },
-      where: { category: { not: null } },
       distinct: ['category'],
       take: 100 // Limit categories to reasonable amount
     }).then(results => results.map(r => r.category!).filter(Boolean)),
     prisma.invoiceItem.findMany({
+      where: {
+        workOrder: { not: null },
+        material: { userId: user.id },
+        invoice: { provider: { userId: user.id } }
+      },
       select: { workOrder: true },
-      where: { workOrder: { not: null } },
       distinct: ['workOrder'],
       take: 500 // Limit work orders for performance
     }).then(results => results.map(r => r.workOrder!).filter(Boolean)),
     // Get all suppliers for the dropdown
     prisma.provider.findMany({
+      where: { userId: user.id },
       select: { id: true, name: true },
       orderBy: { name: 'asc' },
       take: 1000 // Limit for performance

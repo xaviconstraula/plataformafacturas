@@ -1,17 +1,37 @@
 "use server"
 
 import { prisma } from "@/lib/db"
+import { requireAuth } from "@/lib/auth-utils"
 
 export async function getDashboardStats() {
     // Removed noStore() - dashboard stats can be cached for better performance
+    const user = await requireAuth()
+
     try {
         const [totalInvoices, totalProviders, totalMaterials, pendingAlerts] = await Promise.all([
-            prisma.invoice.count(),
-            prisma.provider.count(),
-            prisma.material.count(),
+            prisma.invoice.count({
+                where: {
+                    provider: {
+                        userId: user.id
+                    }
+                }
+            }),
+            prisma.provider.count({
+                where: {
+                    userId: user.id
+                }
+            }),
+            prisma.material.count({
+                where: {
+                    userId: user.id
+                }
+            }),
             prisma.priceAlert.count({
                 where: {
-                    status: 'PENDING'
+                    status: 'PENDING',
+                    provider: {
+                        userId: user.id
+                    }
                 }
             })
         ])
@@ -30,6 +50,8 @@ export async function getDashboardStats() {
 
 export async function getOverviewData() {
     // Removed noStore() - overview data can be cached for better performance
+    const user = await requireAuth()
+
     try {
         const sixMonthsAgo = new Date()
         sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6)
@@ -38,6 +60,9 @@ export async function getOverviewData() {
             where: {
                 createdAt: {
                     gte: sixMonthsAgo
+                },
+                provider: {
+                    userId: user.id
                 }
             },
             select: {
@@ -77,10 +102,13 @@ interface MaterialBySupplierType {
 }
 
 export async function getMaterialsBySupplierType(): Promise<MaterialBySupplierType[]> {
+    const user = await requireAuth()
+
     // Removed noStore() - materials by supplier type can be cached for better performance
     try {
         // Get all materials with their invoice items and provider information
         const materials = await prisma.material.findMany({
+            where: { userId: user.id },
             include: {
                 invoiceItems: {
                     include: {
@@ -143,9 +171,12 @@ export async function getMaterialsBySupplierType(): Promise<MaterialBySupplierTy
 }
 
 export async function getPendingPriceAlerts() {
+    const user = await requireAuth()
+
     const alerts = await prisma.priceAlert.findMany({
         where: {
-            status: "PENDING"
+            status: "PENDING",
+            provider: { userId: user.id }
         },
         orderBy: {
             createdAt: 'desc'

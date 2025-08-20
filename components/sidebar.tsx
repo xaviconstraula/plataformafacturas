@@ -19,6 +19,8 @@ import {
 import { Button } from "@/components/ui/button"
 import { useState } from "react"
 import Image from "next/image"
+import { UserMenu } from "@/components/user-menu"
+import { authClient } from "@/lib/auth-client"
 
 const navItems = [
   {
@@ -66,6 +68,13 @@ const navItems = [
 export default function Sidebar() {
   const pathname = usePathname()
   const [isOpen, setIsOpen] = useState(false)
+  const { data: session } = authClient.useSession()
+
+  // Check if user email contains "hacelerix" to determine which logo to show
+  const isHacelerixUser = session?.user?.email?.toLowerCase().includes('hacelerix') ?? false
+  const logoSrc = isHacelerixUser ? "/hacelerixlogo.png" : "/logofull.png"
+  const logoAlt = isHacelerixUser ? "Hacelerix" : "Constraula"
+  const logoClassName = isHacelerixUser ? "h-16 w-auto" : "h-10 w-auto"
 
   return (
     <>
@@ -88,9 +97,9 @@ export default function Sidebar() {
           <div className="p-6">
             <div className="flex items-center gap-3">
               <Image
-                src="/logofull.png"
-                alt="Constraula"
-                className="h-10 w-auto"
+                src={logoSrc}
+                alt={logoAlt}
+                className={logoClassName}
                 width={100}
                 height={100}
                 onError={(e) => {
@@ -98,7 +107,7 @@ export default function Sidebar() {
                   e.currentTarget.nextElementSibling?.classList.remove('hidden');
                 }}
               />
-              <h2 className="text-2xl font-nexa-bold text-constraula-black hidden">Constraula</h2>
+              <h2 className="text-2xl font-nexa-bold text-constraula-black hidden">{logoAlt}</h2>
             </div>
           </div>
 
@@ -122,8 +131,11 @@ export default function Sidebar() {
             ))}
           </nav>
 
-          <div className="p-4">
-            <p className="text-xs text-muted-foreground font-nexa-light">© 2025 Constraula</p>
+          <div className="p-4 border-t">
+            <div className="mb-3">
+              <UserMenu />
+            </div>
+            <p className="text-xs text-muted-foreground font-nexa-light text-center">© 2025 Constraula</p>
           </div>
         </div>
       </div>

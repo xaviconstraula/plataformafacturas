@@ -9,14 +9,20 @@ import { formatCurrency } from "@/lib/utils"
 import { getMaterialAnalytics } from "@/lib/actions/analytics"
 import { prisma } from "@/lib/db"
 import Link from "next/link"
+import { requireAuth } from "@/lib/auth-utils"
 
 interface MaterialDetailPageProps {
     params: Promise<{ id: string }>
 }
 
 async function getMaterial(id: string) {
-    const material = await prisma.material.findUnique({
-        where: { id },
+    const user = await requireAuth()
+
+    const material = await prisma.material.findFirst({
+        where: {
+            id,
+            userId: user.id
+        },
         include: {
             productGroup: true,
             invoiceItems: {
@@ -25,6 +31,11 @@ async function getMaterial(id: string) {
                         include: {
                             provider: true
                         }
+                    }
+                },
+                where: {
+                    invoice: {
+                        provider: { userId: user.id }
                     }
                 },
                 orderBy: { itemDate: 'desc' }

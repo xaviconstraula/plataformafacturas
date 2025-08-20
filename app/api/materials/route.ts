@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
+import { withAuthHandler } from '@/lib/api-middleware'
 
-export async function GET(request: NextRequest) {
+export const GET = withAuthHandler(async (request: NextRequest, user) => {
     try {
         const materials = await prisma.material.findMany({
             select: {
@@ -26,7 +27,8 @@ export async function GET(request: NextRequest) {
                 }
             },
             where: {
-                isActive: true
+                isActive: true,
+                userId: user.id
             },
             orderBy: {
                 name: 'asc'
@@ -41,4 +43,4 @@ export async function GET(request: NextRequest) {
             { status: 500 }
         )
     }
-} 
+}) 

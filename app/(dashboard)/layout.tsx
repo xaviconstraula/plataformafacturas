@@ -1,7 +1,7 @@
 import Sidebar from "@/components/sidebar"
 import { BatchProgressBanner } from "@/components/batch-progress-banner"
 import { AnalyticsPrefetch } from "@/components/analytics-prefetch"
-import { getUser } from "@/lib/user"
+import { requireAuth } from "@/lib/auth-utils"
 import type { ReactNode } from "react"
 
 export default async function DashboardLayout({
@@ -9,7 +9,7 @@ export default async function DashboardLayout({
 }: Readonly<{
     children: ReactNode
 }>) {
-    await getUser()
+    await requireAuth()
 
     return (
         <div className="flex min-h-screen h-screen">

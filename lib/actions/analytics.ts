@@ -1,6 +1,9 @@
+"use server"
+
 import { prisma } from "@/lib/db";
 import { Prisma, ProviderType } from "@/generated/prisma";
 import { normalizeSearch, processWorkOrderSearch } from "@/lib/utils";
+import { requireAuth } from "@/lib/auth-utils";
 
 export interface MaterialAnalytics {
     materialId: string;
@@ -96,16 +99,25 @@ export interface PaginatedMaterialAnalytics {
 }
 
 export async function getMaterialAnalytics(params: GetMaterialAnalyticsParams = {}): Promise<MaterialAnalytics[]> {
+    const user = await requireAuth()
+
     // Normalize search parameters
     const normalizedCategory = normalizeSearch(params.category);
     const normalizedWorkOrder = processWorkOrderSearch(params.workOrder);
     const normalizedMaterialSearch = normalizeSearch(params.materialSearch);
 
     const where: Prisma.InvoiceItemWhereInput = {
+        // Add user filtering through the invoice -> provider relationship
+        invoice: {
+            provider: {
+                userId: user.id,
+                // Merge with existing invoice filters if any
+                ...(params.supplierId ? { id: params.supplierId } : {})
+            }
+        },
         ...(params.materialId ? { materialId: params.materialId } : {}),
         ...(normalizedCategory ? { material: { category: { contains: normalizedCategory, mode: 'insensitive' } } } : {}),
         ...(normalizedWorkOrder ? { workOrder: { contains: normalizedWorkOrder, mode: 'insensitive' } } : {}),
-        ...(params.supplierId ? { invoice: { providerId: params.supplierId } } : {}),
         ...(normalizedMaterialSearch ? {
             material: {
                 OR: [
@@ -268,6 +280,8 @@ export async function getMaterialAnalytics(params: GetMaterialAnalyticsParams = 
 
 // New paginated version of getMaterialAnalytics for better performance with large datasets
 export async function getMaterialAnalyticsPaginated(params: GetMaterialAnalyticsParams = {}): Promise<PaginatedMaterialAnalytics> {
+    const user = await requireAuth()
+
     const page = params.page || 1;
     const pageSize = params.pageSize || 50; // Generous page size
     const skip = (page - 1) * pageSize;
@@ -277,14 +291,28 @@ export async function getMaterialAnalyticsPaginated(params: GetMaterialAnalytics
     const normalizedWorkOrder = processWorkOrderSearch(params.workOrder);
     const normalizedMaterialSearch = normalizeSearch(params.materialSearch);
 
-    // Build where clause for filtering
+    // Build where clause for filtering (scoped by user)
     const baseWhere: Prisma.InvoiceItemWhereInput = {
+        // Scope by user's materials and providers
+        material: { userId: user.id },
+        invoice: { provider: { userId: user.id } },
         ...(params.materialId ? { materialId: params.materialId } : {}),
-        ...(normalizedCategory ? { material: { category: { contains: normalizedCategory, mode: 'insensitive' } } } : {}),
+        ...(normalizedCategory ? {
+            material: {
+                userId: user.id,
+                category: { contains: normalizedCategory, mode: 'insensitive' }
+            }
+        } : {}),
         ...(normalizedWorkOrder ? { workOrder: { contains: normalizedWorkOrder, mode: 'insensitive' } } : {}),
-        ...(params.supplierId ? { invoice: { providerId: params.supplierId } } : {}),
+        ...(params.supplierId ? {
+            invoice: {
+                providerId: params.supplierId,
+                provider: { userId: user.id }
+            }
+        } : {}),
         ...(normalizedMaterialSearch ? {
             material: {
+                userId: user.id,
                 OR: [
                     { name: { contains: normalizedMaterialSearch, mode: 'insensitive' } },
                     { code: { contains: normalizedMaterialSearch, mode: 'insensitive' } },
@@ -500,6 +528,8 @@ export interface MaterialFilterTotals {
 
 // Function to get aggregated totals for all materials matching the filters
 export async function getMaterialFilterTotals(params: GetMaterialAnalyticsParams = {}): Promise<MaterialFilterTotals> {
+    const user = await requireAuth()
+
     // Normalize search parameters
     const normalizedCategory = normalizeSearch(params.category);
     const normalizedWorkOrder = processWorkOrderSearch(params.workOrder);
@@ -507,12 +537,26 @@ export async function getMaterialFilterTotals(params: GetMaterialAnalyticsParams
 
     // Build where clause for filtering (same as in getMaterialAnalyticsPaginated)
     const baseWhere: Prisma.InvoiceItemWhereInput = {
+        // Scope by user's materials and providers
+        material: { userId: user.id },
+        invoice: { provider: { userId: user.id } },
         ...(params.materialId ? { materialId: params.materialId } : {}),
-        ...(normalizedCategory ? { material: { category: { contains: normalizedCategory, mode: 'insensitive' } } } : {}),
+        ...(normalizedCategory ? {
+            material: {
+                userId: user.id,
+                category: { contains: normalizedCategory, mode: 'insensitive' }
+            }
+        } : {}),
         ...(normalizedWorkOrder ? { workOrder: { contains: normalizedWorkOrder, mode: 'insensitive' } } : {}),
-        ...(params.supplierId ? { invoice: { providerId: params.supplierId } } : {}),
+        ...(params.supplierId ? {
+            invoice: {
+                providerId: params.supplierId,
+                provider: { userId: user.id }
+            }
+        } : {}),
         ...(normalizedMaterialSearch ? {
             material: {
+                userId: user.id,
                 OR: [
                     { name: { contains: normalizedMaterialSearch, mode: 'insensitive' } },
                     { code: { contains: normalizedMaterialSearch, mode: 'insensitive' } },
@@ -594,17 +638,39 @@ export interface PaginatedSupplierAnalytics {
 }
 
 export async function getSupplierAnalytics(params: GetSupplierAnalyticsParams = {}): Promise<SupplierAnalytics[]> {
+    const user = await requireAuth()
+
     // Normalize search parameters
     const normalizedSupplierCif = normalizeSearch(params.supplierCif);
     const normalizedWorkOrder = processWorkOrderSearch(params.workOrder);
     const normalizedMaterialCategory = normalizeSearch(params.materialCategory);
 
     const where: Prisma.InvoiceWhereInput = {
-        ...(params.supplierId ? { providerId: params.supplierId } : {}),
-        ...(params.supplierType ? { provider: { type: params.supplierType } } : {}),
-        ...(normalizedSupplierCif ? { provider: { cif: { contains: normalizedSupplierCif, mode: 'insensitive' } } } : {}),
-        ...(normalizedWorkOrder ? { items: { some: { workOrder: { contains: normalizedWorkOrder, mode: 'insensitive' } } } } : {}),
-        ...(normalizedMaterialCategory ? { items: { some: { material: { category: { contains: normalizedMaterialCategory, mode: 'insensitive' } } } } } : {}),
+        // Scope by user's providers
+        provider: {
+            userId: user.id,
+            ...(params.supplierId ? { id: params.supplierId } : {}),
+            ...(params.supplierType ? { type: params.supplierType } : {}),
+            ...(normalizedSupplierCif ? { cif: { contains: normalizedSupplierCif, mode: 'insensitive' } } : {})
+        },
+        ...(normalizedWorkOrder ? {
+            items: {
+                some: {
+                    workOrder: { contains: normalizedWorkOrder, mode: 'insensitive' },
+                    material: { userId: user.id }
+                }
+            }
+        } : {}),
+        ...(normalizedMaterialCategory ? {
+            items: {
+                some: {
+                    material: {
+                        userId: user.id,
+                        category: { contains: normalizedMaterialCategory, mode: 'insensitive' }
+                    }
+                }
+            }
+        } : {}),
         ...(params.startDate || params.endDate ? {
             issueDate: {
                 ...(params.startDate ? { gte: params.startDate } : {}),
@@ -753,6 +819,8 @@ export async function getSupplierAnalytics(params: GetSupplierAnalyticsParams = 
 
 // New paginated version of getSupplierAnalytics for better performance with large datasets
 export async function getSupplierAnalyticsPaginated(params: GetSupplierAnalyticsParams = {}): Promise<PaginatedSupplierAnalytics> {
+    const user = await requireAuth()
+
     const page = params.page || 1;
     const pageSize = params.pageSize || 50; // Generous page size
     const skip = (page - 1) * pageSize;
@@ -763,11 +831,30 @@ export async function getSupplierAnalyticsPaginated(params: GetSupplierAnalytics
     const normalizedMaterialCategory = normalizeSearch(params.materialCategory);
 
     const baseWhere: Prisma.InvoiceWhereInput = {
-        ...(params.supplierId ? { providerId: params.supplierId } : {}),
-        ...(params.supplierType ? { provider: { type: params.supplierType } } : {}),
-        ...(normalizedSupplierCif ? { provider: { cif: { contains: normalizedSupplierCif, mode: 'insensitive' } } } : {}),
-        ...(normalizedWorkOrder ? { items: { some: { workOrder: { contains: normalizedWorkOrder, mode: 'insensitive' } } } } : {}),
-        ...(normalizedMaterialCategory ? { items: { some: { material: { category: { contains: normalizedMaterialCategory, mode: 'insensitive' } } } } } : {}),
+        provider: {
+            userId: user.id,
+            ...(params.supplierId ? { id: params.supplierId } : {}),
+            ...(params.supplierType ? { type: params.supplierType } : {}),
+            ...(normalizedSupplierCif ? { cif: { contains: normalizedSupplierCif, mode: 'insensitive' } } : {})
+        },
+        ...(normalizedWorkOrder ? {
+            items: {
+                some: {
+                    workOrder: { contains: normalizedWorkOrder, mode: 'insensitive' },
+                    material: { userId: user.id }
+                }
+            }
+        } : {}),
+        ...(normalizedMaterialCategory ? {
+            items: {
+                some: {
+                    material: {
+                        userId: user.id,
+                        category: { contains: normalizedMaterialCategory, mode: 'insensitive' }
+                    }
+                }
+            }
+        } : {}),
         ...(params.startDate || params.endDate ? {
             issueDate: {
                 ...(params.startDate ? { gte: params.startDate } : {}),
@@ -1037,6 +1124,8 @@ export async function getWorkOrderAnalytics(workOrder: string) {
 
 // Function to get work orders data for suppliers page with pagination
 export async function getWorkOrdersForSuppliers(filters: GetSupplierAnalyticsParams = {}) {
+    const user = await requireAuth()
+
     const page = filters.page || 1;
     const pageSize = filters.pageSize || 20; // Reasonable page size for work orders
     const skip = (page - 1) * pageSize;
@@ -1048,11 +1137,22 @@ export async function getWorkOrdersForSuppliers(filters: GetSupplierAnalyticsPar
     // Build where clause similar to suppliers filtering
     const baseWhere: Prisma.InvoiceItemWhereInput = {
         workOrder: { not: null },
-        ...(filters.supplierId ? { invoice: { providerId: filters.supplierId } } : {}),
-        ...(filters.supplierType ? { invoice: { provider: { type: filters.supplierType } } } : {}),
-        ...(normalizedSupplierCif ? { invoice: { provider: { cif: { contains: normalizedSupplierCif, mode: 'insensitive' } } } } : {}),
+        material: { userId: user.id },
+        invoice: {
+            provider: {
+                userId: user.id,
+                ...(filters.supplierId ? { id: filters.supplierId } : {}),
+                ...(filters.supplierType ? { type: filters.supplierType } : {}),
+                ...(normalizedSupplierCif ? { cif: { contains: normalizedSupplierCif, mode: 'insensitive' } } : {})
+            }
+        },
         ...(normalizedWorkOrder ? { workOrder: { contains: normalizedWorkOrder, mode: 'insensitive' } } : {}),
-        ...(normalizedMaterialCategory ? { material: { category: { contains: normalizedMaterialCategory, mode: 'insensitive' } } } : {}),
+        ...(normalizedMaterialCategory ? {
+            material: {
+                userId: user.id,
+                category: { contains: normalizedMaterialCategory, mode: 'insensitive' }
+            }
+        } : {}),
         ...(filters.startDate || filters.endDate ? {
             itemDate: {
                 ...(filters.startDate ? { gte: filters.startDate } : {}),
@@ -1183,6 +1283,8 @@ export async function getWorkOrdersForSuppliers(filters: GetSupplierAnalyticsPar
 
 // Function to get materials data for suppliers page with pagination
 export async function getMaterialsForSuppliers(filters: GetSupplierAnalyticsParams = {}) {
+    const user = await requireAuth()
+
     const page = filters.page || 1;
     const pageSize = filters.pageSize || 20; // Reasonable page size for materials
     const skip = (page - 1) * pageSize;
@@ -1193,11 +1295,22 @@ export async function getMaterialsForSuppliers(filters: GetSupplierAnalyticsPara
 
     // Build where clause similar to suppliers filtering
     const baseWhere: Prisma.InvoiceItemWhereInput = {
-        ...(filters.supplierId ? { invoice: { providerId: filters.supplierId } } : {}),
-        ...(filters.supplierType ? { invoice: { provider: { type: filters.supplierType } } } : {}),
-        ...(normalizedSupplierCif ? { invoice: { provider: { cif: { contains: normalizedSupplierCif, mode: 'insensitive' } } } } : {}),
+        material: { userId: user.id },
+        invoice: {
+            provider: {
+                userId: user.id,
+                ...(filters.supplierId ? { id: filters.supplierId } : {}),
+                ...(filters.supplierType ? { type: filters.supplierType } : {}),
+                ...(normalizedSupplierCif ? { cif: { contains: normalizedSupplierCif, mode: 'insensitive' } } : {})
+            }
+        },
         ...(normalizedWorkOrder ? { workOrder: { contains: normalizedWorkOrder, mode: 'insensitive' } } : {}),
-        ...(normalizedMaterialCategory ? { material: { category: { contains: normalizedMaterialCategory, mode: 'insensitive' } } } : {}),
+        ...(normalizedMaterialCategory ? {
+            material: {
+                userId: user.id,
+                category: { contains: normalizedMaterialCategory, mode: 'insensitive' }
+            }
+        } : {}),
         ...(filters.startDate || filters.endDate ? {
             itemDate: {
                 ...(filters.startDate ? { gte: filters.startDate } : {}),

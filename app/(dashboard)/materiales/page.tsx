@@ -9,12 +9,15 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { prisma } from "@/lib/db"
 import { DollarSign, Package, Users, TrendingUp, BarChart3, Building2 } from "lucide-react"
 import { formatCurrency } from "@/lib/utils"
+import { requireAuth } from "@/lib/auth-utils"
 
 interface MaterialsPageProps {
   searchParams: Promise<{ [key: string]: string | string[] | undefined }>
 }
 
 async function getMaterialsData(params: { [key: string]: string | string[] | undefined }) {
+  const user = await requireAuth()
+
   // Extract and normalize filter parameters coming from the URL
   const getString = (key: string) => {
     const value = params[key]
@@ -50,19 +53,27 @@ async function getMaterialsData(params: { [key: string]: string | string[] | und
       pageSize,
     }),
     prisma.provider.findMany({
+      where: { userId: user.id },
       select: { id: true, name: true, type: true },
       orderBy: { name: 'asc' },
       take: 2000 // Optimized limit for thousands of providers
     }),
     prisma.material.findMany({
+      where: {
+        userId: user.id,
+        category: { not: null }
+      },
       select: { category: true },
-      where: { category: { not: null } },
       distinct: ['category'],
       take: 200 // Increased limit for more categories
     }).then(results => results.map(r => r.category!).filter(Boolean)),
     prisma.invoiceItem.findMany({
+      where: {
+        workOrder: { not: null },
+        material: { userId: user.id },
+        invoice: { provider: { userId: user.id } }
+      },
       select: { workOrder: true },
-      where: { workOrder: { not: null } },
       distinct: ['workOrder'],
       take: 1000 // Increased limit for more work orders
     }).then(results => results.map(r => r.workOrder!).filter(Boolean)),

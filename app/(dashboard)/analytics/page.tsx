@@ -14,37 +14,49 @@ import {
     CardSkeleton
 } from "@/components/ui/skeleton"
 import { Package, Users, DollarSign } from "lucide-react"
+import { requireAuth } from "@/lib/auth-utils"
 
 // Fast-loading filter options data fetcher
 async function getFilterOptions() {
+    const user = await requireAuth()
+
     // Load only essential filter data with smaller limits to ensure fast loading
     const [suppliers, materials, categories, workOrders] = await Promise.all([
         prisma.provider.findMany({
+            where: { userId: user.id },
             select: { id: true, name: true, type: true },
             orderBy: { name: 'asc' },
             take: 200 // Reduced limit for faster loading
         }),
         prisma.material.findMany({
+            where: {
+                userId: user.id,
+                isActive: true
+            }, // Only active materials for the user
             select: { id: true, name: true, code: true, category: true },
-            where: { isActive: true }, // Only active materials
             orderBy: { name: 'asc' },
             take: 200 // Reduced limit for faster loading
         }).then(materials => materials.map(m => ({ ...m, category: m.category || undefined }))),
         // Get distinct categories using proper Prisma query
         prisma.material.findMany({
-            select: { category: true },
             where: {
+                userId: user.id,
                 category: { not: null },
                 isActive: true
             },
+            select: { category: true },
             distinct: ['category'],
             orderBy: { category: 'asc' },
             take: 30 // Reduced limit for faster loading
         }).then(results => results.map(r => r.category).filter(Boolean) as string[]),
         // Get distinct work orders using proper Prisma query
         prisma.invoiceItem.findMany({
+            where: {
+                workOrder: { not: null },
+                material: { userId: user.id },
+                invoice: { provider: { userId: user.id } }
+            },
             select: { workOrder: true },
-            where: { workOrder: { not: null } },
             distinct: ['workOrder'],
             orderBy: { workOrder: 'asc' },
             take: 50 // Reduced limit for faster loading
@@ -78,11 +90,13 @@ function AnalyticsDataContent() {
 
 // Quick stats that load fast to give immediate feedback
 async function QuickStatsContent() {
+    const user = await requireAuth()
+
     // Load only essential summary stats quickly
     const [materialCount, supplierCount, invoiceCount] = await Promise.all([
-        prisma.material.count({ where: { isActive: true } }),
-        prisma.provider.count(),
-        prisma.invoice.count()
+        prisma.material.count({ where: { userId: user.id, isActive: true } }),
+        prisma.provider.count({ where: { userId: user.id } }),
+        prisma.invoice.count({ where: { provider: { userId: user.id } } })
     ])
 
     return (

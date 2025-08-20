@@ -12,6 +12,7 @@ import { WorkOrderFilters } from "@/components/work-order-filters"
 import { HelpTooltip, helpContent } from "@/components/help-tooltip"
 import { Pagination } from "@/components/pagination"
 import { ExcelExportButton } from "@/components/excel-export-button"
+import { requireAuth } from "@/lib/auth-utils"
 
 interface SearchParams {
     sortBy?: string
@@ -26,6 +27,8 @@ interface PageProps {
 }
 
 async function getWorkOrdersData(params: SearchParams) {
+    const user = await requireAuth()
+
     const {
         sortBy = 'totalCost',
         sortOrder = 'desc',
@@ -41,17 +44,19 @@ async function getWorkOrdersData(params: SearchParams) {
     // Normalize search term for consistent filtering
     const normalizedSearch = normalizeSearch(search)
 
-    // Build where clause for filtering
+    // Build where clause for filtering with user authentication
     const baseWhere: Prisma.InvoiceItemWhereInput = {
         workOrder: {
             not: null,
             ...(normalizedSearch && { contains: normalizedSearch, mode: Prisma.QueryMode.insensitive })
         },
-        ...(provider && provider !== 'all' && {
-            invoice: {
-                providerId: provider
+        material: { userId: user.id }, // Filter by user's materials
+        invoice: {
+            provider: {
+                userId: user.id, // Filter by user's providers
+                ...(provider && provider !== 'all' && { id: provider })
             }
-        })
+        }
     }
 
     // First, get work order aggregations for pagination and sorting
@@ -88,6 +93,7 @@ async function getWorkOrdersData(params: SearchParams) {
 
     if (paginatedWorkOrders.length === 0) {
         const providers = await prisma.provider.findMany({
+            where: { userId: user.id },
             select: { id: true, name: true },
             orderBy: { name: 'asc' },
             take: 2000 // Optimized limit for thousands of providers
@@ -182,6 +188,7 @@ async function getWorkOrdersData(params: SearchParams) {
 
     // Get all providers for filter (limit for performance)
     const providers = await prisma.provider.findMany({
+        where: { userId: user.id },
         select: { id: true, name: true },
         orderBy: { name: 'asc' },
         take: 2000 // Optimized limit for thousands of providers

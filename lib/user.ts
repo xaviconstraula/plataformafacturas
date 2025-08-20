@@ -1,14 +1,14 @@
 import { cache } from "react"
-import { deleteSession, verifySession } from "./session"
 import { prisma } from "./db"
 import { redirect } from "next/navigation"
+import { getCurrentUser, requireAdmin, signOut } from "./auth-utils"
 
 export const getUser = cache(async () => {
-    const session = await verifySession()
-    if (!session) return null
+    const user = await getCurrentUser()
+    if (!user) return null
 
-    const user = await prisma.user.findUnique({
-        where: { id: session.userId },
+    const dbUser = await prisma.user.findUnique({
+        where: { id: user.id },
         select: {
             id: true,
             name: true,
@@ -18,21 +18,13 @@ export const getUser = cache(async () => {
         }
     })
 
-    return user
+    return dbUser
 })
 
 export async function checkIfAdmin() {
-    const email = process.env.ADMIN_EMAIL
-    if (!email) throw new Error("ADMIN_EMAIL environment variable is not set")
-
-    const user = await getUser()
-    if (!user || user.email !== email) {
-        redirect("/")
-    }
-    return true
+    return await requireAdmin()
 }
 
 export async function logout() {
-    deleteSession()
-    redirect("/login")
+    return await signOut()
 }

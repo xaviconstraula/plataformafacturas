@@ -9,12 +9,14 @@ datasource db {
 }
 
 // Enum para tipos de proveedores
+
 enum ProviderType {
   MATERIAL_SUPPLIER // Proveedor de suministro de materiales
   MACHINERY_RENTAL // Proveedor de alquiler de maquinaria
 }
 
 // Enum for alert status
+
 enum AlertStatus {
   PENDING
   APPROVED
@@ -22,6 +24,7 @@ enum AlertStatus {
 }
 
 // Enum for batch processing status
+
 enum BatchStatus {
   PENDING
   PROCESSING
@@ -31,6 +34,7 @@ enum BatchStatus {
 }
 
 // Modelo para Proveedores
+
 model Provider {
   id            String             @id @default(cuid())
   name          String
@@ -41,15 +45,19 @@ model Provider {
   address       String?
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
+  userId        String? // Optional during migration
+  user          User?              @relation(fields: [userId], references: [id], onDelete: Cascade)
   invoices      Invoice[]
   materials     MaterialProvider[]
   PriceAlert    PriceAlert[]
   ProviderAlias ProviderAlias[]
 
   @@index([type])
+  @@index([userId])
 }
 
 // Modelo para Facturas
+
 model Invoice {
   id          String        @id @default(cuid())
   invoiceCode String // Código de factura (único por proveedor)
@@ -64,17 +72,22 @@ model Invoice {
   items       InvoiceItem[]
   alerts      PriceAlert[]
 
-  @@unique([invoiceCode, providerId]) // Código único por proveedor
+  // Código único por proveedor
+  // Composite indexes for supplier analytics performance
+  // For supplier analytics with date sorting
+  // For supplier analytics with amount sorting
+  // For date-based supplier queries
+  @@unique([invoiceCode, providerId])
   @@index([providerId])
   @@index([issueDate])
   @@index([invoiceCode])
-  // Composite indexes for supplier analytics performance
-  @@index([providerId, issueDate]) // For supplier analytics with date sorting
-  @@index([providerId, totalAmount]) // For supplier analytics with amount sorting
-  @@index([issueDate, providerId]) // For date-based supplier queries
+  @@index([providerId, issueDate])
+  @@index([providerId, totalAmount])
+  @@index([issueDate, providerId])
 }
 
 // Modelo para Materiales
+
 model Material {
   id          String   @id @default(cuid())
   code        String   @unique // Código único del material
@@ -82,6 +95,8 @@ model Material {
   description String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+  userId      String? // Optional during migration
+  user        User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   // Nueva funcionalidad para agrupación
   productGroup   ProductGroup? @relation(fields: [productGroupId], references: [id])
@@ -105,9 +120,11 @@ model Material {
   @@index([productGroupId])
   @@index([isActive])
   @@index([referenceCode])
+  @@index([userId])
 }
 
 // Modelo para Items de Factura
+
 model InvoiceItem {
   id         String   @id @default(cuid())
   createdAt  DateTime @default(now())
@@ -128,18 +145,24 @@ model InvoiceItem {
   description String? // Descripción específica del ítem en la factura
   lineNumber  Int? // Número de línea en la factura original
 
+  // Índice para filtrar por OT/CECO
+  // Composite indexes for analytics performance
+  // For material analytics with date sorting
+  // For material analytics with cost sorting
+  // For material analytics with quantity sorting
+  // For date-based material queries
   @@index([invoiceId])
   @@index([materialId])
-  @@index([workOrder]) // Índice para filtrar por OT/CECO
+  @@index([workOrder])
   @@index([itemDate])
-  // Composite indexes for analytics performance
-  @@index([materialId, itemDate]) // For material analytics with date sorting
-  @@index([materialId, totalPrice]) // For material analytics with cost sorting
-  @@index([materialId, quantity]) // For material analytics with quantity sorting
-  @@index([itemDate, materialId]) // For date-based material queries
+  @@index([materialId, itemDate])
+  @@index([materialId, totalPrice])
+  @@index([materialId, quantity])
+  @@index([itemDate, materialId])
 }
 
 // Tabla de relación entre Materiales y Proveedores
+
 model MaterialProvider {
   id            String    @id @default(cuid())
   materialId    String
@@ -151,13 +174,15 @@ model MaterialProvider {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
+  // Index for querying by date
   @@unique([materialId, providerId])
   @@index([materialId])
   @@index([providerId])
-  @@index([lastPriceDate]) // Index for querying by date
+  @@index([lastPriceDate])
 }
 
 // Modelo para Alertas de Precios
+
 model PriceAlert {
   id            String   @id @default(cuid())
   createdAt     DateTime @default(now())
@@ -174,26 +199,40 @@ model PriceAlert {
   invoice       Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
   invoiceId     String
 
-  @@unique([materialId, providerId, effectiveDate]) // Constraint único para prevenir alertas duplicadas en la misma fecha
+  // Constraint único para prevenir alertas duplicadas en la misma fecha
+  // Índice compuesto para evitar duplicados
+  @@unique([materialId, providerId, effectiveDate])
   @@index([materialId])
   @@index([providerId])
   @@index([invoiceId])
-  @@index([materialId, providerId, effectiveDate]) // Índice compuesto para evitar duplicados
+  @@index([materialId, providerId, effectiveDate])
 }
 
 // Modelo para Usuarios
+
 model User {
   id        String   @id @default(cuid())
   email     String   @unique
-  password  String
   name      String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  emailVerified Boolean   @default(false)
+  image         String?
+  sessions      Session[]
+  accounts      Account[]
+
+  // Relations with business entities (optional during migration)
+  providers     Provider[]
+  materials     Material[]
+  productGroups ProductGroup[]
+
   @@index([email])
+  @@map("user")
 }
 
 // Nuevo modelo para agrupación de productos similares
+
 model ProductGroup {
   id               String     @id @default(cuid())
   standardizedName String     @unique // Nombre estandarizado del grupo
@@ -202,13 +241,17 @@ model ProductGroup {
   unit             String? // Unidad de medida estándar
   createdAt        DateTime   @default(now())
   updatedAt        DateTime   @updatedAt
+  userId           String? // Optional during migration
+  user             User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
   materials        Material[] // Materiales que pertenecen a este grupo
 
   @@index([category])
   @@index([standardizedName])
+  @@index([userId])
 }
 
 // Modelo para seguimiento de procesamiento por lotes
+
 model BatchProcessing {
   id              String      @id @default(cuid())
   status          BatchStatus @default(PENDING)
@@ -240,6 +283,7 @@ model BatchProcessing {
 }
 
 /// Tabla para mapear CIFs antiguos a proveedores existentes tras una fusión
+
 model ProviderAlias {
   id         String   @id @default(cuid())
   cif        String   @unique
@@ -247,4 +291,49 @@ model ProviderAlias {
   providerId String
 
   @@index([providerId])
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  token     String
+  createdAt DateTime
+  updatedAt DateTime
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([token])
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime
+  updatedAt             DateTime
+
+  @@map("account")
+}
+
+model Verification {
+  id         String    @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime?
+  updatedAt  DateTime?
+
+  @@map("verification")
 }

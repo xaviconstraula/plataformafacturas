@@ -2,9 +2,15 @@
 
 import { prisma } from "@/lib/db"
 import { type PriceAlert } from "@/lib/types/prisma"
+import { requireAuth } from "@/lib/auth-utils"
 
 export async function getPriceAlerts(): Promise<PriceAlert[]> {
+    const user = await requireAuth()
+
     const alerts = await prisma.priceAlert.findMany({
+        where: {
+            provider: { userId: user.id }
+        },
         select: {
             id: true,
             material: {
@@ -52,6 +58,20 @@ export async function getPriceAlerts(): Promise<PriceAlert[]> {
 }
 
 export async function updateAlertStatus(alertId: string, status: "APPROVED" | "REJECTED") {
+    const user = await requireAuth()
+
+    // First verify the alert belongs to the user
+    const existingAlert = await prisma.priceAlert.findFirst({
+        where: {
+            id: alertId,
+            provider: { userId: user.id }
+        }
+    })
+
+    if (!existingAlert) {
+        throw new Error('Alert not found or you do not have permission to update it')
+    }
+
     const alert = await prisma.priceAlert.update({
         where: { id: alertId },
         data: { status },

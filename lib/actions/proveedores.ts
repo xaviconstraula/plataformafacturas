@@ -6,11 +6,17 @@ import { revalidatePath } from 'next/cache'
 import { z } from 'zod'
 import { type PrismaClient } from "@prisma/client"
 import { type Provider } from "@/generated/prisma"
+import { requireAuth } from "@/lib/auth-utils"
 
 export async function getSuppliers() {
     // Removed noStore() - providers don't change frequently, caching is beneficial
+    const user = await requireAuth()
+
     try {
         const suppliers = await prisma.provider.findMany({
+            where: {
+                userId: user.id
+            },
             select: {
                 id: true,
                 name: true,

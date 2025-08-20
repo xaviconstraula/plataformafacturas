@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
+import { withAuthHandler } from '@/lib/api-middleware'
 
-export async function GET(request: NextRequest) {
+export const GET = withAuthHandler(async (request: NextRequest, user) => {
     try {
         const workOrders = await prisma.invoiceItem.findMany({
             select: {
@@ -10,6 +11,11 @@ export async function GET(request: NextRequest) {
             where: {
                 workOrder: {
                     not: null
+                },
+                invoice: {
+                    provider: {
+                        userId: user.id
+                    }
                 }
             },
             distinct: ['workOrder'],
@@ -31,4 +37,4 @@ export async function GET(request: NextRequest) {
             { status: 500 }
         )
     }
-} 
+}) 

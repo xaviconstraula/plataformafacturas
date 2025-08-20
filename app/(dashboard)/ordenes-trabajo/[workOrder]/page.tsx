@@ -16,6 +16,7 @@ import { WorkOrderDetailFilters } from "@/components/work-order-detail-filters"
 import { ProviderItemCard } from "@/components/provider-item-card"
 import { MaterialItemCard } from "@/components/material-item-card"
 import { Pagination } from "@/components/pagination"
+import { requireAuth } from "@/lib/auth-utils"
 
 type InvoiceItemWithDetails = InvoiceItem & {
     material: Material
@@ -99,6 +100,8 @@ interface PageProps {
 }
 
 async function getWorkOrderDetails(workOrderCode: string, searchParams: SearchParams) {
+    const user = await requireAuth()
+
     // Decode the work order code
     const decodedWorkOrder = decodeURIComponent(workOrderCode)
 
@@ -118,18 +121,22 @@ async function getWorkOrderDetails(workOrderCode: string, searchParams: SearchPa
     // Normalize search term for consistent filtering
     const normalizedSearch = normalizeSearch(search)
 
-    // Build where clause for filtering
+    // Build where clause for filtering with user authentication
     const baseWhere: Prisma.InvoiceItemWhereInput = {
         workOrder: decodedWorkOrder,
+        material: { userId: user.id }, // Filter by user's materials
+        invoice: {
+            provider: {
+                userId: user.id, // Filter by user's providers
+                ...(provider && provider !== 'all' && { id: provider })
+            }
+        },
         ...(normalizedSearch && {
             OR: [
                 { material: { name: { contains: normalizedSearch, mode: Prisma.QueryMode.insensitive } } },
                 { invoice: { provider: { name: { contains: normalizedSearch, mode: Prisma.QueryMode.insensitive } } } },
                 { material: { code: { contains: normalizedSearch, mode: Prisma.QueryMode.insensitive } } }
             ]
-        }),
-        ...(provider && provider !== 'all' && {
-            invoice: { providerId: provider }
         }),
         ...(material && material !== 'all' && {
             materialId: material

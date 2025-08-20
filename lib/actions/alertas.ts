@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db"
 import type { Material, Provider } from "@/generated/prisma";
+import { requireAuth } from "@/lib/auth-utils"
 
 export interface PriceAlertWithDetails {
     id: string;
@@ -24,13 +25,18 @@ export async function getPriceAlerts(
     take: number = 20,
     status: string = "PENDING"
 ): Promise<PaginatedPriceAlerts> {
+    const user = await requireAuth()
+
     // Ensure page and take are valid numbers
     const validPage = Math.max(1, page)
     const validTake = Math.max(1, Math.min(50, take)) // Limit maximum items per page to 50
     const skip = (validPage - 1) * validTake
 
-    // Build where clause based on status
-    const where = status === "ALL" ? {} : { status }
+    // Build where clause based on status and user
+    const where = {
+        provider: { userId: user.id },
+        ...(status === "ALL" ? {} : { status })
+    }
 
     // For ALL status, we want PENDING first, then others
     // For specific status, just sort by date

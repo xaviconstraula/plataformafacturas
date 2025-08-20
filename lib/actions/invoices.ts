@@ -10,6 +10,7 @@ import OpenAI from "openai";
 import { extractMaterialCode, normalizeMaterialCode, areMaterialCodesSimilar, generateStandardMaterialCode, areMaterialNamesSimilar } from "@/lib/utils";
 import readline from "readline"; // Node stdlib for streaming large files
 import { Readable } from "stream";
+import { requireAuth } from "@/lib/auth-utils";
 
 // Represents the minimal part of the ChatCompletion response we need when
 // reading a Batch output file. Only the assistant message content is required.
@@ -649,7 +650,7 @@ JSON format:
     }
 }
 
-async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData: ExtractedPdfData['provider'], providerType: 'MATERIAL_SUPPLIER' | 'MACHINERY_RENTAL' = 'MATERIAL_SUPPLIER'): Promise<Provider> {
+async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData: ExtractedPdfData['provider'], userId?: string, providerType: 'MATERIAL_SUPPLIER' | 'MACHINERY_RENTAL' = 'MATERIAL_SUPPLIER'): Promise<Provider> {
     const { cif, name, email, phone, address } = providerData;
 
     // Check if provider is blocked
@@ -669,14 +670,25 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
         let matchType = '';
 
         // Strategy 1: Encontrar por CIF exacto o alias
-        // 1a. Buscar directamente en Provider
-        existingProvider = await tx.provider.findUnique({ where: { cif } });
+        // 1a. Buscar directamente en Provider (scoped by user if userId provided)
+        const providerFilter = userId ? { cif, userId } : { cif };
+        existingProvider = await tx.provider.findFirst({
+            where: providerFilter
+        });
 
-        // 1b. Si no existe, buscar alias
+        // 1b. Si no existe, buscar alias (also scoped by user if userId provided)
         if (!existingProvider) {
-            const alias = await tx.providerAlias.findUnique({ where: { cif } });
+            const aliasFilter = userId ? {
+                cif,
+                provider: { userId }
+            } : { cif };
+
+            const alias = await tx.providerAlias.findFirst({
+                where: aliasFilter,
+                include: { provider: true }
+            });
             if (alias) {
-                existingProvider = await tx.provider.findUnique({ where: { id: alias.providerId } });
+                existingProvider = alias.provider;
                 if (existingProvider) {
                     matchType = 'CIF alias';
                 }
@@ -686,29 +698,47 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
         if (existingProvider) {
             if (!matchType) matchType = 'exact CIF';
         } else {
-            // Strategy 2: Find by exact name match (case insensitive)
+            // Strategy 2: Find by exact name match (case insensitive, scoped by user if userId provided)
+            const nameFilter = userId ? {
+                userId,
+                name: {
+                    equals: name,
+                    mode: 'insensitive' as const
+                }
+            } : {
+                name: {
+                    equals: name,
+                    mode: 'insensitive' as const
+                }
+            };
+
             existingProvider = await tx.provider.findFirst({
-                where: {
-                    name: {
-                        equals: name,
-                        mode: 'insensitive'
-                    }
-                },
+                where: nameFilter,
             });
 
             if (existingProvider) {
                 matchType = 'exact name';
             } else if (phone) {
-                // Strategy 3: Find by phone number
+                // Strategy 3: Find by phone number (scoped by user if userId provided)
+                const phoneFilter = userId ? {
+                    userId,
+                    phone: phone
+                } : {
+                    phone: phone
+                };
+
                 existingProvider = await tx.provider.findFirst({
-                    where: { phone: phone },
+                    where: phoneFilter,
                 });
 
                 if (existingProvider) {
                     matchType = 'phone number';
                 } else {
-                    // Strategy 4: Find by similar name
-                    const allProviders = await tx.provider.findMany();
+                    // Strategy 4: Find by similar name (scoped by user if userId provided)
+                    const allProvidersFilter = userId ? { userId } : {};
+                    const allProviders = await tx.provider.findMany({
+                        where: allProvidersFilter
+                    });
 
                     for (const candidate of allProviders) {
                         if (areProviderNamesSimilar(name, candidate.name)) {
@@ -744,24 +774,28 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
         // No existing provider found, create a new one
         console.log(`No existing provider found for name: "${name}", CIF: "${cif}", phone: "${phone}". Creating new provider.`);
 
-        // Use upsert to handle race conditions when creating new providers
-        const newProvider = await tx.provider.upsert({
-            where: { cif },
-            update: {
-                name,
-                email: email || undefined,
-                phone: phone || undefined,
-                address: address || undefined,
-                type: providerType,
-            },
-            create: {
-                cif,
-                name,
-                email,
-                phone,
-                address,
-                type: providerType,
-            },
+        // Since we already checked for existence scoped by user, we can create directly
+        let createData: Prisma.ProviderCreateInput = {
+            cif,
+            name,
+            email,
+            phone,
+            address,
+            type: providerType,
+        };
+
+        // Only add user connection if userId provided (for user-scoped operations)
+        if (userId) {
+            createData = {
+                ...createData,
+                user: {
+                    connect: { id: userId }
+                }
+            };
+        }
+
+        const newProvider = await tx.provider.create({
+            data: createData,
         });
 
         console.log(`Created new provider: ${name} (CIF: ${cif})`);
@@ -778,9 +812,10 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
             // Another transaction might have created a provider with this CIF or a similar one
             // Do a comprehensive search to find the existing provider
 
-            // 1. Try exact CIF match first
-            let existingProvider = await tx.provider.findUnique({
-                where: { cif },
+            // 1. Try exact CIF match first (scoped by user if userId provided)
+            const cifFilter = userId ? { cif, userId } : { cif };
+            let existingProvider = await tx.provider.findFirst({
+                where: cifFilter,
             });
 
             if (existingProvider) {
@@ -788,14 +823,22 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
                 return existingProvider;
             }
 
-            // 2. If not found by CIF, search by name (another transaction might have created with different CIF)
+            // 2. If not found by CIF, search by name (scoped by user if userId provided)
+            const nameFilter = userId ? {
+                userId,
+                name: {
+                    equals: name,
+                    mode: 'insensitive' as const
+                }
+            } : {
+                name: {
+                    equals: name,
+                    mode: 'insensitive' as const
+                }
+            };
+
             existingProvider = await tx.provider.findFirst({
-                where: {
-                    name: {
-                        equals: name,
-                        mode: 'insensitive'
-                    }
-                },
+                where: nameFilter,
             });
 
             if (existingProvider) {
@@ -814,10 +857,17 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
                 return updatedProvider;
             }
 
-            // 3. Search by phone if available
+            // 3. Search by phone if available (scoped by user if userId provided)
             if (phone) {
+                const phoneFilter = userId ? {
+                    userId,
+                    phone: phone
+                } : {
+                    phone: phone
+                };
+
                 existingProvider = await tx.provider.findFirst({
-                    where: { phone: phone },
+                    where: phoneFilter,
                 });
 
                 if (existingProvider) {
@@ -1583,7 +1633,7 @@ export async function createInvoiceFromFiles(
     for (const [cif, providerData] of uniqueProviders.entries()) {
         try {
             const provider = await prisma.$transaction(async (tx) => {
-                return await findOrCreateProviderTx(tx, providerData);
+                return await findOrCreateProviderTx(tx, providerData, undefined);
             });
             providerCache.set(cif, provider.id);
             console.log(`Pre-processed provider: ${provider.name} (${cif})`);
@@ -1683,10 +1733,10 @@ export async function createInvoiceFromFiles(
 
                             if (!provider) {
                                 // Cache miss, fall back to findOrCreateProviderTx
-                                provider = await findOrCreateProviderTx(tx, extractedData.provider);
+                                provider = await findOrCreateProviderTx(tx, extractedData.provider, undefined);
                             }
                         } else {
-                            provider = await findOrCreateProviderTx(tx, extractedData.provider);
+                            provider = await findOrCreateProviderTx(tx, extractedData.provider, undefined);
                         }
 
                         const existingInvoice = await tx.invoice.findFirst({
@@ -2124,6 +2174,8 @@ export interface ManualInvoiceData {
 }
 
 export async function createManualInvoice(data: ManualInvoiceData): Promise<CreateInvoiceResult> {
+    const user = await requireAuth()
+
     try {
         const result = await prisma.$transaction(async (tx) => {
             // 1. Validate provider data
@@ -2137,7 +2189,7 @@ export async function createManualInvoice(data: ManualInvoiceData): Promise<Crea
                 cif: data.provider.cif,
                 email: data.provider.email || undefined,
                 phone: data.provider.phone || undefined,
-            });
+            }, user.id);
 
             // 3. Check if invoice already exists
             const existingInvoice = await tx.invoice.findFirst({
@@ -2529,10 +2581,12 @@ async function buildBatchJsonlChunks(files: File[]): Promise<JsonlChunk[]> {
 // ---------------------------------------------------------------------------
 
 export async function saveExtractedInvoice(extractedData: ExtractedPdfData, fileName?: string): Promise<CreateInvoiceResult> {
+    const user = await requireAuth()
+
     try {
         const result = await prisma.$transaction(async (tx) => {
             // ✅ Provider
-            const provider = await findOrCreateProviderTx(tx, extractedData.provider);
+            const provider = await findOrCreateProviderTx(tx, extractedData.provider, user.id);
 
             // ❌  Duplicate check
             const existingInvoice = await tx.invoice.findFirst({

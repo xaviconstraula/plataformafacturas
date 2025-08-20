@@ -1,16 +1,26 @@
 "use client"
 
-import { useActionState } from "react"
+import { useState } from "react"
+import { useRouter } from "next/navigation"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Shield } from "lucide-react"
-import { login } from "@/lib/actions/auth"
-import type { LoginFormState } from "@/lib/definitions"
+import { authClient } from "@/lib/auth-client"
+import { loginSchema } from "@/lib/definitions"
+import type { z } from "zod"
 
-const initialState = { errors: {}, data: {} as LoginFormState }
+interface LoginFormState {
+  email: string
+  password: string
+}
+
+interface LoginErrors {
+  email?: string[]
+  password?: string[]
+}
 
 function SubmitButton({ isPending }: { isPending: boolean }) {
   return (
@@ -21,8 +31,72 @@ function SubmitButton({ isPending }: { isPending: boolean }) {
 }
 
 export default function LoginPage() {
-  const [state, dispatch, isPending] = useActionState(login, initialState)
-  const formData = state?.data as LoginFormState | undefined
+  const [isPending, setIsPending] = useState(false)
+  const [errors, setErrors] = useState<LoginErrors>({})
+  const [generalError, setGeneralError] = useState<string>("")
+  const [formData, setFormData] = useState<LoginFormState>({
+    email: "",
+    password: ""
+  })
+  const router = useRouter()
+
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setIsPending(true)
+    setErrors({})
+    setGeneralError("")
+
+    const form = event.currentTarget
+    const formDataObj = new FormData(form)
+    const email = formDataObj.get("email") as string
+    const password = formDataObj.get("password") as string
+
+    // Validate form data
+    const validationResult = loginSchema.safeParse({ email, password })
+
+    if (!validationResult.success) {
+      const fieldErrors = validationResult.error.flatten().fieldErrors
+      setErrors(fieldErrors)
+      setIsPending(false)
+      return
+    }
+
+    try {
+      const { data, error } = await authClient.signIn.email({
+        email,
+        password,
+        callbackURL: "/",
+        rememberMe: false
+      })
+
+      if (error) {
+        setGeneralError(error.message || "Error al iniciar sesión")
+      } else if (data) {
+        // Successful login, redirect will be handled by callbackURL
+        router.push("/")
+      }
+    } catch (error) {
+      console.error("Login error:", error)
+      setGeneralError("Error inesperado al iniciar sesión")
+    } finally {
+      setIsPending(false)
+    }
+  }
+
+  function handleInputChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const { name, value } = event.target
+    setFormData(prev => ({
+      ...prev,
+      [name]: value
+    }))
+    // Clear errors when user starts typing
+    if (errors[name as keyof LoginErrors]) {
+      setErrors(prev => ({
+        ...prev,
+        [name]: undefined
+      }))
+    }
+  }
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-muted/50 p-4">
@@ -33,10 +107,10 @@ export default function LoginPage() {
             <CardTitle className="text-2xl font-bold">Iniciar Sesión</CardTitle>
           </div>
         </CardHeader>
-        <form action={dispatch}>
+        <form onSubmit={handleSubmit}>
           <CardContent className="space-y-6 px-6">
-            {state?.error && (
-              <p className="text-sm text-destructive text-center">{state.error}</p>
+            {generalError && (
+              <p className="text-sm text-destructive text-center">{generalError}</p>
             )}
             <div className="space-y-3">
               <Label htmlFor="email">Correo electrónico</Label>
@@ -44,14 +118,15 @@ export default function LoginPage() {
                 id="email"
                 name="email"
                 type="email"
-                defaultValue={formData?.email}
-                className={state?.errors?.email ? "border-destructive" : ""}
-                aria-describedby={state?.errors?.email ? "email-error" : undefined}
+                value={formData.email}
+                onChange={handleInputChange}
+                className={errors?.email ? "border-destructive" : ""}
+                aria-describedby={errors?.email ? "email-error" : undefined}
                 required
               />
-              {state?.errors?.email && (
+              {errors?.email && (
                 <p id="email-error" className="text-sm text-destructive">
-                  {state.errors.email[0]}
+                  {errors.email[0]}
                 </p>
               )}
             </div>
@@ -64,14 +139,15 @@ export default function LoginPage() {
                 id="password"
                 name="password"
                 type="password"
-                defaultValue={formData?.password}
-                className={state?.errors?.password ? "border-destructive" : ""}
-                aria-describedby={state?.errors?.password ? "password-error" : undefined}
+                value={formData.password}
+                onChange={handleInputChange}
+                className={errors?.password ? "border-destructive" : ""}
+                aria-describedby={errors?.password ? "password-error" : undefined}
                 required
               />
-              {state?.errors?.password && (
+              {errors?.password && (
                 <p id="password-error" className="text-sm text-destructive">
-                  {state.errors.password[0]}
+                  {errors.password[0]}
                 </p>
               )}
             </div>

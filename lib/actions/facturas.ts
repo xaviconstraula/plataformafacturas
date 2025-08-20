@@ -4,6 +4,7 @@ import { prisma } from "@/lib/db"
 import { Prisma } from "@/generated/prisma"
 import { revalidatePath } from "next/cache"
 import { normalizeSearch, processWorkOrderSearch } from "@/lib/utils"
+import { requireAuth } from "@/lib/auth-utils"
 
 export interface GetInvoicesParams {
     page?: number
@@ -26,6 +27,8 @@ export interface GetInvoicesParams {
 const DEFAULT_PAGE_SIZE = 15
 
 export async function getInvoices(params: GetInvoicesParams) {
+    const user = await requireAuth()
+
     try {
         const page = params.page || 1
         const pageSize = params.pageSize || DEFAULT_PAGE_SIZE
@@ -100,22 +103,57 @@ export async function getInvoices(params: GetInvoicesParams) {
         const where: Prisma.InvoiceWhereInput = {
             ...dateFilter,
             ...amountFilter,
-            ...(cleanSupplier ? { providerId: cleanSupplier } : {}),
+            // Filter by user's providers only
+            provider: {
+                userId: user.id,
+                ...(cleanSupplier ? { id: cleanSupplier } : {})
+            },
             ...(normalizedSearch ? {
                 OR: [
                     { invoiceCode: { contains: normalizedSearch, mode: Prisma.QueryMode.insensitive } },
-                    { provider: { name: { contains: normalizedSearch, mode: Prisma.QueryMode.insensitive } } },
-                    { items: { some: { material: { name: { contains: normalizedSearch, mode: Prisma.QueryMode.insensitive } } } } }
+                    {
+                        provider: {
+                            name: { contains: normalizedSearch, mode: Prisma.QueryMode.insensitive },
+                            userId: user.id
+                        }
+                    },
+                    {
+                        items: {
+                            some: {
+                                material: {
+                                    name: { contains: normalizedSearch, mode: Prisma.QueryMode.insensitive },
+                                    userId: user.id
+                                }
+                            }
+                        }
+                    }
                 ]
             } : {}),
             ...(normalizedWorkOrder ? {
-                items: { some: { workOrder: { contains: normalizedWorkOrder, mode: Prisma.QueryMode.insensitive } } }
+                items: {
+                    some: {
+                        workOrder: { contains: normalizedWorkOrder, mode: Prisma.QueryMode.insensitive },
+                        material: { userId: user.id }
+                    }
+                }
             } : {}),
             ...(cleanMaterial ? {
-                items: { some: { materialId: cleanMaterial } }
+                items: {
+                    some: {
+                        materialId: cleanMaterial,
+                        material: { userId: user.id }
+                    }
+                }
             } : {}),
             ...(normalizedCategory ? {
-                items: { some: { material: { category: { contains: normalizedCategory, mode: Prisma.QueryMode.insensitive } } } }
+                items: {
+                    some: {
+                        material: {
+                            category: { contains: normalizedCategory, mode: Prisma.QueryMode.insensitive },
+                            userId: user.id
+                        }
+                    }
+                }
             } : {}),
             ...((params.minUnitPrice !== undefined || params.maxUnitPrice !== undefined) ? {
                 items: {
@@ -123,7 +161,8 @@ export async function getInvoices(params: GetInvoicesParams) {
                         unitPrice: {
                             ...(params.minUnitPrice !== undefined ? { gte: params.minUnitPrice } : {}),
                             ...(params.maxUnitPrice !== undefined ? { lte: params.maxUnitPrice } : {})
-                        }
+                        },
+                        material: { userId: user.id }
                     }
                 }
             } : {})
@@ -206,11 +245,25 @@ export async function getInvoices(params: GetInvoicesParams) {
 }
 
 export async function deleteInvoiceAction(invoiceId: string) {
+    const user = await requireAuth()
+
     if (!invoiceId) {
         return { success: false, message: "ID de factura no proporcionado." };
     }
 
     try {
+        // First verify the invoice belongs to the user
+        const invoice = await prisma.invoice.findFirst({
+            where: {
+                id: invoiceId,
+                provider: { userId: user.id }
+            }
+        });
+
+        if (!invoice) {
+            return { success: false, message: "Factura no encontrada o no tienes permisos para eliminarla." };
+        }
+
         // Prisma automatically handles cascading deletes for related InvoiceItems
         // if the relation is defined with `onDelete: Cascade` in the schema.
         // If not, InvoiceItems need to be deleted manually first:
@@ -236,9 +289,14 @@ export async function deleteInvoiceAction(invoiceId: string) {
 }
 
 export async function getInvoiceDetails(id: string) {
+    const user = await requireAuth()
+
     try {
-        const invoice = await prisma.invoice.findUnique({
-            where: { id },
+        const invoice = await prisma.invoice.findFirst({
+            where: {
+                id,
+                provider: { userId: user.id }
+            },
             include: {
                 provider: true,
                 items: {
@@ -250,7 +308,7 @@ export async function getInvoiceDetails(id: string) {
         });
 
         if (!invoice) {
-            throw new Error('Invoice not found');
+            throw new Error('Invoice not found or you do not have permission to view it');
         }
 
         return {

@@ -3,11 +3,17 @@
 import { prisma } from "@/lib/db"
 import { revalidatePath } from 'next/cache'
 import { z } from 'zod'
+import { requireAuth } from "@/lib/auth-utils"
 
 export async function getMaterials() {
     // Removed noStore() - materials don't change frequently, caching is beneficial
+    const user = await requireAuth()
+
     try {
         const materials = await prisma.material.findMany({
+            where: {
+                userId: user.id
+            },
             include: {
                 _count: {
                     select: {

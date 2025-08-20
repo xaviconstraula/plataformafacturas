@@ -8,6 +8,7 @@ import { HelpTooltip, helpContent } from "@/components/help-tooltip"
 import { exportInvoiceData } from "@/lib/actions/analytics"
 import { prisma } from "@/lib/db"
 import { InvoiceNotifications } from "@/components/invoice-notifications"
+import { requireAuth } from "@/lib/auth-utils"
 
 interface InvoicesPageProps {
   searchParams: Promise<{
@@ -29,23 +30,34 @@ interface InvoicesPageProps {
 }
 
 async function getFilterData() {
+  const user = await requireAuth()
+
   const [suppliers, materials, categories, workOrders] = await Promise.all([
     prisma.provider.findMany({
+      where: { userId: user.id },
       select: { id: true, name: true, type: true },
       orderBy: { name: 'asc' }
     }),
     prisma.material.findMany({
+      where: { userId: user.id },
       select: { id: true, name: true, code: true, category: true },
       orderBy: { name: 'asc' }
     }),
     prisma.material.findMany({
+      where: {
+        userId: user.id,
+        category: { not: null }
+      },
       select: { category: true },
-      where: { category: { not: null } },
       distinct: ['category']
     }).then(results => results.map(r => r.category!).filter(Boolean)),
     prisma.invoiceItem.findMany({
+      where: {
+        workOrder: { not: null },
+        material: { userId: user.id },
+        invoice: { provider: { userId: user.id } }
+      },
       select: { workOrder: true },
-      where: { workOrder: { not: null } },
       distinct: ['workOrder']
     }).then(results => results.map(r => r.workOrder!).filter(Boolean))
   ])

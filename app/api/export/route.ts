@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { generateExcelReport, ExportFilters, generateAlertsExcelReport, AlertExportFilters } from '@/lib/actions/export';
+import { withAuthHandler } from '@/lib/api-middleware';
 
-export async function POST(request: NextRequest) {
+export const POST = withAuthHandler(async (request: NextRequest, user) => {
     try {
         const body = await request.json();
 
@@ -95,9 +96,9 @@ export async function POST(request: NextRequest) {
             { status: 500 }
         );
     }
-}
+})
 
-export async function GET(request: NextRequest) {
+export const GET = withAuthHandler(async (request: NextRequest, user) => {
     const searchParams = request.nextUrl.searchParams;
 
     const filters: ExportFilters = {
@@ -147,4 +148,4 @@ export async function GET(request: NextRequest) {
             { status: 500 }
         );
     }
-} 
+}) 

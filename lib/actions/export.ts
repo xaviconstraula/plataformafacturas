@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { Prisma } from '@/generated/prisma';
 import type { InvoiceItem, Material, Invoice, Provider, ProviderType } from '@/generated/prisma';
 import { normalizeSearch, processWorkOrderSearch } from '@/lib/utils';
+import { requireAuth } from '@/lib/auth-utils';
 
 // Helper function to create worksheet with bold headers
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -249,7 +250,16 @@ export interface MaterialDetailExport {
 }
 
 export async function exportDetailedInvoiceData(filters: ExportFilters = {}) {
-    const where: Prisma.InvoiceItemWhereInput = buildWhereClause(filters);
+    const user = await requireAuth()
+
+    const where: Prisma.InvoiceItemWhereInput = {
+        ...buildWhereClause(filters),
+        invoice: {
+            provider: {
+                userId: user.id
+            }
+        }
+    };
 
     const items = await prisma.invoiceItem.findMany({
         where,

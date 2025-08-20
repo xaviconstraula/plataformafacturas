@@ -26,6 +26,7 @@ import {
     DollarSignIcon
 } from "lucide-react"
 import { GoBackButton } from "@/components/go-back-button"
+import { requireAuth } from "@/lib/auth-utils"
 
 interface SupplierDetailPageProps {
     params: Promise<{ id: string }>
@@ -33,8 +34,13 @@ interface SupplierDetailPageProps {
 }
 
 async function getSupplier(id: string) {
-    const supplier = await prisma.provider.findUnique({
-        where: { id },
+    const user = await requireAuth()
+
+    const supplier = await prisma.provider.findFirst({
+        where: {
+            id,
+            userId: user.id
+        },
         include: {
             invoices: {
                 include: {
@@ -58,6 +64,7 @@ async function getSupplier(id: string) {
 }
 
 export default async function SupplierDetailPage({ params, searchParams }: SupplierDetailPageProps) {
+    const user = await requireAuth()
     const [resolvedParams, resolvedSearchParams] = await Promise.all([params, searchParams])
     const supplier = await getSupplier(resolvedParams.id)
 
@@ -88,11 +95,13 @@ export default async function SupplierDetailPage({ params, searchParams }: Suppl
         prisma.material.findMany({
             select: { category: true },
             where: {
+                userId: user.id,
                 category: { not: null },
                 invoiceItems: {
                     some: {
                         invoice: {
-                            providerId: resolvedParams.id
+                            providerId: resolvedParams.id,
+                            provider: { userId: user.id }
                         }
                     }
                 }
@@ -105,8 +114,10 @@ export default async function SupplierDetailPage({ params, searchParams }: Suppl
             select: { workOrder: true },
             where: {
                 workOrder: { not: null },
+                material: { userId: user.id },
                 invoice: {
-                    providerId: resolvedParams.id
+                    providerId: resolvedParams.id,
+                    provider: { userId: user.id }
                 }
             },
             distinct: ['workOrder'],
@@ -116,6 +127,7 @@ export default async function SupplierDetailPage({ params, searchParams }: Suppl
         prisma.invoice.findMany({
             where: {
                 providerId: resolvedParams.id,
+                provider: { userId: user.id },
                 ...(filters.startDate || filters.endDate ? {
                     issueDate: {
                         ...(filters.startDate ? { gte: filters.startDate } : {}),
@@ -125,6 +137,7 @@ export default async function SupplierDetailPage({ params, searchParams }: Suppl
                 ...(filters.workOrder || filters.materialCategory ? {
                     items: {
                         some: {
+                            material: { userId: user.id },
                             ...(filters.workOrder ? { workOrder: { contains: filters.workOrder, mode: 'insensitive' } } : {}),
                             ...(filters.materialCategory ? { material: { category: { contains: filters.materialCategory, mode: 'insensitive' } } } : {})
                         }
@@ -138,6 +151,7 @@ export default async function SupplierDetailPage({ params, searchParams }: Suppl
                     },
                     ...(filters.workOrder || filters.materialCategory ? {
                         where: {
+                            material: { userId: user.id },
                             ...(filters.workOrder ? { workOrder: { contains: filters.workOrder, mode: 'insensitive' } } : {}),
                             ...(filters.materialCategory ? { material: { category: { contains: filters.materialCategory, mode: 'insensitive' } } } : {})
                         }

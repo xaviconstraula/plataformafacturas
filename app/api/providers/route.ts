@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
+import { withAuthHandler } from '@/lib/api-middleware'
 
-export async function GET(request: NextRequest) {
+export const GET = withAuthHandler(async (request: NextRequest, user) => {
     try {
         const providers = await prisma.provider.findMany({
             select: {
@@ -14,6 +15,9 @@ export async function GET(request: NextRequest) {
                 address: true,
                 createdAt: true,
                 updatedAt: true,
+            },
+            where: {
+                userId: user.id
             },
             orderBy: {
                 name: 'asc'
@@ -28,4 +32,4 @@ export async function GET(request: NextRequest) {
             { status: 500 }
         )
     }
-} 
+}) 
