@@ -2630,9 +2630,10 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
                 where: { invoiceCode: extractedData.invoiceCode, providerId: provider.id },
             });
             if (existingInvoice) {
+                console.warn(`[saveExtractedInvoice] Invoice ${extractedData.invoiceCode} already exists for provider ${provider.name} (file: ${fileName ?? "unknown"})`);
                 return {
                     success: false,
-                    message: `Invoice ${extractedData.invoiceCode} already exists`,
+                    message: `Invoice ${extractedData.invoiceCode} already exists for provider ${provider.name}`,
                     invoiceId: existingInvoice.id,
                 };
             }
@@ -2649,26 +2650,30 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
             });
 
             let alertsCreated = 0;
+            let itemsProcessed = 0;
+            let itemsSkipped = 0;
 
             for (const item of extractedData.items) {
                 // 🚦 Validate item data to prevent runtime errors
                 if (!item.materialName) {
-                    console.warn(`[Batch Output][Invoice ${extractedData.invoiceCode}] Skipping line item due to missing material name (file: ${fileName ?? "unknown"}).`);
+                    console.warn(`[saveExtractedInvoice][Invoice ${extractedData.invoiceCode}] Skipping line item due to missing material name (file: ${fileName ?? "unknown"}). Item data:`, item);
+                    itemsSkipped++;
                     continue;
                 }
 
                 if (typeof item.quantity !== "number" || isNaN(item.quantity)) {
-                    console.warn(`[Batch Output][Invoice ${extractedData.invoiceCode}] Skipping item '${item.materialName}' due to invalid quantity: ${item.quantity}.`);
+                    console.warn(`[saveExtractedInvoice][Invoice ${extractedData.invoiceCode}] Skipping item '${item.materialName}' due to invalid quantity: ${item.quantity} (file: ${fileName ?? "unknown"})`);
+                    itemsSkipped++;
                     continue; // Quantity is mandatory to create an item
                 }
 
                 // Default missing or invalid prices to 0 so the invoice can still be saved
                 if (typeof item.unitPrice !== "number" || isNaN(item.unitPrice)) {
-                    console.warn(`[Batch Output][Invoice ${extractedData.invoiceCode}] Invalid or missing unitPrice for '${item.materialName}'. Defaulting to 0.`);
+                    console.warn(`[saveExtractedInvoice][Invoice ${extractedData.invoiceCode}] Invalid or missing unitPrice for '${item.materialName}'. Defaulting to 0 (file: ${fileName ?? "unknown"})`);
                     (item as unknown as { unitPrice: number }).unitPrice = 0;
                 }
                 if (typeof item.totalPrice !== "number" || isNaN(item.totalPrice)) {
-                    console.warn(`[Batch Output][Invoice ${extractedData.invoiceCode}] Invalid or missing totalPrice for '${item.materialName}'. Defaulting to 0.`);
+                    console.warn(`[saveExtractedInvoice][Invoice ${extractedData.invoiceCode}] Invalid or missing totalPrice for '${item.materialName}'. Defaulting to 0 (file: ${fileName ?? "unknown"})`);
                     (item as unknown as { totalPrice: number }).totalPrice = 0;
                 }
 
@@ -2685,14 +2690,19 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
                     ).then(({ alert }) => {
                         if (alert) alertsCreated += 1;
                     });
+                    itemsProcessed++;
                 } catch (itemErr) {
-                    console.error(`[Batch Output][Invoice ${extractedData.invoiceCode}] Failed to process item '${item.materialName}':`, itemErr);
+                    console.error(`[saveExtractedInvoice][Invoice ${extractedData.invoiceCode}] Failed to process item '${item.materialName}' (file: ${fileName ?? "unknown"}):`, itemErr);
+                    console.error(`[saveExtractedInvoice] Item data:`, item);
+                    itemsSkipped++;
                 }
             }
 
+            console.log(`[saveExtractedInvoice] Successfully processed invoice ${invoice.invoiceCode}: ${itemsProcessed} items processed, ${itemsSkipped} items skipped, ${alertsCreated} alerts created`);
+
             return {
                 success: true,
-                message: `Invoice ${invoice.invoiceCode} created`,
+                message: `Invoice ${invoice.invoiceCode} created (${itemsProcessed} items, ${alertsCreated} alerts)`,
                 invoiceId: invoice.id,
                 alertsCreated,
             };
@@ -2700,8 +2710,17 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
 
         return result;
     } catch (err) {
-        console.error("Failed to persist invoice from batch output", err);
-        return { success: false, message: (err as Error).message || "Unknown error", fileName } as CreateInvoiceResult;
+        const error = err as Error;
+        console.error(`[saveExtractedInvoice] Failed to persist invoice from batch output (file: ${fileName ?? "unknown"})`, {
+            error: error.message,
+            stack: error.stack,
+            extractedData: extractedData
+        });
+        return {
+            success: false,
+            message: `Database error: ${error.message}`,
+            fileName
+        } as CreateInvoiceResult;
     }
 }
 
@@ -2821,32 +2840,95 @@ async function ingestBatchOutput(batchId: string, outputFileId: string | null | 
         console.error(`[ingestBatchOutput] Failed to ingest output for batch ${batchId}`, err);
     }
 
+    interface ErrorContext {
+        custom_id?: string;
+        status_code?: number;
+        hasChoices?: boolean;
+        rawContent?: string;
+        rawLine?: string;
+        extractedData?: ExtractedPdfData;
+        result?: CreateInvoiceResult;
+    }
+
     async function processOutputLines(lines: string[]) {
         let success = 0;
         let failed = 0;
+        const errors: Array<{ lineIndex: number; error: string; context?: ErrorContext }> = [];
 
-        for (const raw of lines) {
+        for (let i = 0; i < lines.length; i++) {
+            const raw = lines[i];
             if (!raw.trim()) continue;
+
             try {
                 const parsed = JSON.parse(raw);
                 const response = parsed.response as { status_code: number; body: ChatCompletionBody } | null;
+
                 if (!response || response.status_code !== 200) {
+                    const errorMsg = `OpenAI API error: status ${response?.status_code ?? 'unknown'}`;
+                    console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (custom_id: ${parsed.custom_id ?? 'unknown'})`);
+                    errors.push({
+                        lineIndex: i + 1,
+                        error: errorMsg,
+                        context: { custom_id: parsed.custom_id, status_code: response?.status_code }
+                    });
                     failed++;
                     continue;
                 }
 
                 const chatBody = response.body as ChatCompletionBody;
                 const content = chatBody.choices?.[0]?.message?.content;
+
                 if (!content) {
+                    const errorMsg = 'No content in OpenAI response';
+                    console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (custom_id: ${parsed.custom_id ?? 'unknown'})`);
+                    errors.push({
+                        lineIndex: i + 1,
+                        error: errorMsg,
+                        context: { custom_id: parsed.custom_id, hasChoices: !!chatBody.choices }
+                    });
                     failed++;
                     continue;
                 }
 
-                const extracted = JSON.parse(content) as ExtractedPdfData;
+                let extracted: ExtractedPdfData;
+                try {
+                    extracted = JSON.parse(content) as ExtractedPdfData;
+                } catch (parseErr) {
+                    const errorMsg = `Failed to parse extracted data JSON: ${(parseErr as Error).message}`;
+                    console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (custom_id: ${parsed.custom_id ?? 'unknown'})`);
+                    console.error(`[ingestBatchOutput] Raw content: ${content.substring(0, 500)}${content.length > 500 ? '...' : ''}`);
+                    errors.push({
+                        lineIndex: i + 1,
+                        error: errorMsg,
+                        context: { custom_id: parsed.custom_id, rawContent: content }
+                    });
+                    failed++;
+                    continue;
+                }
+
                 const result = await saveExtractedInvoice(extracted, parsed.custom_id ?? undefined);
-                if (result.success) success++; else failed++;
+                if (result.success) {
+                    success++;
+                } else {
+                    const errorMsg = `Failed to save invoice: ${result.message}`;
+                    console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (custom_id: ${parsed.custom_id ?? 'unknown'})`);
+                    console.error(`[ingestBatchOutput] Extracted data:`, JSON.stringify(extracted, null, 2));
+                    errors.push({
+                        lineIndex: i + 1,
+                        error: errorMsg,
+                        context: { custom_id: parsed.custom_id, extractedData: extracted, result }
+                    });
+                    failed++;
+                }
             } catch (err) {
-                console.error('[ingestBatchOutput] Error processing line', err);
+                const errorMsg = `Error processing line: ${(err as Error).message}`;
+                console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1}`);
+                console.error(`[ingestBatchOutput] Raw line: ${raw.substring(0, 500)}${raw.length > 500 ? '...' : ''}`);
+                errors.push({
+                    lineIndex: i + 1,
+                    error: errorMsg,
+                    context: { rawLine: raw }
+                });
                 failed++;
             }
         }
@@ -2859,5 +2941,15 @@ async function ingestBatchOutput(batchId: string, outputFileId: string | null | 
         });
 
         console.log(`[ingestBatchOutput] Persisted ${success} invoices, ${failed} errors for batch ${batchId}`);
+
+        if (errors.length > 0) {
+            console.error(`[ingestBatchOutput] Detailed errors for batch ${batchId}:`);
+            errors.forEach(({ lineIndex, error, context }) => {
+                console.error(`  Line ${lineIndex}: ${error}`);
+                if (context) {
+                    console.error(`    Context:`, context);
+                }
+            });
+        }
     }
 } 
