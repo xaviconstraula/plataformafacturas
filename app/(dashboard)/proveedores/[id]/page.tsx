@@ -88,8 +88,8 @@ export default async function SupplierDetailPage({ params, searchParams }: Suppl
         includeMonthlyBreakdown: true
     }
 
-    const [supplierAnalytics, workOrdersData, categories, workOrdersForFilters, filteredInvoices] = await Promise.all([
-        getSupplierAnalytics(filters).then(analytics => analytics[0]),
+    const [supplierAnalyticsResult, workOrdersData, categories, workOrdersForFilters, filteredInvoices] = await Promise.all([
+        getSupplierAnalytics(filters).then(analytics => analytics.length > 0 ? analytics[0] : null),
         getWorkOrdersForSuppliers(filters),
         // Get material categories for filters
         prisma.material.findMany({
@@ -162,6 +162,33 @@ export default async function SupplierDetailPage({ params, searchParams }: Suppl
             take: 20 // Limit to recent invoices
         })
     ])
+
+    // Check if supplier analytics exist
+    if (!supplierAnalyticsResult) {
+        return (
+            <div className="flex flex-col gap-6">
+                <div className="flex items-center gap-3">
+                    <div className="p-2 bg-blue-100 rounded-lg">
+                        <Building2Icon className="h-6 w-6 text-blue-600" />
+                    </div>
+                    <div>
+                        <h1 className="text-3xl font-bold text-gray-900">{supplier.name}</h1>
+                        <div className="flex items-center gap-4 text-sm text-gray-600 mt-1">
+                            <span className="font-medium">CIF: {supplier.cif}</span>
+                            <Badge variant={supplier.type === 'MATERIAL_SUPPLIER' ? 'default' : 'secondary'}>
+                                {supplier.type === 'MATERIAL_SUPPLIER' ? 'Suministro Material' : 'Alquiler Maquinaria'}
+                            </Badge>
+                        </div>
+                    </div>
+                </div>
+                <div className="text-center py-12">
+                    <p className="text-gray-500">No hay suficientes datos para mostrar analíticas de este proveedor.</p>
+                </div>
+            </div>
+        )
+    }
+
+    const supplierAnalytics = supplierAnalyticsResult
 
     // Calculate additional metrics
     const recentInvoices = filteredInvoices.slice(0, 10)

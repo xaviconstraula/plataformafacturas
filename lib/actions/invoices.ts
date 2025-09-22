@@ -682,7 +682,7 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
                     OR: [
                         { cif: { in: variants } },
                         // Fallback: provider.cif normalized equals normalized input (approximate via contains both ways)
-                        { cif: { contains: normalized ?? '', mode: 'insensitive' } }
+                        { cif: { contains: normalized ?? '', mode: Prisma.QueryMode.insensitive } }
                     ]
                 }
             });
@@ -691,7 +691,7 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
                 where: {
                     OR: [
                         { cif: { in: variants } },
-                        { cif: { contains: normalized ?? '', mode: 'insensitive' } }
+                        { cif: { contains: normalized ?? '', mode: Prisma.QueryMode.insensitive } }
                     ]
                 }
             });
@@ -1088,53 +1088,58 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
         const maxAttempts = 10;
 
         while (attempts < maxAttempts) {
-            try {
-                const codeToTry = attempts === 0 ? baseCode : `${baseCode}-${attempts}`;
+            const codeToTry = attempts === 0 ? baseCode : `${baseCode}-${attempts}`;
 
+            // First, check if a material with this code already exists to avoid the unique constraint violation
+            // which would abort the entire transaction.
+            const existingMaterialWithCode = await tx.material.findUnique({
+                where: { code: codeToTry },
+                select: { id: true }, // Lightweight query
+            });
+
+            if (existingMaterialWithCode) {
+                attempts++;
+                console.log(`Material code '${codeToTry}' already exists. Attempt ${attempts} of ${maxAttempts}. Trying next suffix...`);
+                continue; // Move to the next attempt with a new suffix
+            }
+
+            try {
                 material = await tx.material.create({
                     data: {
                         code: codeToTry,
                         name: normalizedName,
                         category: category,
-                        referenceCode: materialCode, // Guardar el código original extraído del PDF
+                        referenceCode: materialCode, // Keep original code from PDF
                     },
                 });
                 break; // Success, exit loop
             } catch (error) {
-                // Check if it's a unique constraint error on code
-                if (typeof error === 'object' && error !== null && 'code' in error &&
-                    (error as { code: string }).code === 'P2002' &&
-                    'meta' in error && error.meta && typeof error.meta === 'object' &&
-                    'target' in error.meta && Array.isArray((error.meta as { target: unknown }).target) &&
-                    ((error.meta as { target: string[] }).target).includes('code')) {
-
+                // This catch block now primarily handles race conditions, where another
+                // transaction created a material with the same code *after* our check but *before* our create.
+                if (typeof error === 'object' && error !== null && 'code' in error && (error as { code: string }).code === 'P2002') {
                     attempts++;
-                    console.log(`Material code conflict on attempt ${attempts} for material: ${normalizedName}. Trying with suffix...`);
-
-                    if (attempts >= maxAttempts) {
-                        // Final attempt: check if material was created by another transaction
-                        const existingMaterial = await tx.material.findFirst({
-                            where: { name: { equals: normalizedName, mode: 'insensitive' } }
-                        });
-
-                        if (existingMaterial) {
-                            console.log(`Found existing material after race condition: ${existingMaterial.name}`);
-                            material = existingMaterial;
-                            break;
-                        }
-
-                        throw new Error(`Failed to create material '${normalizedName}' after ${maxAttempts} attempts due to code conflicts.`);
-                    }
-                    continue; // Try again with suffix
+                    console.log(`Caught race condition for material code '${codeToTry}'. Attempt ${attempts} of ${maxAttempts}. Retrying...`);
+                    // The loop will continue, and our check at the top will now find the conflicting material.
                 } else {
-                    // Re-throw other errors
+                    // For any other error, we must re-throw to abort the transaction.
                     throw error;
                 }
             }
         }
 
         if (!material) {
-            throw new Error(`Failed to create material '${normalizedName}' after exhausting all attempts.`);
+            // If the loop finishes without creating a material, it means all attempts to generate a unique code failed.
+            // This is highly unlikely but possible under heavy concurrency.
+            // As a final fallback, try to find the material by its name, as it might have been created by another transaction.
+            const existingMaterial = await tx.material.findFirst({
+                where: { name: { equals: normalizedName, mode: 'insensitive' } }
+            });
+
+            if (existingMaterial) {
+                return existingMaterial;
+            }
+
+            throw new Error(`Failed to create material '${normalizedName}' after ${maxAttempts} attempts due to persistent code conflicts.`);
         }
     } else {
         // Update category if not set or different

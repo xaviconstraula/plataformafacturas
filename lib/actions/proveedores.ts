@@ -1,12 +1,13 @@
 "use server"
 
 import { prisma } from "@/lib/db"
-import { ProviderType } from '@/generated/prisma' // Assuming alias is correct
+import { ProviderType, Prisma } from '@/generated/prisma' // Assuming alias is correct
 import { revalidatePath } from 'next/cache'
 import { z } from 'zod'
 import { type PrismaClient } from "@prisma/client"
 import { type Provider } from "@/generated/prisma"
 import { requireAuth } from "@/lib/auth-utils"
+import { normalizeCifForComparison, buildCifVariants } from "@/lib/utils"
 
 export async function getSuppliers() {
     // Removed noStore() - providers don't change frequently, caching is beneficial
@@ -89,9 +90,17 @@ export async function createSupplier(
     const { name, type, cif, email, phone, address } = validatedFields.data
 
     try {
-        // Check if CIF already exists
-        const existingProvider = await prisma.provider.findUnique({
-            where: { cif },
+        // Check if CIF already exists (using robust CIF matching)
+        const normalizedCif = normalizeCifForComparison(cif)
+        const cifVariants = buildCifVariants(cif)
+
+        const existingProvider = await prisma.provider.findFirst({
+            where: {
+                OR: [
+                    ...(cifVariants.length > 0 ? [{ cif: { in: cifVariants } }] : []),
+                    ...(normalizedCif ? [{ cif: { contains: normalizedCif, mode: Prisma.QueryMode.insensitive } }] : [])
+                ]
+            },
         })
 
         if (existingProvider) {
@@ -180,12 +189,21 @@ export async function editProviderAction(providerId: string, data: {
     }
 
     try {
-        // Check if CIF already exists for a different provider
-        const existingProvider = await prisma.provider.findUnique({
-            where: { cif: data.cif },
+        // Check if CIF already exists for a different provider (using robust CIF matching)
+        const normalizedCif = normalizeCifForComparison(data.cif)
+        const cifVariants = buildCifVariants(data.cif)
+
+        const existingProvider = await prisma.provider.findFirst({
+            where: {
+                id: { not: providerId }, // Exclude the current provider
+                OR: [
+                    ...(cifVariants.length > 0 ? [{ cif: { in: cifVariants } }] : []),
+                    ...(normalizedCif ? [{ cif: { contains: normalizedCif, mode: Prisma.QueryMode.insensitive } }] : [])
+                ]
+            },
         })
 
-        if (existingProvider && existingProvider.id !== providerId) {
+        if (existingProvider) {
             return {
                 success: false,
                 message: "Este CIF ya está registrado por otro proveedor."

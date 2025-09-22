@@ -1433,7 +1433,8 @@ function buildWhereClause(filters: ExportFilters): Prisma.InvoiceItemWhereInput 
     const normalizedCategory = normalizeSearch(filters.category);
     const normalizedMaterialSearch = normalizeSearch(filters.materialSearch);
     const normalizedWorkOrder = processWorkOrderSearch(filters.workOrder);
-    const normalizedSupplierCif = normalizeSearch(filters.supplierCif);
+    const normalizedSupplierCif = normalizeCifForComparison(filters.supplierCif);
+    const cifVariants = filters.supplierCif ? buildCifVariants(filters.supplierCif) : [];
 
     return {
         ...(filters.materialId ? { materialId: filters.materialId } : {}),
@@ -1441,7 +1442,16 @@ function buildWhereClause(filters: ExportFilters): Prisma.InvoiceItemWhereInput 
         ...(normalizedMaterialSearch ? { material: { name: { contains: normalizedMaterialSearch, mode: 'insensitive' } } } : {}),
         ...(normalizedWorkOrder ? { workOrder: { contains: normalizedWorkOrder, mode: 'insensitive' } } : {}),
         ...(filters.supplierId ? { invoice: { providerId: filters.supplierId } } : {}),
-        ...(normalizedSupplierCif ? { invoice: { provider: { cif: { contains: normalizedSupplierCif, mode: 'insensitive' } } } } : {}),
+        ...((normalizedSupplierCif || cifVariants.length > 0) ? {
+            invoice: {
+                provider: {
+                    OR: [
+                        ...(cifVariants.length > 0 ? [{ cif: { in: cifVariants } }] : []),
+                        ...(normalizedSupplierCif ? [{ cif: { contains: normalizedSupplierCif, mode: Prisma.QueryMode.insensitive } }] : [])
+                    ]
+                }
+            }
+        } : {}),
         ...(filters.supplierType ? { invoice: { provider: { type: filters.supplierType as ProviderType } } } : {}),
         ...(filters.minPrice ? { unitPrice: { gte: filters.minPrice } } : {}),
         ...(filters.maxPrice ? { unitPrice: { lte: filters.maxPrice } } : {}),
