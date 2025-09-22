@@ -7,7 +7,7 @@ import { revalidatePath } from "next/cache";
 import { pdfToPng } from "pdf-to-png-converter";
 import pdfParse from "pdf-parse";
 import OpenAI from "openai";
-import { extractMaterialCode, normalizeMaterialCode, areMaterialCodesSimilar, generateStandardMaterialCode, areMaterialNamesSimilar } from "@/lib/utils";
+import { extractMaterialCode, normalizeMaterialCode, areMaterialCodesSimilar, generateStandardMaterialCode, areMaterialNamesSimilar, normalizeCifForComparison, buildCifVariants } from "@/lib/utils";
 import readline from "readline"; // Node stdlib for streaming large files
 import { Readable } from "stream";
 import { requireAuth } from "@/lib/auth-utils";
@@ -652,6 +652,7 @@ JSON format:
 
 async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData: ExtractedPdfData['provider'], userId?: string, providerType: 'MATERIAL_SUPPLIER' | 'MACHINERY_RENTAL' = 'MATERIAL_SUPPLIER'): Promise<Provider> {
     const { cif, name, email, phone, address } = providerData;
+    const canonicalCif = normalizeCifForComparison(cif) || cif;
 
     // Check if provider is blocked
     if (isBlockedProvider(name)) {
@@ -669,22 +670,50 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
         let existingProvider: Provider | null = null;
         let matchType = '';
 
-        // Strategy 1: Encontrar por CIF exacto o alias
-        // 1a. Buscar directamente en Provider (scoped by user if userId provided)
-        const providerFilter = userId ? { cif, userId } : { cif };
-        existingProvider = await tx.provider.findFirst({
-            where: providerFilter
-        });
+        // Strategy 1: Robust CIF matching (normalize hyphens and ES prefix)
+        const normalized = normalizeCifForComparison(cif);
+        const variants = buildCifVariants(cif);
+
+        // 1a. Try direct or normalized variant matches within current user's scope
+        if (userId) {
+            existingProvider = await tx.provider.findFirst({
+                where: {
+                    userId,
+                    OR: [
+                        { cif: { in: variants } },
+                        // Fallback: provider.cif normalized equals normalized input (approximate via contains both ways)
+                        { cif: { contains: normalized ?? '', mode: 'insensitive' } }
+                    ]
+                }
+            });
+        } else {
+            existingProvider = await tx.provider.findFirst({
+                where: {
+                    OR: [
+                        { cif: { in: variants } },
+                        { cif: { contains: normalized ?? '', mode: 'insensitive' } }
+                    ]
+                }
+            });
+        }
 
         // 1b. Si no existe, buscar alias (also scoped by user if userId provided)
         if (!existingProvider) {
             const aliasFilter = userId ? {
-                cif,
-                provider: { userId }
-            } : { cif };
+                OR: [
+                    { cif: { in: variants } },
+                    ...(normalized ? [{ cif: { contains: normalized, mode: Prisma.QueryMode.insensitive } }] : [])
+                ],
+                provider: { is: { userId } }
+            } : {
+                OR: [
+                    { cif: { in: variants } },
+                    ...(normalized ? [{ cif: { contains: normalized, mode: Prisma.QueryMode.insensitive } }] : [])
+                ]
+            };
 
             const alias = await tx.providerAlias.findFirst({
-                where: aliasFilter,
+                where: aliasFilter as Prisma.ProviderAliasWhereInput,
                 include: { provider: true }
             });
             if (alias) {
@@ -696,7 +725,7 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
         }
 
         if (existingProvider) {
-            if (!matchType) matchType = 'exact CIF';
+            if (!matchType) matchType = 'CIF match';
         } else {
             // Strategy 2: Find by exact name match (case insensitive, scoped by user if userId provided)
             const nameFilter = userId ? {
@@ -759,7 +788,7 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
                 where: { id: existingProvider.id },
                 data: {
                     name, // Always update name to keep it current
-                    cif, // Update CIF in case AI extracted a corrected version
+                    cif: canonicalCif, // Persist canonical normalized CIF
                     email: email || existingProvider.email, // Keep new email if provided, otherwise keep existing
                     phone: phone || existingProvider.phone, // Keep new phone if provided, otherwise keep existing
                     address: address || existingProvider.address, // Keep new address if provided, otherwise keep existing
@@ -776,7 +805,8 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
 
         // Since we already checked for existence scoped by user, we can create directly
         let createData: Prisma.ProviderCreateInput = {
-            cif,
+            // Persist normalized canonical version
+            cif: canonicalCif,
             name,
             email,
             phone,
@@ -1357,6 +1387,12 @@ export async function createInvoiceFromFiles(
         throw new Error("No files provided.");
     }
 
+    // Identify the current authenticated user so that all subsequent
+    // provider/invoice creations are correctly scoped. Without this the UI
+    // queries (which filter by userId) may fail to find newly created records
+    // leading to the appearance that invoices "disappear".
+    const user = await requireAuth();
+
     // Check if an existing batch ID was provided, otherwise create a new one
     const existingBatchId = formDataWithFiles.get("existingBatchId") as string | null;
     let batchId: string;
@@ -1731,12 +1767,13 @@ export async function createInvoiceFromFiles(
                                 where: { id: cachedProviderId }
                             });
 
-                            if (!provider) {
-                                // Cache miss, fall back to findOrCreateProviderTx
-                                provider = await findOrCreateProviderTx(tx, extractedData.provider, undefined);
+                            // Either the provider disappeared (unlikely) or it belongs to
+                            // another user. Fallback to a scoped lookup.
+                            if (!provider || provider.userId !== user.id) {
+                                provider = await findOrCreateProviderTx(tx, extractedData.provider, user.id);
                             }
                         } else {
-                            provider = await findOrCreateProviderTx(tx, extractedData.provider, undefined);
+                            provider = await findOrCreateProviderTx(tx, extractedData.provider, user.id);
                         }
 
                         const existingInvoice = await tx.invoice.findFirst({

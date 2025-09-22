@@ -217,3 +217,68 @@ export function processWorkOrderSearch(workOrder: string | undefined | null): st
   const normalized = normalizeSearch(workOrder);
   return normalized ? normalized.replace(/\s+/g, '-') : undefined;
 }
+
+/**
+ * Normalize a CIF/NIF/NIE for robust comparison:
+ * - Uppercase
+ * - Strip country prefix (ES, with optional separators)
+ * - Remove all non-alphanumeric characters
+ */
+export function normalizeCifForComparison(raw: string | undefined | null): string | undefined {
+  if (!raw) return undefined;
+  const upper = String(raw).toUpperCase().trim();
+  // Remove ES prefix with optional separators (e.g., ES, ES-, ES , ES:)
+  const withoutCountry = upper.replace(/^ES[\s\-_.:]?/i, '');
+  const normalized = withoutCountry.replace(/[^A-Z0-9]/g, '');
+  return normalized || undefined;
+}
+
+/**
+ * Build a small set of likely CIF/NIF/NIE variants that might exist in DB
+ * to allow resilient matching (handles hyphens and ES prefix).
+ */
+export function buildCifVariants(input: string | undefined | null): string[] {
+  const variants = new Set<string>();
+  if (!input) return [];
+
+  const rawUpper = String(input).toUpperCase().trim();
+  const core = normalizeCifForComparison(rawUpper);
+  if (!core) return [rawUpper];
+
+  variants.add(rawUpper);
+  variants.add(core);
+
+  // CIF: Letter + 8 digits, e.g., A12345678
+  const cifPattern = /^[A-Z][0-9]{8}$/;
+  // NIF: 8 digits + Letter, e.g., 12345678A
+  const nifPattern = /^[0-9]{8}[A-Z]$/;
+  // NIE: X/Y/Z + 7 digits + Letter, e.g., X1234567A
+  const niePattern = /^[XYZ][0-9]{7}[A-Z]$/;
+
+  if (cifPattern.test(core)) {
+    const withHyphen = `${core[0]}-${core.substring(1)}`;
+    variants.add(withHyphen);
+    variants.add(`ES${core}`);
+    variants.add(`ES-${withHyphen}`);
+    variants.add(`ES ${core}`);
+  } else if (nifPattern.test(core)) {
+    const withHyphen = `${core.substring(0, 8)}-${core[8]}`;
+    variants.add(withHyphen);
+    variants.add(`ES${core}`);
+    variants.add(`ES-${withHyphen}`);
+    variants.add(`ES ${core}`);
+  } else if (niePattern.test(core)) {
+    const withHyphen = `${core[0]}-${core.substring(1, 8)}-${core[8]}`;
+    variants.add(withHyphen);
+    variants.add(`ES${core}`);
+    variants.add(`ES-${withHyphen}`);
+    variants.add(`ES ${core}`);
+  } else {
+    // Generic fallbacks
+    variants.add(`ES${core}`);
+    variants.add(`ES-${core}`);
+    variants.add(`ES ${core}`);
+  }
+
+  return Array.from(variants);
+}

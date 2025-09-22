@@ -2,7 +2,7 @@ import * as XLSX from 'xlsx-js-style';
 import { prisma } from '@/lib/db';
 import { Prisma } from '@/generated/prisma';
 import type { InvoiceItem, Material, Invoice, Provider, ProviderType } from '@/generated/prisma';
-import { normalizeSearch, processWorkOrderSearch } from '@/lib/utils';
+import { normalizeSearch, processWorkOrderSearch, normalizeCifForComparison, buildCifVariants } from '@/lib/utils';
 import { requireAuth } from '@/lib/auth-utils';
 
 // Helper function to create worksheet with bold headers
@@ -463,11 +463,20 @@ export interface SupplierDetailedExport {
 // New detailed suppliers export function
 export async function exportSuppliersListDetailed(filters: ExportFilters = {}) {
     // Normalize search parameters
-    const normalizedSupplierCif = normalizeSearch(filters.supplierCif);
+    const normalizedSupplierCif = normalizeCifForComparison(filters.supplierCif);
 
     const where: Prisma.InvoiceItemWhereInput = {
         ...(filters.supplierId ? { invoice: { providerId: filters.supplierId } } : {}),
-        ...(normalizedSupplierCif ? { invoice: { provider: { cif: { contains: normalizedSupplierCif, mode: 'insensitive' } } } } : {}),
+        ...((normalizedSupplierCif || filters.supplierCif) ? {
+            invoice: {
+                provider: {
+                    OR: [
+                        ...(filters.supplierCif ? [{ cif: { in: buildCifVariants(filters.supplierCif) } }] : []),
+                        ...(normalizedSupplierCif ? [{ cif: { contains: normalizedSupplierCif, mode: Prisma.QueryMode.insensitive } }] : [])
+                    ]
+                }
+            }
+        } : {}),
         ...(filters.startDate || filters.endDate ? {
             invoice: {
                 issueDate: {
@@ -563,11 +572,18 @@ export async function exportSuppliersListDetailed(filters: ExportFilters = {}) {
 
 export async function exportSupplierSummary(filters: ExportFilters = {}) {
     // Normalize search parameters
-    const normalizedSupplierCif = normalizeSearch(filters.supplierCif);
+    const normalizedSupplierCif = normalizeCifForComparison(filters.supplierCif);
 
     const where: Prisma.InvoiceWhereInput = {
         ...(filters.supplierId ? { providerId: filters.supplierId } : {}),
-        ...(normalizedSupplierCif ? { provider: { cif: { contains: normalizedSupplierCif, mode: 'insensitive' } } } : {}),
+        ...((normalizedSupplierCif || filters.supplierCif) ? {
+            provider: {
+                OR: [
+                    ...(filters.supplierCif ? [{ cif: { in: buildCifVariants(filters.supplierCif) } }] : []),
+                    ...(normalizedSupplierCif ? [{ cif: { contains: normalizedSupplierCif, mode: Prisma.QueryMode.insensitive } }] : [])
+                ]
+            }
+        } : {}),
         ...(filters.startDate || filters.endDate ? {
             issueDate: {
                 ...(filters.startDate ? { gte: filters.startDate } : {}),

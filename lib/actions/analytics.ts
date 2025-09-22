@@ -2,7 +2,7 @@
 
 import { prisma } from "@/lib/db";
 import { Prisma, ProviderType } from "@/generated/prisma";
-import { normalizeSearch, processWorkOrderSearch } from "@/lib/utils";
+import { normalizeSearch, processWorkOrderSearch, normalizeCifForComparison, buildCifVariants } from "@/lib/utils";
 import { requireAuth } from "@/lib/auth-utils";
 
 export interface MaterialAnalytics {
@@ -641,7 +641,8 @@ export async function getSupplierAnalytics(params: GetSupplierAnalyticsParams = 
     const user = await requireAuth()
 
     // Normalize search parameters
-    const normalizedSupplierCif = normalizeSearch(params.supplierCif);
+    const normalizedSupplierCif = normalizeCifForComparison(params.supplierCif);
+    const cifVariants = params.supplierCif ? buildCifVariants(params.supplierCif) : [];
     const normalizedWorkOrder = processWorkOrderSearch(params.workOrder);
     const normalizedMaterialCategory = normalizeSearch(params.materialCategory);
 
@@ -651,7 +652,12 @@ export async function getSupplierAnalytics(params: GetSupplierAnalyticsParams = 
             userId: user.id,
             ...(params.supplierId ? { id: params.supplierId } : {}),
             ...(params.supplierType ? { type: params.supplierType } : {}),
-            ...(normalizedSupplierCif ? { cif: { contains: normalizedSupplierCif, mode: 'insensitive' } } : {})
+            ...((normalizedSupplierCif || cifVariants.length > 0) ? {
+                OR: [
+                    ...(cifVariants.length > 0 ? [{ cif: { in: cifVariants } }] : []),
+                    ...(normalizedSupplierCif ? [{ cif: { contains: normalizedSupplierCif, mode: Prisma.QueryMode.insensitive } }] : [])
+                ]
+            } : {})
         },
         ...(normalizedWorkOrder ? {
             items: {
@@ -826,7 +832,8 @@ export async function getSupplierAnalyticsPaginated(params: GetSupplierAnalytics
     const skip = (page - 1) * pageSize;
 
     // Normalize search parameters
-    const normalizedSupplierCif = normalizeSearch(params.supplierCif);
+    const normalizedSupplierCif = normalizeCifForComparison(params.supplierCif);
+    const cifVariants = params.supplierCif ? buildCifVariants(params.supplierCif) : [];
     const normalizedWorkOrder = processWorkOrderSearch(params.workOrder);
     const normalizedMaterialCategory = normalizeSearch(params.materialCategory);
 
@@ -835,7 +842,12 @@ export async function getSupplierAnalyticsPaginated(params: GetSupplierAnalytics
             userId: user.id,
             ...(params.supplierId ? { id: params.supplierId } : {}),
             ...(params.supplierType ? { type: params.supplierType } : {}),
-            ...(normalizedSupplierCif ? { cif: { contains: normalizedSupplierCif, mode: 'insensitive' } } : {})
+            ...((normalizedSupplierCif || cifVariants.length > 0) ? {
+                OR: [
+                    ...(cifVariants.length > 0 ? [{ cif: { in: cifVariants } }] : []),
+                    ...(normalizedSupplierCif ? [{ cif: { contains: normalizedSupplierCif, mode: Prisma.QueryMode.insensitive } }] : [])
+                ]
+            } : {})
         },
         ...(normalizedWorkOrder ? {
             items: {
@@ -1130,7 +1142,8 @@ export async function getWorkOrdersForSuppliers(filters: GetSupplierAnalyticsPar
     const pageSize = filters.pageSize || 20; // Reasonable page size for work orders
     const skip = (page - 1) * pageSize;
 
-    const normalizedSupplierCif = normalizeSearch(filters.supplierCif);
+    const normalizedSupplierCif = normalizeCifForComparison(filters.supplierCif);
+    const cifVariants = filters.supplierCif ? buildCifVariants(filters.supplierCif) : [];
     const normalizedWorkOrder = processWorkOrderSearch(filters.workOrder);
     const normalizedMaterialCategory = normalizeSearch(filters.materialCategory);
 
@@ -1143,7 +1156,12 @@ export async function getWorkOrdersForSuppliers(filters: GetSupplierAnalyticsPar
                 userId: user.id,
                 ...(filters.supplierId ? { id: filters.supplierId } : {}),
                 ...(filters.supplierType ? { type: filters.supplierType } : {}),
-                ...(normalizedSupplierCif ? { cif: { contains: normalizedSupplierCif, mode: 'insensitive' } } : {})
+                ...((normalizedSupplierCif || cifVariants.length > 0) ? {
+                    OR: [
+                        ...(cifVariants.length > 0 ? [{ cif: { in: cifVariants } }] : []),
+                        ...(normalizedSupplierCif ? [{ cif: { contains: normalizedSupplierCif, mode: Prisma.QueryMode.insensitive } }] : [])
+                    ]
+                } : {})
             }
         },
         ...(normalizedWorkOrder ? { workOrder: { contains: normalizedWorkOrder, mode: 'insensitive' } } : {}),
