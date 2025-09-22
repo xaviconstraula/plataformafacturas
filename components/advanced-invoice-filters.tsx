@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { SearchableSelect } from "@/components/ui/searchable-select"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
@@ -361,22 +362,21 @@ export function AdvancedInvoiceFilters({
                                     </Select>
                                 </div>
 
-                                <div className="space-y-1">
-                                    <Label className="text-xs text-gray-600">Proveedor</Label>
-                                    <Select value={supplier} onValueChange={setSupplier}>
-                                        <SelectTrigger className="h-8 text-sm border-gray-300 focus:border-gray-400">
-                                            <SelectValue placeholder="Todos" />
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                            <SelectItem value="all">Todos</SelectItem>
-                                            {suppliers.map((s) => (
-                                                <SelectItem key={s.id} value={s.id}>
-                                                    {s.name}
-                                                </SelectItem>
-                                            ))}
-                                        </SelectContent>
-                                    </Select>
-                                </div>
+                                <SearchableSelect
+                                    value={supplier}
+                                    onValueChange={(value) => setSupplier(value || "")}
+                                    placeholder="Todos"
+                                    searchPlaceholder="Buscar proveedor..."
+                                    options={[
+                                        { value: "all", label: "Todos" },
+                                        ...suppliers.map((s) => ({ value: s.id, label: s.name }))
+                                    ]}
+                                    className="h-8 text-sm border-gray-300 focus:border-gray-400"
+                                    maxVisible={4}
+                                    searchMessage="busca para encontrar más"
+                                    showLabel={true}
+                                    label="Proveedor"
+                                />
 
                                 <div className="space-y-1">
                                     <Label className="text-xs text-gray-600">Material</Label>

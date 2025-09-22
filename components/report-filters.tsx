@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { SearchableSelect } from "@/components/ui/searchable-select"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { FilterIcon } from "lucide-react"
@@ -46,24 +47,24 @@ export function ReportFilters() {
           />
         </div>
 
-        <div className="space-y-2">
-          <label htmlFor="supplier" className="text-sm font-medium">
-            Proveedor
-          </label>
-          <Select onValueChange={(value) => setSupplier(value)}>
-            <SelectTrigger id="supplier">
-              <SelectValue placeholder="Todos los proveedores" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">Todos los proveedores</SelectItem>
-              <SelectItem value="aceros">Aceros del Norte</SelectItem>
-              <SelectItem value="metales">Metales Precisos</SelectItem>
-              <SelectItem value="plasticos">Plásticos Modernos</SelectItem>
-              <SelectItem value="maderas">Maderas Premium</SelectItem>
-              <SelectItem value="vidrios">Vidrios Claros</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
+        <SearchableSelect
+          value={supplier}
+          onValueChange={(value) => setSupplier(value || "all")}
+          placeholder="Todos los proveedores"
+          searchPlaceholder="Buscar proveedor..."
+          options={[
+            { value: "all", label: "Todos los proveedores" },
+            { value: "aceros", label: "Aceros del Norte" },
+            { value: "metales", label: "Metales Precisos" },
+            { value: "plasticos", label: "Plásticos Modernos" },
+            { value: "maderas", label: "Maderas Premium" },
+            { value: "vidrios", label: "Vidrios Claros" }
+          ]}
+          maxVisible={4}
+          searchMessage="busca para encontrar más"
+          showLabel={true}
+          label="Proveedor"
+        />
       </div>
 
       <Button className="gap-2">

@@ -3,6 +3,7 @@
 import { useSearchParams, useRouter, usePathname } from "next/navigation"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { SearchableSelect } from "@/components/ui/searchable-select"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Button } from "@/components/ui/button"
@@ -212,25 +213,20 @@ export function SupplierAnalyticsSection({
             <div className="space-y-4">
                 {/* First row - Main filters */}
                 <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                    <div className="space-y-2">
-                        <Label>Proveedor</Label>
-                        <Select
-                            value={currentSupplier}
-                            onValueChange={(value) => updateSearchParams({ supplierId: value })}
-                        >
-                            <SelectTrigger>
-                                <SelectValue placeholder="Todos los proveedores" />
-                            </SelectTrigger>
-                            <SelectContent>
-                                <SelectItem value="all">Todos los proveedores</SelectItem>
-                                {allSuppliers.map(supplier => (
-                                    <SelectItem key={supplier.id} value={supplier.id}>
-                                        {supplier.name}
-                                    </SelectItem>
-                                ))}
-                            </SelectContent>
-                        </Select>
-                    </div>
+                    <SearchableSelect
+                        value={currentSupplier}
+                        onValueChange={(value) => updateSearchParams({ supplierId: value || "all" })}
+                        placeholder="Todos los proveedores"
+                        searchPlaceholder="Buscar proveedor..."
+                        options={[
+                            { value: "all", label: "Todos los proveedores" },
+                            ...allSuppliers.map(supplier => ({ value: supplier.id, label: supplier.name }))
+                        ]}
+                        maxVisible={4}
+                        searchMessage="busca para encontrar más"
+                        showLabel={true}
+                        label="Proveedor"
+                    />
 
                     <div className="space-y-2">
                         <Label>CIF</Label>

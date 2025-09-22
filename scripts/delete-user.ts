@@ -28,8 +28,8 @@ async function deleteUser(userId: string) {
         materials: await prisma.material.count({ where: { userId } }),
         productGroups: await prisma.productGroup.count({ where: { userId } }),
         batchProcessing: await prisma.batchProcessing.count({ where: { userId } }),
-        invoices: await prisma.invoice.count({ 
-            where: { provider: { userId } } 
+        invoices: await prisma.invoice.count({
+            where: { provider: { userId } }
         }),
         sessions: await prisma.session.count({ where: { userId } }),
         accounts: await prisma.account.count({ where: { userId } })
@@ -73,10 +73,10 @@ async function deleteUser(userId: string) {
 
         console.log('Deleting invoice items...')
         const deletedItems = await prisma.invoiceItem.deleteMany({
-            where: { 
-                invoice: { 
-                    provider: { userId } 
-                } 
+            where: {
+                invoice: {
+                    provider: { userId }
+                }
             }
         })
         console.log(`✅ Deleted ${deletedItems.count} invoice items`)
@@ -94,16 +94,16 @@ async function deleteUser(userId: string) {
 
         console.log('Deleting provider aliases...')
         const deletedAliases = await prisma.providerAlias.deleteMany({
-            where: { 
-                provider: { userId } 
+            where: {
+                provider: { userId }
             }
         })
         console.log(`✅ Deleted ${deletedAliases.count} provider aliases`)
 
         console.log('Deleting invoices...')
         const deletedInvoices = await prisma.invoice.deleteMany({
-            where: { 
-                provider: { userId } 
+            where: {
+                provider: { userId }
             }
         })
         console.log(`✅ Deleted ${deletedInvoices.count} invoices`)
@@ -157,12 +157,12 @@ async function deleteUser(userId: string) {
         console.log(`✅ Deleted user: ${user.name} (${user.email})`)
 
         console.log('\n🎉 User deletion completed successfully!')
-        
+
         // Final verification
         const remainingUser = await prisma.user.findUnique({
             where: { id: userId }
         })
-        
+
         if (remainingUser) {
             console.log('❌ Error: User still exists in database')
             return false
@@ -179,7 +179,7 @@ async function deleteUser(userId: string) {
 
 async function main() {
     const args = process.argv.slice(2)
-    
+
     if (args.length === 0) {
         console.log('❌ Please provide a user ID')
         console.log('Usage: npm run delete:user <user-id>')
@@ -188,7 +188,7 @@ async function main() {
     }
 
     const userId = args[0]
-    
+
     if (!userId || userId.trim() === '') {
         console.log('❌ Invalid user ID provided')
         process.exit(1)
@@ -196,9 +196,9 @@ async function main() {
 
     console.log('🚨 WARNING: This will permanently delete the user and ALL associated data!')
     console.log(`User ID to delete: ${userId}`)
-    
+
     const success = await deleteUser(userId.trim())
-    
+
     if (success) {
         console.log('✅ User deletion completed successfully')
         process.exit(0)

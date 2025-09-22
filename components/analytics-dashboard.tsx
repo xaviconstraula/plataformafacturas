@@ -3,6 +3,7 @@
 import { useState } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { SearchableSelect } from "@/components/ui/searchable-select"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Button } from "@/components/ui/button"
@@ -202,25 +203,20 @@ export function AnalyticsDashboard({
                 </CardHeader>
                 <CardContent>
                     <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-                        <div className="space-y-2">
-                            <Label>Proveedor</Label>
-                            <Select
-                                value={filters.supplierId || 'all'}
-                                onValueChange={(value) => setFilters(prev => ({ ...prev, supplierId: value === 'all' ? undefined : value }))}
-                            >
-                                <SelectTrigger>
-                                    <SelectValue placeholder="Todos los proveedores" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                    <SelectItem value="all">Todos los proveedores</SelectItem>
-                                    {suppliers.map(supplier => (
-                                        <SelectItem key={supplier.id} value={supplier.id}>
-                                            {supplier.name}
-                                        </SelectItem>
-                                    ))}
-                                </SelectContent>
-                            </Select>
-                        </div>
+                        <SearchableSelect
+                            value={filters.supplierId || 'all'}
+                            onValueChange={(value) => setFilters(prev => ({ ...prev, supplierId: value === 'all' ? undefined : value }))}
+                            placeholder="Todos los proveedores"
+                            searchPlaceholder="Buscar proveedor..."
+                            options={[
+                                { value: "all", label: "Todos los proveedores" },
+                                ...suppliers.map(supplier => ({ value: supplier.id, label: supplier.name }))
+                            ]}
+                            maxVisible={4}
+                            searchMessage="busca para encontrar más"
+                            showLabel={true}
+                            label="Proveedor"
+                        />
 
                         <div className="space-y-2">
                             <Label>CIF</Label>
