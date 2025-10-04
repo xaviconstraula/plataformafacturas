@@ -35,34 +35,29 @@ async function migrateDataToUser(userId: string) {
 
     // Start transaction for data consistency
     await prisma.$transaction(async (tx) => {
-      // Use raw SQL for migration since TypeScript types might not be updated yet
-
       // 1. Migrate Providers
       console.log('📦 Migrating Providers...')
-      const providersResult = await tx.$executeRaw`
-        UPDATE "Provider" 
-        SET "userId" = ${userId}, "updatedAt" = NOW()
-        WHERE "userId" IS NULL
-      `
-      console.log(`✅ Updated ${providersResult} providers`)
+      const providersResult = await tx.provider.updateMany({
+        where: { userId: null },
+        data: { userId, updatedAt: new Date() }
+      })
+      console.log(`✅ Updated ${providersResult.count} providers`)
 
       // 2. Migrate Materials  
       console.log('🔧 Migrating Materials...')
-      const materialsResult = await tx.$executeRaw`
-        UPDATE "Material" 
-        SET "userId" = ${userId}, "updatedAt" = NOW()
-        WHERE "userId" IS NULL
-      `
-      console.log(`✅ Updated ${materialsResult} materials`)
+      const materialsResult = await tx.material.updateMany({
+        where: { userId: null },
+        data: { userId, updatedAt: new Date() }
+      })
+      console.log(`✅ Updated ${materialsResult.count} materials`)
 
       // 3. Migrate ProductGroups
       console.log('📋 Migrating Product Groups...')
-      const productGroupsResult = await tx.$executeRaw`
-        UPDATE "ProductGroup" 
-        SET "userId" = ${userId}, "updatedAt" = NOW()
-        WHERE "userId" IS NULL
-      `
-      console.log(`✅ Updated ${productGroupsResult} product groups`)
+      const productGroupsResult = await tx.productGroup.updateMany({
+        where: { userId: null },
+        data: { userId, updatedAt: new Date() }
+      })
+      console.log(`✅ Updated ${productGroupsResult.count} product groups`)
 
       // 4. Migrate BatchProcessing records (this field already exists)
       console.log('⚙️ Migrating Batch Processing records...')
@@ -77,11 +72,11 @@ async function migrateDataToUser(userId: string) {
       console.log(`✅ Updated ${batchProcessingResult.count} batch processing records`)
 
       console.log('\n📊 Migration Summary:')
-      console.log(`- Providers: ${providersResult}`)
-      console.log(`- Materials: ${materialsResult}`)
-      console.log(`- Product Groups: ${productGroupsResult}`)
+      console.log(`- Providers: ${providersResult.count}`)
+      console.log(`- Materials: ${materialsResult.count}`)
+      console.log(`- Product Groups: ${productGroupsResult.count}`)
       console.log(`- Batch Processing: ${batchProcessingResult.count}`)
-      console.log(`- Total records migrated: ${Number(providersResult) + Number(materialsResult) + Number(productGroupsResult) + batchProcessingResult.count}`)
+      console.log(`- Total records migrated: ${providersResult.count + materialsResult.count + productGroupsResult.count + batchProcessingResult.count}`)
     })
 
     console.log('\n🎉 Migration completed successfully!')
@@ -89,25 +84,16 @@ async function migrateDataToUser(userId: string) {
     // Verify migration by counting records
     console.log('\n🔍 Verification - Counting updated records...')
 
-    const providerCount = await prisma.$queryRaw<Array<{ count: bigint }>>`
-      SELECT COUNT(*) as count FROM "Provider" WHERE "userId" = ${userId}
-    `
+    const [providerCount, materialCount, productGroupCount, batchProcessingCount] = await Promise.all([
+      prisma.provider.count({ where: { userId } }),
+      prisma.material.count({ where: { userId } }),
+      prisma.productGroup.count({ where: { userId } }),
+      prisma.batchProcessing.count({ where: { userId } })
+    ])
 
-    const materialCount = await prisma.$queryRaw<Array<{ count: bigint }>>`
-      SELECT COUNT(*) as count FROM "Material" WHERE "userId" = ${userId}
-    `
-
-    const productGroupCount = await prisma.$queryRaw<Array<{ count: bigint }>>`
-      SELECT COUNT(*) as count FROM "ProductGroup" WHERE "userId" = ${userId}
-    `
-
-    const batchProcessingCount = await prisma.batchProcessing.count({
-      where: { userId: userId }
-    })
-
-    console.log(`- ${Number(providerCount[0].count)} providers`)
-    console.log(`- ${Number(materialCount[0].count)} materials`)
-    console.log(`- ${Number(productGroupCount[0].count)} product groups`)
+    console.log(`- ${providerCount} providers`)
+    console.log(`- ${materialCount} materials`)
+    console.log(`- ${productGroupCount} product groups`)
     console.log(`- ${batchProcessingCount} batch processing records`)
 
   } catch (error) {

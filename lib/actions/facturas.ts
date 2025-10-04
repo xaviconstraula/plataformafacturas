@@ -1,10 +1,46 @@
 "use server"
 
 import { prisma } from "@/lib/db"
-import { Prisma } from "@/generated/prisma"
+import { Prisma, ProviderType } from "@/generated/prisma"
 import { revalidatePath } from "next/cache"
 import { normalizeSearch, processWorkOrderSearch } from "@/lib/utils"
 import { requireAuth } from "@/lib/auth-utils"
+
+// Type for invoice items without material (when includeItems is false)
+type InvoiceItemWithoutMaterial = {
+    id: string;
+    createdAt: Date;
+    updatedAt: Date;
+    materialId: string;
+    invoiceId: string;
+    description: string | null;
+    quantity: Prisma.Decimal;
+    unitPrice: Prisma.Decimal;
+    totalPrice: Prisma.Decimal;
+    itemDate: Date;
+    workOrder: string | null;
+    lineNumber: number | null;
+};
+
+// Type for invoice items with material (when includeItems is true)
+type InvoiceItemWithMaterial = InvoiceItemWithoutMaterial & {
+    material: {
+        id: string;
+        code: string;
+        name: string;
+        category: string | null;
+        unit: string | null;
+        productGroup: {
+            id: string;
+            standardizedName: string;
+        } | null;
+    };
+};
+
+// Type guard to check if item has material
+function hasMaterial(item: InvoiceItemWithoutMaterial | InvoiceItemWithMaterial): item is InvoiceItemWithMaterial {
+    return 'material' in item;
+}
 
 export interface GetInvoicesParams {
     page?: number
@@ -22,6 +58,7 @@ export interface GetInvoicesParams {
     maxUnitPrice?: number
     fiscalYear?: string
     category?: string
+    includeItems?: boolean
 }
 
 const DEFAULT_PAGE_SIZE = 15
@@ -174,59 +211,158 @@ export async function getInvoices(params: GetInvoicesParams) {
                 where,
                 skip,
                 take: pageSize,
-                include: {
-                    provider: true,
-                    items: {
-                        include: {
-                            material: {
-                                include: {
-                                    productGroup: true
+                select: {
+                    id: true,
+                    invoiceCode: true,
+                    issueDate: true,
+                    totalAmount: true,
+                    provider: {
+                        select: {
+                            id: true,
+                            name: true,
+                            type: true,
+                            cif: true,
+                        }
+                    },
+                    ...(params.includeItems ? {
+                        items: {
+                            select: {
+                                id: true,
+                                quantity: true,
+                                unitPrice: true,
+                                totalPrice: true,
+                                workOrder: true,
+                                description: true,
+                                lineNumber: true,
+                                itemDate: true,
+                                material: {
+                                    select: {
+                                        id: true,
+                                        code: true,
+                                        name: true,
+                                        category: true,
+                                        unit: true,
+                                        productGroup: {
+                                            select: {
+                                                id: true,
+                                                standardizedName: true,
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
-                    }
+                    } : {
+                        items: {
+                            select: {
+                                id: true,
+                                quantity: true,
+                                unitPrice: true,
+                                totalPrice: true,
+                                workOrder: true,
+                                description: true,
+                                lineNumber: true,
+                                itemDate: true,
+                            }
+                        }
+                    })
                 },
                 orderBy: {
                     createdAt: 'desc'
                 }
-            })
+            }) as Promise<Array<{
+                id: string;
+                invoiceCode: string;
+                issueDate: Date;
+                totalAmount: Prisma.Decimal;
+                provider: {
+                    id: string;
+                    name: string;
+                    type: ProviderType;
+                    cif: string;
+                };
+                items: Array<InvoiceItemWithoutMaterial | InvoiceItemWithMaterial>;
+            }>>
         ])
 
         const totalPages = Math.ceil(totalCount / pageSize)
 
-        const transformedInvoices = invoices.map(invoice => ({
-            id: invoice.id,
-            invoiceCode: invoice.invoiceCode,
-            totalAmount: invoice.totalAmount.toNumber(),
-            provider: {
-                id: invoice.provider.id,
-                name: invoice.provider.name,
-                type: invoice.provider.type,
-                cif: invoice.provider.cif
-            },
-            items: invoice.items.map(item => ({
-                id: item.id,
-                quantity: item.quantity.toNumber(),
-                unitPrice: item.unitPrice.toNumber(),
-                totalPrice: item.totalPrice.toNumber(),
-                workOrder: item.workOrder,
-                description: item.description,
-                lineNumber: item.lineNumber,
-                itemDate: item.itemDate,
-                material: {
-                    id: item.material.id,
-                    code: item.material.code,
-                    name: item.material.name,
-                    category: item.material.category,
-                    unit: item.material.unit,
-                    productGroup: item.material.productGroup ? {
-                        id: item.material.productGroup.id,
-                        standardizedName: item.material.productGroup.standardizedName
-                    } : null
-                }
-            })),
-            issueDate: invoice.issueDate
-        }))
+        const transformedInvoices = invoices.map(invoice => {
+            const base: {
+                id: string;
+                invoiceCode: string;
+                totalAmount: number;
+                provider: {
+                    id: string;
+                    name: string;
+                    type: ProviderType;
+                    cif: string;
+                };
+                issueDate: Date;
+                items?: Array<{
+                    id: string;
+                    quantity: number;
+                    unitPrice: number;
+                    totalPrice: number;
+                    workOrder: string | null;
+                    description: string | null;
+                    lineNumber: number | null;
+                    itemDate: Date;
+                    material: {
+                        id: string;
+                        code: string;
+                        name: string;
+                        category: string | null;
+                        unit: string | null;
+                        productGroup: {
+                            id: string;
+                            standardizedName: string;
+                        } | null;
+                    };
+                }>;
+            } = {
+                id: invoice.id,
+                invoiceCode: invoice.invoiceCode,
+                totalAmount: invoice.totalAmount.toNumber(),
+                provider: {
+                    id: invoice.provider.id,
+                    name: invoice.provider.name,
+                    type: invoice.provider.type,
+                    cif: invoice.provider.cif
+                },
+                issueDate: invoice.issueDate
+            }
+
+            if (params.includeItems && invoice.items && invoice.items.length > 0 && hasMaterial(invoice.items[0])) {
+                base.items = invoice.items.map((item) => {
+                    // At this point, we know the item has material due to the type guard
+                    const itemWithMaterial = item as InvoiceItemWithMaterial;
+                    return {
+                        id: itemWithMaterial.id,
+                        quantity: itemWithMaterial.quantity.toNumber(),
+                        unitPrice: itemWithMaterial.unitPrice.toNumber(),
+                        totalPrice: itemWithMaterial.totalPrice.toNumber(),
+                        workOrder: itemWithMaterial.workOrder,
+                        description: itemWithMaterial.description,
+                        lineNumber: itemWithMaterial.lineNumber,
+                        itemDate: itemWithMaterial.itemDate,
+                        material: {
+                            id: itemWithMaterial.material.id,
+                            code: itemWithMaterial.material.code,
+                            name: itemWithMaterial.material.name,
+                            category: itemWithMaterial.material.category,
+                            unit: itemWithMaterial.material.unit,
+                            productGroup: itemWithMaterial.material.productGroup ? {
+                                id: itemWithMaterial.material.productGroup.id,
+                                standardizedName: itemWithMaterial.material.productGroup.standardizedName
+                            } : null
+                        }
+                    };
+                });
+            }
+
+            return base
+        })
 
         return {
             invoices: transformedInvoices,

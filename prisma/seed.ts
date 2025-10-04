@@ -1,4 +1,5 @@
 import { PrismaClient, ProviderType } from '../generated/prisma'
+import { auth } from '@/auth'
 
 const prisma = new PrismaClient()
 
@@ -10,13 +11,62 @@ function randomDate(start: Date, end: Date) {
 async function main() {
     console.log('🌱 Starting seeding...')
 
-    // Clean up existing data
+    // CLEAN SLATE: Delete ALL existing data before seeding
+    console.log('🧹 Cleaning ALL existing data for fresh seeding...')
+
+    // Get total counts before deletion
+    const beforeCounts = {
+        users: await prisma.user.count(),
+        providers: await prisma.provider.count(),
+        materials: await prisma.material.count(),
+        productGroups: await prisma.productGroup.count(),
+        batchProcessing: await prisma.batchProcessing.count(),
+        sessions: await prisma.session.count(),
+        accounts: await prisma.account.count(),
+        verifications: await prisma.verification.count()
+    }
+
+    console.log('Existing data counts:', beforeCounts)
+
+    // Delete in correct order to respect foreign key constraints - ALL DATA
+    console.log('Deleting data in proper order...')
+
     await prisma.priceAlert.deleteMany()
     await prisma.invoiceItem.deleteMany()
     await prisma.materialProvider.deleteMany()
     await prisma.invoice.deleteMany()
     await prisma.material.deleteMany()
     await prisma.provider.deleteMany()
+    await prisma.productGroup.deleteMany()
+    await prisma.batchProcessing.deleteMany()
+
+    // Delete authentication-related data
+    await prisma.session.deleteMany()
+    await prisma.account.deleteMany()
+    await prisma.verification.deleteMany()
+
+    // Delete users last (they have foreign key references)
+    await prisma.user.deleteMany()
+
+    console.log('✅ Complete database cleanup completed')
+
+    // Create the demo user via Better Auth server API
+    console.log('👤 Creating demo user via Better Auth...')
+    await auth.api.signUpEmail({
+        body: {
+            email: 'demo@gmail.com',
+            password: 'hacelerix',
+            name: 'Demo User'
+        }
+    })
+
+    // Resolve created user from DB
+    const user = await prisma.user.findUnique({ where: { email: 'demo@gmail.com' } })
+    if (!user) {
+        throw new Error('Failed to create demo user via Better Auth')
+    }
+
+    console.log('✅ Demo user created via Better Auth')
 
     // Create Materials and Equipment
     const materials = await Promise.all([
@@ -26,6 +76,7 @@ async function main() {
                 code: 'MAT-001',
                 name: 'Cemento Portland',
                 description: 'Cemento de alta resistencia',
+                userId: user.id
             }
         }),
         prisma.material.create({
@@ -33,6 +84,7 @@ async function main() {
                 code: 'MAT-002',
                 name: 'Varilla de Acero',
                 description: 'Varilla corrugada 12mm',
+                userId: user.id
             }
         }),
         prisma.material.create({
@@ -40,6 +92,7 @@ async function main() {
                 code: 'MAT-003',
                 name: 'Arena Fina',
                 description: 'Arena para construcción',
+                userId: user.id
             }
         }),
         // Equipment for Rental
@@ -48,6 +101,7 @@ async function main() {
                 code: 'EQP-001',
                 name: 'Excavadora Compacta',
                 description: 'Excavadora 2T para obras menores',
+                userId: user.id
             }
         }),
         prisma.material.create({
@@ -55,6 +109,7 @@ async function main() {
                 code: 'EQP-002',
                 name: 'Montacargas Eléctrico',
                 description: 'Montacargas 1000kg capacidad',
+                userId: user.id
             }
         }),
         // Hybrid Materials (available from both types of providers)
@@ -63,6 +118,7 @@ async function main() {
                 code: 'HYB-001',
                 name: 'Andamios Metálicos',
                 description: 'Andamios modulares para construcción - Venta o Alquiler',
+                userId: user.id
             }
         }),
         prisma.material.create({
@@ -70,6 +126,7 @@ async function main() {
                 code: 'HYB-002',
                 name: 'Encofrados Metálicos',
                 description: 'Sistema de encofrado modular - Venta o Alquiler',
+                userId: user.id
             }
         }),
         prisma.material.create({
@@ -77,6 +134,7 @@ async function main() {
                 code: 'HYB-003',
                 name: 'Puntales Telescópicos',
                 description: 'Puntales ajustables de acero - Venta o Alquiler',
+                userId: user.id
             }
         })
     ])
@@ -91,7 +149,8 @@ async function main() {
                 cif: 'B12345678',
                 email: 'contacto@mcmadrid.es',
                 phone: '911234567',
-                address: 'Calle Gran Vía 123, Madrid'
+                address: 'Calle Gran Vía 123, Madrid',
+                userId: user.id
             }
         }),
         prisma.provider.create({
@@ -101,7 +160,8 @@ async function main() {
                 cif: 'A87654321',
                 email: 'ventas@suministrosbcn.com',
                 phone: '934567890',
-                address: 'Avenida Diagonal 456, Barcelona'
+                address: 'Avenida Diagonal 456, Barcelona',
+                userId: user.id
             }
         }),
         // Machinery Rental Providers
@@ -112,7 +172,8 @@ async function main() {
                 cif: 'B98765432',
                 email: 'info@maquinariavlc.es',
                 phone: '963214567',
-                address: 'Polígono Industrial 789, Valencia'
+                address: 'Polígono Industrial 789, Valencia',
+                userId: user.id
             }
         }),
         prisma.provider.create({
@@ -122,7 +183,8 @@ async function main() {
                 cif: 'B76543210',
                 email: 'alquileres@maquinamad.es',
                 phone: '912345678',
-                address: 'Calle Industria 321, Madrid'
+                address: 'Calle Industria 321, Madrid',
+                userId: user.id
             }
         })
     ])
@@ -305,6 +367,24 @@ async function main() {
     }
 
     console.log('✅ Seeding completed successfully')
+    console.log(`Created data for user: ${user.email}`)
+    console.log(`- Materials: ${materials.length}`)
+    console.log(`- Providers: ${providers.length}`)
+
+    // Final verification
+    const finalVerification = {
+        totalUsers: await prisma.user.count(),
+        demoUserData: {
+            providers: await prisma.provider.count({ where: { userId: user.id } }),
+            materials: await prisma.material.count({ where: { userId: user.id } }),
+            invoices: await prisma.invoice.count({ where: { provider: { userId: user.id } } }),
+        }
+    }
+
+    console.log('\n🔒 Final Verification:')
+    console.log(`  - Total users in system: ${finalVerification.totalUsers}`)
+    console.log(`  - Demo user data: ${JSON.stringify(finalVerification.demoUserData, null, 2)}`)
+    console.log('✅ Database seeded successfully with clean slate approach!')
 }
 
 main()

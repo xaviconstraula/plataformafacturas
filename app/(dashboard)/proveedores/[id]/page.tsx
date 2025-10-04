@@ -41,17 +41,42 @@ async function getSupplier(id: string) {
             id,
             userId: user.id
         },
-        include: {
+        select: {
+            id: true,
+            name: true,
+            cif: true,
+            type: true,
+            email: true,
+            phone: true,
+            address: true,
+            createdAt: true,
+            updatedAt: true,
             invoices: {
-                include: {
+                select: {
+                    id: true,
+                    invoiceCode: true,
+                    issueDate: true,
+                    totalAmount: true,
                     items: {
-                        include: {
-                            material: true
+                        select: {
+                            id: true,
+                            quantity: true,
+                            unitPrice: true,
+                            totalPrice: true,
+                            workOrder: true,
+                            material: {
+                                select: {
+                                    id: true,
+                                    name: true,
+                                    code: true,
+                                    category: true
+                                }
+                            }
                         }
                     }
                 },
                 orderBy: { issueDate: 'desc' },
-                take: 20 // Get recent invoices
+                take: 20 // Get recent invoices with minimal item data
             }
         }
     })

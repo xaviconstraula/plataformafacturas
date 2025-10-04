@@ -159,6 +159,7 @@ model InvoiceItem {
   @@index([materialId, totalPrice])
   @@index([materialId, quantity])
   @@index([itemDate, materialId])
+  @@index([invoiceId, materialId])
 }
 
 // Tabla de relación entre Materiales y Proveedores

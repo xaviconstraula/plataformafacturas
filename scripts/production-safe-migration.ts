@@ -28,7 +28,7 @@ interface MigrationState {
 }
 
 async function checkMigrationState(): Promise<MigrationState> {
-  // Use raw SQL to check for userId columns and counts
+  // Prefer Prisma counts; if columns don't exist yet, fall back to table counts
   try {
     const [
       providersWithoutUserId,
@@ -37,17 +37,17 @@ async function checkMigrationState(): Promise<MigrationState> {
       batchProcessingWithoutUserId,
       totalUsers
     ] = await Promise.all([
-      prisma.$queryRaw<Array<{ count: bigint }>>`SELECT COUNT(*) as count FROM "Provider" WHERE "userId" IS NULL`,
-      prisma.$queryRaw<Array<{ count: bigint }>>`SELECT COUNT(*) as count FROM "Material" WHERE "userId" IS NULL`,
-      prisma.$queryRaw<Array<{ count: bigint }>>`SELECT COUNT(*) as count FROM "ProductGroup" WHERE "userId" IS NULL`,
+      prisma.provider.count({ where: { userId: null } }),
+      prisma.material.count({ where: { userId: null } }),
+      prisma.productGroup.count({ where: { userId: null } }),
       prisma.batchProcessing.count({ where: { userId: null } }),
       prisma.user.count()
     ])
 
     return {
-      providersWithoutUserId: Number(providersWithoutUserId[0].count),
-      materialsWithoutUserId: Number(materialsWithoutUserId[0].count),
-      productGroupsWithoutUserId: Number(productGroupsWithoutUserId[0].count),
+      providersWithoutUserId,
+      materialsWithoutUserId,
+      productGroupsWithoutUserId,
       batchProcessingWithoutUserId,
       totalUsers
     }
@@ -143,37 +143,34 @@ async function step2_PopulateData(userId: string) {
 
   try {
     await prisma.$transaction(async (tx) => {
-      // Migrate Providers using raw SQL
+      // Migrate Providers
       if (initialState.providersWithoutUserId > 0) {
         console.log(`📦 Migrating ${initialState.providersWithoutUserId} providers...`)
-        const providersResult = await tx.$executeRaw`
-          UPDATE "Provider" 
-          SET "userId" = ${userId}, "updatedAt" = NOW()
-          WHERE "userId" IS NULL
-        `
-        console.log(`✅ Updated ${providersResult} providers`)
+        const providersResult = await tx.provider.updateMany({
+          where: { userId: null },
+          data: { userId, updatedAt: new Date() }
+        })
+        console.log(`✅ Updated ${providersResult.count} providers`)
       }
 
-      // Migrate Materials using raw SQL
+      // Migrate Materials
       if (initialState.materialsWithoutUserId > 0) {
         console.log(`🔧 Migrating ${initialState.materialsWithoutUserId} materials...`)
-        const materialsResult = await tx.$executeRaw`
-          UPDATE "Material" 
-          SET "userId" = ${userId}, "updatedAt" = NOW()
-          WHERE "userId" IS NULL
-        `
-        console.log(`✅ Updated ${materialsResult} materials`)
+        const materialsResult = await tx.material.updateMany({
+          where: { userId: null },
+          data: { userId, updatedAt: new Date() }
+        })
+        console.log(`✅ Updated ${materialsResult.count} materials`)
       }
 
-      // Migrate ProductGroups using raw SQL
+      // Migrate ProductGroups
       if (initialState.productGroupsWithoutUserId > 0) {
         console.log(`📋 Migrating ${initialState.productGroupsWithoutUserId} product groups...`)
-        const productGroupsResult = await tx.$executeRaw`
-          UPDATE "ProductGroup" 
-          SET "userId" = ${userId}, "updatedAt" = NOW()
-          WHERE "userId" IS NULL
-        `
-        console.log(`✅ Updated ${productGroupsResult} product groups`)
+        const productGroupsResult = await tx.productGroup.updateMany({
+          where: { userId: null },
+          data: { userId, updatedAt: new Date() }
+        })
+        console.log(`✅ Updated ${productGroupsResult.count} product groups`)
       }
 
       // Migrate BatchProcessing (this field already exists)
@@ -242,15 +239,15 @@ async function step3_VerifyBeforeRequired(userId: string) {
 
     // Additional verification: count user's data
     const [providerCount, materialCount, productGroupCount] = await Promise.all([
-      prisma.$queryRaw<Array<{ count: bigint }>>`SELECT COUNT(*) as count FROM "Provider" WHERE "userId" = ${userId}`,
-      prisma.$queryRaw<Array<{ count: bigint }>>`SELECT COUNT(*) as count FROM "Material" WHERE "userId" = ${userId}`,
-      prisma.$queryRaw<Array<{ count: bigint }>>`SELECT COUNT(*) as count FROM "ProductGroup" WHERE "userId" = ${userId}`
+      prisma.provider.count({ where: { userId } }),
+      prisma.material.count({ where: { userId } }),
+      prisma.productGroup.count({ where: { userId } })
     ])
 
     console.log(`\n📊 User ${user.name} now owns:`)
-    console.log(`- ${Number(providerCount[0].count)} providers`)
-    console.log(`- ${Number(materialCount[0].count)} materials`)
-    console.log(`- ${Number(productGroupCount[0].count)} product groups`)
+    console.log(`- ${providerCount} providers`)
+    console.log(`- ${materialCount} materials`)
+    console.log(`- ${productGroupCount} product groups`)
 
     console.log('\n🎉 ✅ MIGRATION IS COMPLETE AND SAFE!')
     console.log('✅ All data has been successfully assigned to the user.')

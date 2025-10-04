@@ -19,7 +19,7 @@ interface InvoiceListProps {
       type: ProviderType
       cif: string
     }
-    items: {
+    items?: {
       id: string
       quantity: number
       unitPrice: number

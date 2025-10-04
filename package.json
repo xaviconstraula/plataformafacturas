@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint",
+    "lint": "eslint .",
     "prisma:seed": "tsx prisma/seed.ts",
     "seed:hacelerix": "tsx scripts/seed-hacelerix-user.ts",
     "delete:user": "tsx scripts/delete-user.ts",
@@ -20,6 +20,7 @@
     "migration:production-safe": "tsx scripts/production-safe-migration.ts"
   },
   "dependencies": {
+    "@google/genai": "^1.22.0",
     "@hookform/resolvers": "^5.2.2",
     "@prisma/client": "^6.16.3",
     "@radix-ui/react-avatar": "^1.1.10",
@@ -48,7 +49,6 @@
     "next": "15.5.4",
     "next-themes": "^0.4.6",
     "openai": "^6.1.0",
-    "@google/genai": "^1.22.0",
     "pdf-parse": "^2.1.7",
     "pdf-to-png-converter": "^3.10.0",
     "pdfjs-dist": "^5.4.149",
@@ -65,6 +65,7 @@
     "zod": "^4.1.11"
   },
   "devDependencies": {
+    "@eslint/eslintrc": "^3.3.1",
     "@types/node": "^24.6.2",
     "@types/react": "^19",
     "@types/react-dom": "^19",

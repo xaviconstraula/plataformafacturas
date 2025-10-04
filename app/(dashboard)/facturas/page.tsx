@@ -36,12 +36,14 @@ async function getFilterData() {
     prisma.provider.findMany({
       where: { userId: user.id },
       select: { id: true, name: true, type: true },
-      orderBy: { name: 'asc' }
+      orderBy: { name: 'asc' },
+      take: 500,
     }),
     prisma.material.findMany({
       where: { userId: user.id },
       select: { id: true, name: true, code: true, category: true },
-      orderBy: { name: 'asc' }
+      orderBy: { name: 'asc' },
+      take: 1000,
     }),
     prisma.material.findMany({
       where: {
@@ -49,7 +51,8 @@ async function getFilterData() {
         category: { not: null }
       },
       select: { category: true },
-      distinct: ['category']
+      distinct: ['category'],
+      take: 200,
     }).then(results => results.map(r => r.category!).filter(Boolean)),
     prisma.invoiceItem.findMany({
       where: {
@@ -58,7 +61,8 @@ async function getFilterData() {
         invoice: { provider: { userId: user.id } }
       },
       select: { workOrder: true },
-      distinct: ['workOrder']
+      distinct: ['workOrder'],
+      take: 1000,
     }).then(results => results.map(r => r.workOrder!).filter(Boolean))
   ])
 
@@ -83,6 +87,7 @@ export default async function InvoicesPage({ searchParams }: InvoicesPageProps) 
       maxAmount: resolvedSearchParams.maxAmount ? parseFloat(resolvedSearchParams.maxAmount) : undefined,
       minUnitPrice: resolvedSearchParams.minUnitPrice ? parseFloat(resolvedSearchParams.minUnitPrice) : undefined,
       maxUnitPrice: resolvedSearchParams.maxUnitPrice ? parseFloat(resolvedSearchParams.maxUnitPrice) : undefined,
+      includeItems: false,
     }),
     getFilterData()
   ])

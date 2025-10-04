@@ -297,7 +297,8 @@ export function AnalyticsDashboard({
                                     <Tooltip
                                         formatter={(value: number) => [formatCurrency(value), 'Coste']}
                                         labelFormatter={(label, payload) => {
-                                            const entry = (payload as any)?.[0]?.payload as any
+                                            const first = Array.isArray(payload) ? payload[0] : undefined;
+                                            const entry = (first && 'payload' in first) ? (first as { payload: { fullName?: string } }).payload : undefined;
                                             return entry?.fullName || String(label)
                                         }}
                                     />
@@ -334,7 +335,8 @@ export function AnalyticsDashboard({
                                     <Tooltip
                                         formatter={(value: number) => [formatCurrency(value), 'Gasto']}
                                         labelFormatter={(label, payload) => {
-                                            const entry = (payload as any)?.[0]?.payload as any
+                                            const first = Array.isArray(payload) ? payload[0] : undefined;
+                                            const entry = (first && 'payload' in first) ? (first as { payload: { fullName?: string } }).payload : undefined;
                                             return entry?.fullName || String(label)
                                         }}
                                     />
@@ -377,7 +379,8 @@ export function AnalyticsDashboard({
                                 />
                                 <Tooltip
                                     labelFormatter={(label, payload) => {
-                                        const entry = (payload as any)?.[0]?.payload as any
+                                        const first = Array.isArray(payload) ? payload[0] : undefined;
+                                        const entry = (first && 'payload' in first) ? (first as { payload: { fullName?: string } }).payload : undefined;
                                         return entry?.fullName || String(label)
                                     }}
                                 />

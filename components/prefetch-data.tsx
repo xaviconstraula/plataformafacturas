@@ -12,19 +12,10 @@ export function PrefetchData({ children }: PrefetchDataProps) {
     const queryClient = useQueryClient()
     const { mutate: prefetchCommonData } = usePrefetchCommonData()
 
+    // Conservative, single-shot prefetch after initial render; avoid interaction listeners
     useEffect(() => {
-        // Prefetch common data on component mount
         const prefetchTimer = setTimeout(() => {
             prefetchCommonData()
-        }, 1000) // Delay prefetch to avoid blocking initial render
-
-        return () => clearTimeout(prefetchTimer)
-    }, [prefetchCommonData])
-
-    // Prefetch data on user interactions
-    useEffect(() => {
-        const handleUserInteraction = () => {
-            // Prefetch dashboard stats when user interacts
             queryClient.prefetchQuery({
                 queryKey: ['dashboard-stats'],
                 queryFn: async () => {
@@ -34,37 +25,10 @@ export function PrefetchData({ children }: PrefetchDataProps) {
                 },
                 staleTime: 2 * 60 * 1000,
             })
-        }
+        }, 1500)
 
-        // Listen for user interactions
-        const events = ['mousedown', 'touchstart', 'keydown']
-        events.forEach(event => {
-            document.addEventListener(event, handleUserInteraction, { once: true })
-        })
-
-        return () => {
-            events.forEach(event => {
-                document.removeEventListener(event, handleUserInteraction)
-            })
-        }
-    }, [queryClient])
-
-    // Prefetch on route changes
-    useEffect(() => {
-        const handleRouteChange = () => {
-            // Prefetch frequently accessed data
-            setTimeout(() => {
-                prefetchCommonData()
-            }, 500)
-        }
-
-        // Listen for navigation events
-        window.addEventListener('popstate', handleRouteChange)
-
-        return () => {
-            window.removeEventListener('popstate', handleRouteChange)
-        }
-    }, [prefetchCommonData])
+        return () => clearTimeout(prefetchTimer)
+    }, [prefetchCommonData, queryClient])
 
     return <>{children}</>
 }

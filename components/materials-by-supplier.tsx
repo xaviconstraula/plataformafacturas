@@ -154,10 +154,11 @@ export function MaterialsBySupplier({ data: rawData }: MaterialsBySupplierProps)
                     return [`${value} €`]
                   }}
                   labelFormatter={(label, payload) => {
-                    const entry = (payload as any)?.[0]?.payload as any
+                    const first = Array.isArray(payload) ? payload[0] : undefined;
+                    const entry = (first && 'payload' in first) ? (first as { payload: { fullName?: string; materialName?: string; supplier?: keyof typeof SUPPLIER_TYPE_MAP } }).payload : undefined;
                     if (entry) {
                       const materialName = entry.fullName || entry.materialName
-                      return `${materialName} - ${SUPPLIER_TYPE_MAP[entry.supplier as keyof typeof SUPPLIER_TYPE_MAP]}`
+                      return `${materialName} - ${SUPPLIER_TYPE_MAP[(entry.supplier ?? 'OTHER') as keyof typeof SUPPLIER_TYPE_MAP]}`
                     }
                     return String(label)
                   }}

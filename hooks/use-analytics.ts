@@ -52,10 +52,10 @@ export function useBatchProgress() {
         queryFn: async () => {
             return await getActiveBatches()
         },
-        staleTime: 0, // Always fresh for real-time updates
-        gcTime: 1 * 60 * 1000, // 1 minute
-        refetchInterval: 3 * 1000, // Poll every 3 seconds
-        refetchOnWindowFocus: true,
+        staleTime: 10 * 1000,
+        gcTime: 5 * 60 * 1000,
+        refetchInterval: 30 * 1000, // Poll every 30 seconds to reduce load
+        refetchOnWindowFocus: false,
         refetchOnMount: true,
     })
 }
@@ -141,11 +141,18 @@ export function useInvoices(params?: {
 }
 
 // Hook for providers/suppliers with caching
-export function useProviders() {
+export function useProviders(params?: { page?: number; pageSize?: number }) {
+    const page = params?.page || 1
+    const pageSize = params?.pageSize || 100
+
     return useQuery({
-        queryKey: ['providers'],
+        queryKey: ['providers', page, pageSize],
         queryFn: async () => {
-            const response = await fetch('/api/providers')
+            const searchParams = new URLSearchParams({
+                page: String(page),
+                pageSize: String(pageSize)
+            })
+            const response = await fetch(`/api/providers?${searchParams}`)
             if (!response.ok) {
                 throw new Error('Failed to fetch providers')
             }
@@ -157,11 +164,18 @@ export function useProviders() {
 }
 
 // Hook for materials with caching
-export function useMaterials() {
+export function useMaterials(params?: { page?: number; pageSize?: number }) {
+    const page = params?.page || 1
+    const pageSize = params?.pageSize || 200
+
     return useQuery({
-        queryKey: ['materials'],
+        queryKey: ['materials', page, pageSize],
         queryFn: async () => {
-            const response = await fetch('/api/materials')
+            const searchParams = new URLSearchParams({
+                page: String(page),
+                pageSize: String(pageSize)
+            })
+            const response = await fetch(`/api/materials?${searchParams}`)
             if (!response.ok) {
                 throw new Error('Failed to fetch materials')
             }
@@ -380,18 +394,18 @@ export function usePrefetchCommonData() {
             // Prefetch providers, materials, and categories
             await Promise.all([
                 queryClient.prefetchQuery({
-                    queryKey: ['providers'],
+                    queryKey: ['providers', 1, 100],
                     queryFn: async () => {
-                        const response = await fetch('/api/providers')
+                        const response = await fetch('/api/providers?page=1&pageSize=100')
                         if (!response.ok) throw new Error('Failed to fetch providers')
                         return response.json()
                     },
                     staleTime: 15 * 60 * 1000,
                 }),
                 queryClient.prefetchQuery({
-                    queryKey: ['materials'],
+                    queryKey: ['materials', 1, 200],
                     queryFn: async () => {
-                        const response = await fetch('/api/materials')
+                        const response = await fetch('/api/materials?page=1&pageSize=200')
                         if (!response.ok) throw new Error('Failed to fetch materials')
                         return response.json()
                     },

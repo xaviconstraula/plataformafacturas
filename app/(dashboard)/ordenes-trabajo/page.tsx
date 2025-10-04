@@ -59,39 +59,22 @@ async function getWorkOrdersData(params: SearchParams) {
         }
     }
 
-    // First, get work order aggregations for pagination and sorting
-    // Note: This aggregation now respects the provider filter in baseWhere
-    const workOrderAggregation = await prisma.invoiceItem.groupBy({
-        by: ['workOrder'],
+    // Compute total distinct work orders for pagination without loading all groups
+    const distinctWorkOrders = await prisma.invoiceItem.findMany({
         where: baseWhere,
-        _sum: {
-            totalPrice: true,
-            quantity: true
-        },
-        _count: {
-            id: true
-        },
-        _min: {
-            itemDate: true
-        },
-        _max: {
-            itemDate: true
-        },
-        orderBy: sortBy === 'totalCost' ? { _sum: { totalPrice: sortOrder as 'asc' | 'desc' } }
-            : sortBy === 'totalQuantity' ? { _sum: { quantity: sortOrder as 'asc' | 'desc' } }
-                : sortBy === 'itemCount' ? { _count: { id: sortOrder as 'asc' | 'desc' } }
-                    : sortBy === 'workOrder' ? { workOrder: sortOrder as 'asc' | 'desc' }
-                        : { _sum: { totalPrice: sortOrder as 'asc' | 'desc' } }
+        select: { workOrder: true },
+        distinct: ['workOrder']
     })
-
-    // Get total count for pagination
-    const totalCount = workOrderAggregation.length
+    const totalCount = distinctWorkOrders.length
     const totalPages = Math.ceil(totalCount / pageSize)
 
-    // Apply pagination to the aggregated results
-    const paginatedWorkOrders = workOrderAggregation.slice(skip, skip + pageSize)
+    // Get current page's work order codes using distinct + slice
+    const currentWorkOrderCodes = distinctWorkOrders
+        .map(r => r.workOrder!)
+        .filter(Boolean)
+        .slice(skip, skip + pageSize)
 
-    if (paginatedWorkOrders.length === 0) {
+    if (currentWorkOrderCodes.length === 0) {
         const providers = await prisma.provider.findMany({
             where: { userId: user.id },
             select: { id: true, name: true },
@@ -114,8 +97,23 @@ async function getWorkOrdersData(params: SearchParams) {
         }
     }
 
-    // Get the work order codes for the current page
-    const workOrderCodes = paginatedWorkOrders.map(wo => wo.workOrder!).filter(Boolean)
+    // Get aggregated metrics only for current page's work order codes
+    const workOrderAggregation = await prisma.invoiceItem.groupBy({
+        by: ['workOrder'],
+        where: { ...baseWhere, workOrder: { in: currentWorkOrderCodes } },
+        _sum: { totalPrice: true, quantity: true },
+        _count: { id: true },
+        _min: { itemDate: true },
+        _max: { itemDate: true },
+        orderBy: sortBy === 'totalCost' ? { _sum: { totalPrice: sortOrder as 'asc' | 'desc' } }
+            : sortBy === 'totalQuantity' ? { _sum: { quantity: sortOrder as 'asc' | 'desc' } }
+                : sortBy === 'itemCount' ? { _count: { id: sortOrder as 'asc' | 'desc' } }
+                    : sortBy === 'workOrder' ? { workOrder: sortOrder as 'asc' | 'desc' }
+                        : { _sum: { totalPrice: sortOrder as 'asc' | 'desc' } }
+    })
+
+    // Work order codes of current page (after aggregation)
+    const workOrderCodes = workOrderAggregation.map(wo => wo.workOrder!).filter(Boolean)
 
     // Get ALL invoice items for the work orders in the current page in a single query
     const allItems = await prisma.invoiceItem.findMany({
@@ -161,7 +159,7 @@ async function getWorkOrdersData(params: SearchParams) {
     }
 
     // Build the final work orders data structure
-    const workOrdersWithDetails = paginatedWorkOrders.map(wo => {
+    const workOrdersWithDetails = workOrderAggregation.map(wo => {
         const workOrderCode = wo.workOrder!
         const items = itemsByWorkOrder.get(workOrderCode) || []
 

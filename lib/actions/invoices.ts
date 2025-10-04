@@ -50,13 +50,14 @@ export interface BatchProgressInfo {
 }
 
 // Create a new batch processing record
-export async function createBatchProcessing(totalFiles: number, providedId?: string): Promise<string> {
+export async function createBatchProcessing(totalFiles: number, providedId?: string, userId?: string): Promise<string> {
     const batch = await prisma.batchProcessing.create({
         data: {
             // Use providedId when supplied so that our local record id matches OpenAI's batch id.
             ...(providedId ? { id: providedId } : {}),
             totalFiles,
             status: 'PENDING',
+            ...(userId ? { userId } : {}),
         },
     });
     return batch.id;
@@ -94,12 +95,15 @@ export async function updateBatchProgress(
 
 // Get active batch processing records
 export async function getActiveBatches(): Promise<BatchProgressInfo[]> {
+    const user = await requireAuth();
+
     // Include recently completed batches (within last 2 minutes) so we can detect completion
     const twoMinutesAgo = new Date();
     twoMinutesAgo.setMinutes(twoMinutesAgo.getMinutes() - 2);
 
     const localBatches = await prisma.batchProcessing.findMany({
         where: {
+            userId: user.id,
             OR: [
                 {
                     status: {
@@ -395,7 +399,9 @@ JSON format:
             }
         });
 
-        const text = (result.candidates?.[0]?.content?.parts?.map((p: any) => p.text ?? "").join("") ?? "");
+        const text = (
+            result.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text ?? "").join("") ?? ""
+        );
 
         if (!text) {
             console.error(`No content in Gemini response for ${file.name}`);
@@ -1157,7 +1163,7 @@ export async function createInvoiceFromFiles(
         console.log(`Using existing batch processing record: ${batchId} for ${files.length} files`);
     } else {
         // Create new batch processing record (fallback for backward compatibility)
-        batchId = await createBatchProcessing(files.length);
+        batchId = await createBatchProcessing(files.length, undefined, user.id);
         console.log(`Created new batch processing record: ${batchId} for ${files.length} files`);
     }
 
@@ -2395,13 +2401,16 @@ export async function startInvoiceBatch(formDataWithFiles: FormData): Promise<{ 
         throw new Error('No files provided.');
     }
 
+    // Get authenticated user for batch ownership
+    const user = await requireAuth();
+
     // 1️⃣  Generate a temporary id so the client can detect "batch mode". We do
     //     NOT persist it, thus it will not contribute to banner counts.
     const { randomUUID } = await import('crypto');
     const tempId = `temp-${randomUUID()}`;
 
     // 2️⃣  Launch heavy work in background (no await).
-    void processBatchInBackground(files).catch((err) => {
+    void processBatchInBackground(files, user.id).catch((err) => {
         console.error('[startInvoiceBatch] Background batch failed', err);
     });
 
@@ -2413,7 +2422,7 @@ export async function startInvoiceBatch(formDataWithFiles: FormData): Promise<{ 
 // 🏃‍♂️  Background worker — performs the heavy work and creates real Batch jobs
 // ---------------------------------------------------------------------------
 
-async function processBatchInBackground(files: File[]) {
+async function processBatchInBackground(files: File[], userId: string) {
     try {
         // STEP A – Build JSONL chunks
         const tmpDir = path.join(process.cwd(), 'tmp');
@@ -2444,7 +2453,7 @@ async function processBatchInBackground(files: File[]) {
             }) as unknown as { name: string };
 
             const remoteId: string = created.name;
-            await createBatchProcessing(chunk.files.length, remoteId);
+            await createBatchProcessing(chunk.files.length, remoteId, userId);
 
             // Cleanup temp file in background (don't block loop)
             fs.promises.unlink(jsonlPath).catch(() => undefined);

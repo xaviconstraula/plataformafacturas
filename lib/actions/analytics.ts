@@ -328,34 +328,29 @@ export async function getMaterialAnalyticsPaginated(params: GetMaterialAnalytics
         } : {})
     };
 
-    // First, get unique materials with aggregated data using GROUP BY for better performance
-    const materialAggregation = await prisma.invoiceItem.groupBy({
+    // First, count distinct materials for pagination
+    const totalCount = await prisma.invoiceItem.groupBy({
         by: ['materialId'],
         where: baseWhere,
-        _sum: {
-            quantity: true,
-            totalPrice: true,
-        },
-        _count: {
-            _all: true,
-        },
-        _max: {
-            itemDate: true,
-        },
+        _count: { _all: true }
+    }).then(r => r.length)
+    const totalPages = Math.ceil(totalCount / pageSize)
+
+    // Get paginated material ids ordered by aggregation in the database
+    const pagedAggregation = await prisma.invoiceItem.groupBy({
+        by: ['materialId'],
+        where: baseWhere,
+        _sum: { quantity: true, totalPrice: true },
+        _max: { itemDate: true },
         orderBy: params.sortBy === 'cost' ? { _sum: { totalPrice: params.sortOrder || 'desc' } }
             : params.sortBy === 'quantity' ? { _sum: { quantity: params.sortOrder || 'desc' } }
                 : params.sortBy === 'lastPurchase' ? { _max: { itemDate: params.sortOrder || 'desc' } }
-                    : { _sum: { totalPrice: params.sortOrder || 'desc' } }
-    });
+                    : { _sum: { totalPrice: params.sortOrder || 'desc' } },
+        skip,
+        take: pageSize
+    })
 
-    // Get total count for pagination
-    const totalCount = materialAggregation.length;
-    const totalPages = Math.ceil(totalCount / pageSize);
-
-    // Apply pagination to the aggregated results
-    const paginatedMaterialIds = materialAggregation
-        .slice(skip, skip + pageSize)
-        .map(item => item.materialId);
+    const paginatedMaterialIds = pagedAggregation.map(item => item.materialId)
 
     if (paginatedMaterialIds.length === 0) {
         return {
@@ -1188,7 +1183,7 @@ export async function getWorkOrdersForSuppliers(filters: GetSupplierAnalyticsPar
             quantity: true
         },
         _count: {
-            id: true
+            _all: true
         },
         _min: {
             itemDate: true
@@ -1277,7 +1272,7 @@ export async function getWorkOrdersForSuppliers(filters: GetSupplierAnalyticsPar
             workOrder: workOrderCode,
             totalCost: (wo._sum?.totalPrice?.toNumber() || 0) * 1.21, // Add 21% IVA
             totalQuantity: wo._sum?.quantity?.toNumber() || 0,
-            itemCount: wo._count?.id || 0,
+            itemCount: wo._count?._all || 0,
             providers: uniqueProviders,
             materials: uniqueMaterials,
             dateRange
@@ -1286,7 +1281,7 @@ export async function getWorkOrdersForSuppliers(filters: GetSupplierAnalyticsPar
 
     // Calculate summary stats from ALL work orders (not just current page)
     const totalCostSum = workOrderAggregation.reduce((sum, wo) => sum + (wo._sum?.totalPrice?.toNumber() || 0) * 1.21, 0);
-    const totalItemsSum = workOrderAggregation.reduce((sum, wo) => sum + (wo._count?.id || 0), 0);
+    const totalItemsSum = workOrderAggregation.reduce((sum, wo) => sum + (wo._count?._all || 0), 0);
 
     return {
         workOrders: workOrdersWithDetails,
@@ -1346,7 +1341,7 @@ export async function getMaterialsForSuppliers(filters: GetSupplierAnalyticsPara
             quantity: true
         },
         _count: {
-            id: true
+            _all: true
         },
         _max: {
             itemDate: true
