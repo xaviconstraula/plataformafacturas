@@ -296,9 +296,9 @@ export function AnalyticsDashboard({
                                     />
                                     <Tooltip
                                         formatter={(value: number) => [formatCurrency(value), 'Coste']}
-                                        labelFormatter={(label: string, payload: Array<{ payload?: { fullName?: string } }>) => {
-                                            const entry = payload?.[0]?.payload
-                                            return entry?.fullName || label
+                                        labelFormatter={(label, payload) => {
+                                            const entry = (payload as any)?.[0]?.payload as any
+                                            return entry?.fullName || String(label)
                                         }}
                                     />
                                     <Bar dataKey="cost" fill="#8884d8" />
@@ -333,9 +333,9 @@ export function AnalyticsDashboard({
                                     />
                                     <Tooltip
                                         formatter={(value: number) => [formatCurrency(value), 'Gasto']}
-                                        labelFormatter={(label: string, payload: Array<{ payload?: { fullName?: string } }>) => {
-                                            const entry = payload?.[0]?.payload
-                                            return entry?.fullName || label
+                                        labelFormatter={(label, payload) => {
+                                            const entry = (payload as any)?.[0]?.payload as any
+                                            return entry?.fullName || String(label)
                                         }}
                                     />
                                     <Bar dataKey="spent" fill="#82ca9d" />
@@ -376,9 +376,9 @@ export function AnalyticsDashboard({
                                     tick={{ fontSize: 11 }}
                                 />
                                 <Tooltip
-                                    labelFormatter={(label: string, payload: Array<{ payload?: { fullName?: string } }>) => {
-                                        const entry = payload?.[0]?.payload
-                                        return entry?.fullName || label
+                                    labelFormatter={(label, payload) => {
+                                        const entry = (payload as any)?.[0]?.payload as any
+                                        return entry?.fullName || String(label)
                                     }}
                                 />
                                 <Legend />

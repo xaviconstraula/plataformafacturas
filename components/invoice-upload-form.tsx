@@ -3,7 +3,7 @@
 import { useState } from "react"
 import { useRouter } from "next/navigation"
 import { zodResolver } from "@hookform/resolvers/zod"
-import { useForm, useFieldArray } from "react-hook-form"
+import { useForm, useFieldArray, type Resolver, type SubmitHandler } from "react-hook-form"
 import { z } from "zod"
 import { Button } from "@/components/ui/button"
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form"
@@ -71,8 +71,9 @@ export function InvoiceUploadForm({ onClose }: InvoiceUploadFormProps = {}) {
   const [activeTab, setActiveTab] = useState("upload")
   const [isSubmitting, setIsSubmitting] = useState(false)
 
+  const resolver = zodResolver(formSchema) as unknown as Resolver<FormData>
   const form = useForm<FormData>({
-    resolver: zodResolver(formSchema),
+    resolver,
     defaultValues: {
       providerName: "",
       providerCif: "",
@@ -98,7 +99,7 @@ export function InvoiceUploadForm({ onClose }: InvoiceUploadFormProps = {}) {
     name: "items",
   })
 
-  async function onSubmit(values: FormData) {
+  const onSubmit: SubmitHandler<FormData> = async (values) => {
     setIsSubmitting(true)
     try {
       // Transform the form data to match the expected API format

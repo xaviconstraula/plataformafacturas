@@ -4,13 +4,14 @@ import { prisma } from "@/lib/db";
 import { type ExtractedPdfData, type ExtractedPdfItemData } from "@/lib/types/pdf";
 import { Prisma, type Provider, type Material, type Invoice, type InvoiceItem, type PriceAlert, type MaterialProvider, BatchStatus } from "@/generated/prisma";
 import { revalidatePath } from "next/cache";
-import { pdfToPng } from "pdf-to-png-converter";
-import pdfParse from "pdf-parse";
 import OpenAI from "openai";
+import { GoogleGenAI } from "@google/genai";
 import { extractMaterialCode, normalizeMaterialCode, areMaterialCodesSimilar, generateStandardMaterialCode, areMaterialNamesSimilar, normalizeCifForComparison, buildCifVariants } from "@/lib/utils";
 import readline from "readline"; // Node stdlib for streaming large files
 import { Readable } from "stream";
 import { requireAuth } from "@/lib/auth-utils";
+import fs from "fs";
+import path from "path";
 
 // Represents the minimal part of the ChatCompletion response we need when
 // reading a Batch output file. Only the assistant message content is required.
@@ -21,6 +22,16 @@ interface ChatCompletionBody {
         };
     }>;
 }
+
+// Gemini configuration
+const GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-1.5-pro-002";
+
+// OpenAI (kept for non-batch flows that currently use it)
+const openaiApiKey = process.env.OPENAI_API_KEY;
+if (!openaiApiKey) {
+    throw new Error("Missing OPENAI_API_KEY environment variable. This is required for some AI operations.");
+}
+const openai = new OpenAI({ apiKey: openaiApiKey });
 
 // Batch Processing Types and Functions
 export interface BatchProgressInfo {
@@ -110,7 +121,7 @@ export async function getActiveBatches(): Promise<BatchProgressInfo[]> {
         },
     });
 
-    // 🔄  Attempt to reconcile status with OpenAI for active batches
+    // 🔄  Attempt to reconcile status with Gemini for active batches
     //     We only do this for batches that are still PENDING/PROCESSING to avoid
     //     unnecessary API calls once a batch is terminal.
     const reconciledBatches: typeof localBatches = [];
@@ -118,28 +129,22 @@ export async function getActiveBatches(): Promise<BatchProgressInfo[]> {
     for (const batch of localBatches) {
         if (['PENDING', 'PROCESSING'].includes(batch.status)) {
             try {
-                const remote = await openai.batches.retrieve(batch.id);
+                const remote = await gemini.batches.get({ name: batch.id }) as unknown as { state?: string; request_counts?: { total?: number; completed?: number; failed?: number }; requestCounts?: { total?: number; completed?: number; failed?: number }; dest?: GeminiDest };
 
-                // Map OpenAI status → local BatchStatus
+                // Map Gemini state → local BatchStatus
+                const state = remote.state as string | undefined;
                 const statusMap: Record<string, BatchStatus> = {
-                    validating: 'PENDING',
-                    in_progress: 'PROCESSING',
-                    finalizing: 'PROCESSING',
-                    completed: 'COMPLETED',
-                    failed: 'FAILED',
-                    expired: 'FAILED',
-                    cancelling: 'PROCESSING',
-                    cancelled: 'CANCELLED',
+                    JOB_STATE_PENDING: 'PENDING',
+                    JOB_STATE_RUNNING: 'PROCESSING',
+                    JOB_STATE_SUCCEEDED: 'COMPLETED',
+                    JOB_STATE_FAILED: 'FAILED',
+                    JOB_STATE_EXPIRED: 'FAILED',
+                    JOB_STATE_CANCELLED: 'CANCELLED',
                 };
+                const newStatus = state ? statusMap[state] ?? batch.status : batch.status;
 
-                const newStatus = statusMap[remote.status] ?? batch.status;
-
-                // Extract counts if present
-                const rc = (remote.request_counts ?? {}) as {
-                    total?: number;
-                    completed?: number;
-                    failed?: number;
-                };
+                // Counts if present
+                const rc = (remote.request_counts ?? remote.requestCounts ?? {});
 
                 await updateBatchProgress(batch.id, {
                     status: newStatus,
@@ -148,17 +153,16 @@ export async function getActiveBatches(): Promise<BatchProgressInfo[]> {
                     failedFiles: rc.failed,
                 });
 
-                // Refresh the local batch object to reflect latest DB values
-                reconciledBatches.push({ ...batch, status: newStatus, processedFiles: rc.completed ?? 0 + (rc.failed ?? 0), successfulFiles: rc.completed ?? 0, failedFiles: rc.failed ?? 0 });
+                reconciledBatches.push({ ...batch, status: newStatus, processedFiles: (rc.completed ?? 0) + (rc.failed ?? 0), successfulFiles: rc.completed ?? 0, failedFiles: rc.failed ?? 0 });
 
-                // If batch just transitioned to COMPLETED and we haven't ingested results yet, do it now.
-                if (newStatus === 'COMPLETED' && !batch.completedAt && remote.output_file_id) {
-                    await ingestBatchOutput(batch.id, remote.output_file_id);
+                // If batch completed, ingest results
+                if (newStatus === 'COMPLETED' && !batch.completedAt && remote.dest) {
+                    await ingestBatchOutputFromGemini(batch.id, remote.dest);
                 }
 
                 continue;
             } catch (err) {
-                console.error('[getActiveBatches] Failed to retrieve remote batch', batch.id, err);
+                console.error('[getActiveBatches] Failed to retrieve Gemini batch', batch.id, err);
             }
         }
 
@@ -215,18 +219,14 @@ export async function cleanupOldBatches(): Promise<void> {
     }
 }
 
-// Ensure we have the OpenAI API key
-const openaiApiKey = process.env.OPENAI_API_KEY;
+// Ensure we have the Gemini API key
+const geminiApiKey = process.env.GEMINI_API_KEY;
 
-if (!openaiApiKey) {
-    // This will cause a build-time error if the key is missing.
-    // For runtime, consider a more graceful handling or logging if appropriate.
-    throw new Error("Missing OPENAI_API_KEY environment variable. This is required for PDF processing.");
+if (!geminiApiKey) {
+    throw new Error("Missing GEMINI_API_KEY environment variable. This is required for batch AI processing.");
 }
 
-const openai = new OpenAI({
-    apiKey: openaiApiKey,
-});
+const gemini = new GoogleGenAI({ apiKey: geminiApiKey });
 
 export interface CreateInvoiceResult {
     success: boolean;
@@ -255,116 +255,14 @@ interface TransactionOperationResult {
     isExisting?: boolean; // To distinguish from new invoices
 }
 
-// New interfaces for rate limit handling
-interface OpenAIRateLimitHeaders {
-    limitRequests?: number;
-    remainingRequests?: number;
-    resetRequestsTimeMs?: number;
-    limitTokens?: number;
-    remainingTokens?: number;
-    resetTokensTimeMs?: number;
-}
 
 interface CallPdfExtractAPIResponse {
     extractedData: ExtractedPdfData | null;
     error?: string;
-    rateLimitHeaders?: OpenAIRateLimitHeaders;
 }
 
-// Interface for extracted text data
-interface ExtractedTextData {
-    rawText: string;
-    cifNumbers: string[];
-    phoneNumbers: string[];
-}
 
-// Regex patterns for Spanish identification numbers and phones
-const CIF_REGEX = /\b[A-Z]\d{8}\b/g; // CIF: Letter + 8 digits
-const NIF_REGEX = /\b\d{8}[A-Z]\b/g; // NIF: 8 digits + letter
-const NIE_REGEX = /\b[XYZ]\d{7}[A-Z]\b/g; // NIE: X/Y/Z + 7 digits + letter
-const PHONE_REGEX = /\b(?:\+34\s?)?(?:6|7|8|9)\d{8}\b/g; // Spanish phone numbers
 
-// Helper function to parse OpenAI's rate limit reset time string (e.g., "60s", "200ms")
-function parseOpenAIResetTime(timeStr: string | null | undefined): number {
-    if (!timeStr) return 60000; // Default to 1 minute if unknown
-
-    // Quick path for common patterns
-    if (timeStr === '60s') return 60000;
-    if (timeStr === '30s') return 30000;
-    if (timeStr === '1m') return 60000;
-
-    let totalMilliseconds = 0;
-
-    // Parse milliseconds
-    const msMatch = timeStr.match(/(\d+)ms/);
-    if (msMatch) {
-        totalMilliseconds += parseInt(msMatch[1], 10);
-    }
-
-    // Parse seconds
-    const sMatch = timeStr.match(/(\d+)s/);
-    if (sMatch) {
-        totalMilliseconds += parseInt(sMatch[1], 10) * 1000;
-    }
-
-    // Parse minutes
-    const mMatch = timeStr.match(/(\d+)m/);
-    if (mMatch) {
-        totalMilliseconds += parseInt(mMatch[1], 10) * 60 * 1000;
-    }
-
-    // Parse hours (in case of very long resets)
-    const hMatch = timeStr.match(/(\d+)h/);
-    if (hMatch) {
-        totalMilliseconds += parseInt(hMatch[1], 10) * 60 * 60 * 1000;
-    }
-
-    // If only a number is provided, treat as seconds
-    if (totalMilliseconds === 0 && /^\d+$/.test(timeStr)) {
-        return Math.min(parseInt(timeStr, 10) * 1000, 300000); // Cap at 5 minutes
-    }
-
-    // Return parsed time or sensible fallback
-    return totalMilliseconds > 0 ? Math.min(totalMilliseconds, 300000) : 60000; // Cap at 5 minutes
-}
-
-// Function to extract text from PDF and find CIF/phone patterns
-async function extractTextFromPdf(file: File): Promise<ExtractedTextData> {
-    try {
-        const buffer = Buffer.from(await file.arrayBuffer());
-        const pdfData = await pdfParse(buffer);
-        const rawText = pdfData.text;
-
-        // Extract all potential CIF/NIF/NIE numbers
-        const cifMatches = [...rawText.matchAll(CIF_REGEX)].map(match => match[0]);
-        const nifMatches = [...rawText.matchAll(NIF_REGEX)].map(match => match[0]);
-        const nieMatches = [...rawText.matchAll(NIE_REGEX)].map(match => match[0]);
-
-        // Combine all identification numbers
-        const cifNumbers = [...new Set([...cifMatches, ...nifMatches, ...nieMatches])];
-
-        // Extract phone numbers
-        const phoneMatches = [...rawText.matchAll(PHONE_REGEX)].map(match =>
-            match[0].replace(/\s/g, '').replace(/^\+34/, '') // Normalize phone numbers
-        );
-        const phoneNumbers = [...new Set(phoneMatches)];
-
-        console.log(`Text extraction from ${file.name}: Found ${cifNumbers.length} CIF/NIF/NIE numbers and ${phoneNumbers.length} phone numbers`);
-
-        return {
-            rawText,
-            cifNumbers,
-            phoneNumbers
-        };
-    } catch (error) {
-        console.error(`Error extracting text from PDF ${file.name}:`, error);
-        return {
-            rawText: '',
-            cifNumbers: [],
-            phoneNumbers: []
-        };
-    }
-}
 
 // Function to normalize provider names for comparison
 function normalizeProviderName(name: string): string {
@@ -408,121 +306,17 @@ function isBlockedProvider(providerName: string): boolean {
     return blockedProviders.some(blocked => normalizedName.includes(blocked));
 }
 
-// Enhanced function to validate and correct extracted data using text extraction
-function validateAndCorrectExtractedData(
-    extractedData: ExtractedPdfData,
-    textData: ExtractedTextData,
-    fileName: string
-): ExtractedPdfData {
-    const correctedData = { ...extractedData };
-    let hasCorrections = false;
-
-    // Validate and correct CIF
-    if (extractedData.provider.cif) {
-        const extractedCif = extractedData.provider.cif;
-
-        // Check if the extracted CIF exists in our text-based findings
-        const matchingCif = textData.cifNumbers.find(cif =>
-            cif === extractedCif ||
-            cif.includes(extractedCif) ||
-            extractedCif.includes(cif)
-        );
-
-        if (!matchingCif && textData.cifNumbers.length > 0) {
-            // AI CIF doesn't match text extraction, use the first valid one from text
-            console.warn(`[${fileName}] AI extracted CIF '${extractedCif}' not found in text. Using text-extracted CIF '${textData.cifNumbers[0]}' instead.`);
-            correctedData.provider.cif = textData.cifNumbers[0];
-            hasCorrections = true;
-        } else if (matchingCif && matchingCif !== extractedCif) {
-            // Found a better match in text extraction
-            console.warn(`[${fileName}] Correcting AI extracted CIF '${extractedCif}' to text-extracted '${matchingCif}'.`);
-            correctedData.provider.cif = matchingCif;
-            hasCorrections = true;
-        }
-    } else if (textData.cifNumbers.length > 0) {
-        // AI didn't extract CIF but we found one in text
-        console.warn(`[${fileName}] AI failed to extract CIF. Using text-extracted CIF '${textData.cifNumbers[0]}'.`);
-        correctedData.provider.cif = textData.cifNumbers[0];
-        hasCorrections = true;
-    }
-
-    // Validate and correct phone number
-    if (!extractedData.provider.phone && textData.phoneNumbers.length > 0) {
-        console.warn(`[${fileName}] AI failed to extract phone. Using text-extracted phone '${textData.phoneNumbers[0]}'.`);
-        correctedData.provider.phone = textData.phoneNumbers[0];
-        hasCorrections = true;
-    }
-
-    if (hasCorrections) {
-        console.log(`[${fileName}] Applied corrections to extracted data. CIF: ${correctedData.provider.cif}, Phone: ${correctedData.provider.phone}`);
-    }
-
-    return correctedData;
-}
 
 async function callPdfExtractAPI(file: File): Promise<CallPdfExtractAPIResponse> {
     try {
         console.log(`Starting PDF extraction for file: ${file.name}`);
         const buffer = Buffer.from(await file.arrayBuffer());
-        const arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+        const base64 = buffer.toString('base64');
 
-        // First, extract text data for validation
-        const textData = await extractTextFromPdf(file);
+        // Build prompt for direct PDF processing
+        const promptText = `Extract invoice data from this PDF document (consolidate all pages into a single invoice). Only extract visible data, use null for missing optional fields.
 
-        let pages;
-        try {
-            pages = await pdfToPng(arrayBuffer, {
-                disableFontFace: true,
-                useSystemFonts: false,
-                viewportScale: 1.5,
-                verbosityLevel: 0,
-            });
-
-        } catch (conversionError: unknown) {
-            console.error(`Error during pdfToPng conversion for ${file.name}:`, conversionError);
-            if (typeof conversionError === 'object' && conversionError !== null && 'code' in conversionError && (conversionError as { code: unknown }).code === 'InvalidArg' && 'message' in conversionError && typeof (conversionError as { message: unknown }).message === 'string' && (conversionError as { message: string }).message.includes('Convert String to CString failed')) {
-                throw new Error(`PDF_CONVERSION_FAILED: ${file.name} could not be converted due to internal font/text encoding issues. Details: ${(conversionError as { message: string }).message}`);
-            }
-            throw conversionError;
-        }
-
-        if (!pages || pages.length === 0) {
-            console.error(`Failed to convert PDF to images for ${file.name}`);
-            return { extractedData: null, error: "Failed to convert PDF to images.", rateLimitHeaders: undefined };
-        }
-
-        // Log the dimensions of the first page to help with debugging
-        if (pages[0]) {
-            console.log(`First page dimensions for ${file.name}: ${pages[0].width}x${pages[0].height}`);
-        }
-
-        const imageUrls = pages.map((page, index) => {
-            if (!page?.content) {
-                console.warn(`Skipping page ${index + 1} in ${file.name} due to missing content during image URL construction`);
-                return null;
-            }
-            return {
-                type: "image_url" as const,
-                image_url: {
-                    url: `data:image/png;base64,${page.content.toString("base64")}`,
-                    detail: "high" as const,
-                }
-            };
-        }).filter(Boolean) as { type: "image_url"; image_url: { url: string; detail: "high"; } }[];
-
-        if (imageUrls.length === 0) {
-            console.error(`No valid page images could be prepared for OpenAI for file: ${file.name}`);
-            return { extractedData: null, error: "No valid page images could be prepared for OpenAI.", rateLimitHeaders: undefined };
-        }
-
-        // Enhanced prompt with better CIF and phone extraction instructions
-        const potentialCifs = textData.cifNumbers.length > 0 ? `\n\nPOTENTIAL CIF/NIF/NIE FOUND IN TEXT: ${textData.cifNumbers.join(', ')}` : '';
-        console.log(`Potential CIFs: ${textData.cifNumbers.join(', ')}`);
-        const potentialPhones = textData.phoneNumbers.length > 0 ? `\nPOTENTIAL PHONES FOUND IN TEXT: ${textData.phoneNumbers.join(', ')}` : '';
-
-        const promptText = `Extract invoice data from these images (consolidate all pages into a single invoice). Only extract visible data, use null for missing optional fields.
-
-CRITICAL NUMBER ACCURACY: 
+CRITICAL NUMBER ACCURACY:
 - Distinguish 5 vs S (flat top vs curved), 8 vs B (complete vs open), 0 vs O vs 6 (oval vs round vs curved)
 - Double-check all digit sequences, especially CIF/NIF numbers
 - Verify quantities and codes character by character
@@ -534,15 +328,15 @@ PROVIDER (Invoice Issuer - NOT the client):
 
 TAX ID (CIF/NIF/NIE) - EXTREMELY IMPORTANT:
 - CIF format: Letter + exactly 8 digits (e.g., A12345678)
-- NIF format: exactly 8 digits + Letter (e.g., 12345678A) 
+- NIF format: exactly 8 digits + Letter (e.g., 12345678A)
 - NIE format: X/Y/Z + exactly 7 digits + Letter (e.g., X1234567A)
 - Look for labels: "CIF:", "NIF:", "Cód. Fiscal:", "Tax ID:", "RFC:"
-- VERIFY digit count is correct (8 for CIF/NIF, 7 for NIE)${potentialCifs}
+- VERIFY digit count is correct (8 for CIF/NIF, 7 for NIE)
 
 PHONE NUMBER:
 - Spanish format: 6/7/8/9 + 8 more digits (9 total)
 - May have +34 country code
-- Look for labels: "Tel:", "Teléfono:", "Phone:"${potentialPhones}
+- Look for labels: "Tel:", "Teléfono:", "Phone:"
 
 INVOICE: Extract code, issue date (ISO), total amount
 
@@ -561,7 +355,7 @@ JSON format:
   "provider": {
     "name": "string",
     "cif": "string|null",
-    "email": "string|null", 
+    "email": "string|null",
     "phone": "string|null",
     "address": "string|null"
   },
@@ -572,7 +366,7 @@ JSON format:
     "materialCode": "string|null",
     "isMaterial": "boolean",
     "quantity": "number",
-    "unitPrice": "number", 
+    "unitPrice": "number",
     "totalPrice": "number",
     "itemDate": "string|null",
     "workOrder": "string|null",
@@ -581,72 +375,55 @@ JSON format:
   }]
 }`;
 
-        console.log(`Calling OpenAI API for file: ${file.name} with ${imageUrls.length} page images.`);
+        console.log(`Calling Gemini API for file: ${file.name}`);
 
-        const apiCallResponse = await openai.chat.completions.create({
-            model: "gpt-4.1",
-            temperature: 0.1,
-            messages: [
+        const result = await gemini.models.generateContent({
+            model: GEMINI_MODEL,
+            contents: [
                 {
-                    role: "user",
-                    content: [
-                        { type: "text", text: promptText },
-                        ...imageUrls // Spread the array of image_url objects
+                    role: 'user',
+                    parts: [
+                        { text: promptText },
+                        { inlineData: { mimeType: 'application/pdf', data: base64 } }
                     ]
                 }
             ],
-            response_format: { type: "json_object" },
-        }).withResponse();
+            config: {
+                responseMimeType: 'application/json',
+                temperature: 0.1,
+                candidateCount: 1
+            }
+        });
 
-        const content = apiCallResponse.data.choices[0].message.content;
-        const responseHeaders = apiCallResponse.response.headers;
+        const text = (result.candidates?.[0]?.content?.parts?.map((p: any) => p.text ?? "").join("") ?? "");
 
-        const rateLimitHeaders: OpenAIRateLimitHeaders = {
-            limitRequests: responseHeaders.get('x-ratelimit-limit-requests') ? parseInt(responseHeaders.get('x-ratelimit-limit-requests')!, 10) : undefined,
-            remainingRequests: responseHeaders.get('x-ratelimit-remaining-requests') ? parseInt(responseHeaders.get('x-ratelimit-remaining-requests')!, 10) : undefined,
-            resetRequestsTimeMs: parseOpenAIResetTime(responseHeaders.get('x-ratelimit-reset-requests')),
-            limitTokens: responseHeaders.get('x-ratelimit-limit-tokens') ? parseInt(responseHeaders.get('x-ratelimit-limit-tokens')!, 10) : undefined,
-            remainingTokens: responseHeaders.get('x-ratelimit-remaining-tokens') ? parseInt(responseHeaders.get('x-ratelimit-remaining-tokens')!, 10) : undefined,
-            resetTokensTimeMs: parseOpenAIResetTime(responseHeaders.get('x-ratelimit-reset-tokens')),
-        };
-
-        if (!content) {
-            console.error(`No content in OpenAI response for ${file.name}`);
-            return { extractedData: null, error: "No content from OpenAI.", rateLimitHeaders };
+        if (!text) {
+            console.error(`No content in Gemini response for ${file.name}`);
+            return { extractedData: null, error: "No content from Gemini." };
         }
 
         try {
-            let extractedData = JSON.parse(content) as ExtractedPdfData;
-            console.log(`Successfully parsed OpenAI JSON response for multi-page file: ${file.name}. Items extracted: ${extractedData.items?.length || 0}`);
-
-            // Validate and correct the extracted data using text extraction
-            extractedData = validateAndCorrectExtractedData(extractedData, textData, file.name);
+            const extractedData = JSON.parse(text) as ExtractedPdfData;
+            console.log(`Successfully parsed Gemini JSON response for file: ${file.name}. Items extracted: ${extractedData.items?.length || 0}`);
 
             if (!extractedData.invoiceCode || !extractedData.provider?.cif || !extractedData.issueDate || typeof extractedData.totalAmount !== 'number') {
-                console.warn(`Consolidated response for ${file.name} missing crucial invoice-level data. Data: ${JSON.stringify(extractedData)}`);
+                console.warn(`Response for ${file.name} missing crucial invoice-level data. Data: ${JSON.stringify(extractedData)}`);
             }
             if (!extractedData.items || extractedData.items.length === 0) {
-                console.warn(`File ${file.name} yielded invoice-level data but no line items were extracted by AI from any page.`);
+                console.warn(`File ${file.name} yielded invoice-level data but no line items were extracted by AI.`);
             }
 
-            return { extractedData, rateLimitHeaders };
+            return { extractedData };
 
         } catch (parseError) {
-            console.error(`Error parsing consolidated OpenAI response for ${file.name}:`, parseError);
-            return { extractedData: null, error: "Error parsing OpenAI response.", rateLimitHeaders };
+            console.error(`Error parsing Gemini response for ${file.name}:`, parseError);
+            return { extractedData: null, error: "Error parsing Gemini response." };
         }
 
     } catch (error) {
         console.error(`Error extracting data from PDF ${file.name}:`, error);
         const errorMessage = error instanceof Error ? error.message : "Unknown error during PDF extraction.";
-        if (error instanceof Error && error.message.startsWith('PDF_CONVERSION_FAILED:')) {
-            return { extractedData: null, error: error.message, rateLimitHeaders: undefined }; // No headers if conversion failed before API call
-        }
-        // Attempt to get headers if error is from OpenAI API call itself (e.g. 429, 500)
-        // For now, this example returns undefined headers for general catch block
-        // A more sophisticated approach would involve checking if `error` is an APIError from OpenAI client
-        // and then trying to access `error.response.headers`
-        return { extractedData: null, error: errorMessage, rateLimitHeaders: undefined };
+        return { extractedData: null, error: errorMessage };
     }
 }
 
@@ -1313,56 +1090,30 @@ async function processInvoiceItemTx(
 // Enhanced rate limit handling with exponential backoff
 async function callPdfExtractAPIWithRetry(file: File, maxRetries: number = 3): Promise<CallPdfExtractAPIResponse> {
     let lastError: unknown = null;
-    let lastRateLimitHeaders: OpenAIRateLimitHeaders | undefined = undefined;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
             const result = await callPdfExtractAPI(file);
-
-            // If successful, check if we should add a small preventive delay for next requests
-            if (result.rateLimitHeaders) {
-                const { remainingRequests, remainingTokens } = result.rateLimitHeaders;
-                lastRateLimitHeaders = result.rateLimitHeaders;
-
-                // Only add minimal delay if we're very close to limits
-                if ((remainingRequests !== undefined && remainingRequests < 3) ||
-                    (remainingTokens !== undefined && remainingTokens < 3000)) {
-                    console.log(`[RateLimit Prevention] Very low remaining resources after successful call. Adding 2s delay.`);
-                    await new Promise(resolve => setTimeout(resolve, 2000));
-                }
-            }
-
             return result;
 
         } catch (error) {
             lastError = error;
             console.error(`[Attempt ${attempt}/${maxRetries}] Error calling PDF extract API for ${file.name}:`, error);
 
-            // Check if it's a rate limit error (429 status)
+            // Check if it's a rate limit error
             const isRateLimitError = error instanceof Error &&
-                (error.message.includes('429') || error.message.toLowerCase().includes('rate limit'));
+                (error.message.includes('429') || error.message.toLowerCase().includes('rate limit') ||
+                    error.message.toLowerCase().includes('quota exceeded'));
 
             if (isRateLimitError && attempt < maxRetries) {
-                // Extract wait time from error message or use intelligent defaults
-                let waitTime = 5000; // Start with 5 seconds instead of 60
-
-                // Try to parse wait time from error message
-                const waitTimeMatch = error.message.match(/try again in (\d+(?:\.\d+)?)s/);
-                if (waitTimeMatch) {
-                    waitTime = Math.max(1000, Math.ceil(parseFloat(waitTimeMatch[1]) * 1000));
-                }
-
-                // Use smarter backoff: start small and increase only if needed
-                const baseBackoff = Math.min(waitTime, 10000); // Cap base wait at 10s
-                const exponentialFactor = Math.pow(1.5, attempt - 1); // Gentler exponential growth
-                const backoffTime = Math.min(baseBackoff * exponentialFactor, 45000); // Cap total at 45s
-
-                console.log(`[RateLimit] Attempt ${attempt} rate limited. Smart wait: ${backoffTime / 1000}s (base: ${baseBackoff / 1000}s, factor: ${exponentialFactor.toFixed(1)})`);
+                // Simple backoff for rate limits
+                const backoffTime = Math.min(2000 * Math.pow(2, attempt - 1), 30000); // 2s, 4s, 8s, max 30s
+                console.log(`[RateLimit] Attempt ${attempt} rate limited. Waiting ${backoffTime / 1000}s before retry...`);
                 await new Promise(resolve => setTimeout(resolve, backoffTime));
                 continue;
             }
 
-            // For non-rate-limit errors, only retry with minimal delay
+            // For non-rate-limit errors, retry with minimal delay
             if (!isRateLimitError && attempt < maxRetries) {
                 const quickRetryDelay = 1000 * attempt; // 1s, 2s for attempts 1, 2
                 console.log(`[Retry] Non-rate-limit error on attempt ${attempt}. Quick retry in ${quickRetryDelay / 1000}s...`);
@@ -1379,8 +1130,7 @@ async function callPdfExtractAPIWithRetry(file: File, maxRetries: number = 3): P
     const errorMessage = lastError instanceof Error ? lastError.message : "Unknown error during PDF extraction with retries.";
     return {
         extractedData: null,
-        error: `Failed after ${maxRetries} attempts: ${errorMessage}`,
-        rateLimitHeaders: lastRateLimitHeaders
+        error: `Failed after ${maxRetries} attempts: ${errorMessage}`
     };
 }
 
@@ -1422,9 +1172,7 @@ export async function createInvoiceFromFiles(
         Math.min(6, Math.max(3, Math.ceil(files.length / 8))) : // Reduced for large batches
         Math.min(10, Math.max(4, Math.ceil(files.length / 5))); // Keep existing for small batches
 
-    const allFileProcessingResults: Array<ExtractedFileItem & { rateLimitHeaders?: OpenAIRateLimitHeaders }> = [];
-    let lastKnownRateLimits: OpenAIRateLimitHeaders | undefined = undefined;
-    let consecutiveRateLimitHits = 0;
+    const allFileProcessingResults: Array<ExtractedFileItem> = [];
 
     console.log(`Starting extraction for ${files.length} files with initial concurrency limit of ${CONCURRENCY_LIMIT} (conservative for large batches).`);
 
@@ -1485,58 +1233,8 @@ export async function createInvoiceFromFiles(
             await new Promise(resolve => setTimeout(resolve, 2000));
         }
 
-        // Smart rate limit checking - only wait if we're actually close to limits
-        if (lastKnownRateLimits) {
-            let shouldWait = false;
-            let waitTimeMs = 0;
-            let waitReason = "";
 
-            // More conservative thresholds for large batches
-            const requestThreshold = files.length > 10 ? 5 : 2; // Higher threshold for large batches
-            const tokenThreshold = files.length > 10 ? 15000 : 5000; // Conservative token estimation
-
-            if (lastKnownRateLimits.remainingRequests !== undefined && lastKnownRateLimits.remainingRequests < requestThreshold) {
-                shouldWait = true;
-                waitTimeMs = Math.max(waitTimeMs, lastKnownRateLimits.resetRequestsTimeMs || 60000);
-                waitReason += " requests";
-            }
-
-            const estimatedTokensNeeded = fileChunk.length * 5000;
-            if (lastKnownRateLimits.remainingTokens !== undefined && lastKnownRateLimits.remainingTokens < estimatedTokensNeeded + tokenThreshold) {
-                shouldWait = true;
-                waitTimeMs = Math.max(waitTimeMs, lastKnownRateLimits.resetTokensTimeMs || 60000);
-                waitReason += " tokens";
-            }
-
-            if (shouldWait) {
-                // More conservative waiting for large batches
-                const baseWaitTime = files.length > 10 ? 15000 : 10000; // Start with longer wait for large batches
-                const adaptiveWaitTime = Math.min(waitTimeMs, baseWaitTime + (consecutiveRateLimitHits * 8000)); // Longer penalties
-                console.warn(`[RateLimit] Close to limits (${waitReason.trim()}). Requests: ${lastKnownRateLimits.remainingRequests}, Tokens: ${lastKnownRateLimits.remainingTokens}. Waiting ${adaptiveWaitTime / 1000}s (conservative for large batch).`);
-                await new Promise(resolve => setTimeout(resolve, adaptiveWaitTime));
-                consecutiveRateLimitHits++;
-
-                // More aggressive concurrency reduction for large batches
-                if (consecutiveRateLimitHits >= 2 && CONCURRENCY_LIMIT > 2) {
-                    CONCURRENCY_LIMIT = Math.max(2, Math.floor(CONCURRENCY_LIMIT * 0.6)); // More aggressive reduction
-                    console.log(`[RateLimit] Reducing concurrency to ${CONCURRENCY_LIMIT} due to repeated limits (large batch mode)`);
-                }
-            } else {
-                // Reset consecutive hits if we're not hitting limits
-                consecutiveRateLimitHits = 0;
-
-                // More conservative concurrency increases for large batches
-                if (files.length <= 10 && // Only increase for smaller batches
-                    lastKnownRateLimits.remainingRequests !== undefined && lastKnownRateLimits.remainingRequests > 20 &&
-                    lastKnownRateLimits.remainingTokens !== undefined && lastKnownRateLimits.remainingTokens > 50000 &&
-                    CONCURRENCY_LIMIT < 12) { // Lower max concurrency
-                    CONCURRENCY_LIMIT = Math.min(12, CONCURRENCY_LIMIT + 1);
-                    console.log(`[RateLimit] Increasing concurrency to ${CONCURRENCY_LIMIT} due to available headroom (small batch only)`);
-                }
-            }
-        }
-
-        const chunkExtractionPromises = fileChunk.map(async (file): Promise<ExtractedFileItem & { rateLimitHeaders?: OpenAIRateLimitHeaders }> => {
+        const chunkExtractionPromises = fileChunk.map(async (file): Promise<ExtractedFileItem> => {
             console.log(`[Batch ${batchNumber}] Processing file for extraction: ${file.name}`);
             if (file.size === 0) {
                 console.warn(`[Batch ${batchNumber}] Skipping empty file: ${file.name}`);
@@ -1548,17 +1246,16 @@ export async function createInvoiceFromFiles(
             }
 
             try {
-                // Use the retry wrapper function with dynamic retry count based on rate limit hits
-                const maxRetries = consecutiveRateLimitHits > 0 ? 2 : 3; // Reduce retries if hitting limits
-                const { extractedData, error: extractionError, rateLimitHeaders } = await callPdfExtractAPIWithRetry(file, maxRetries);
+                // Use the retry wrapper function
+                const { extractedData, error: extractionError } = await callPdfExtractAPIWithRetry(file, 3);
 
                 if (extractionError) {
-                    return { file, extractedData, error: extractionError, fileName: file.name, rateLimitHeaders };
+                    return { file, extractedData, error: extractionError, fileName: file.name };
                 }
 
                 if (!extractedData) {
                     console.error(`[Batch ${batchNumber}] Failed to extract any usable invoice data for file: ${file.name}.`);
-                    return { file, extractedData: null, error: "Failed to extract usable invoice data from PDF.", fileName: file.name, rateLimitHeaders };
+                    return { file, extractedData: null, error: "Failed to extract usable invoice data from PDF.", fileName: file.name };
                 }
                 if (!extractedData.invoiceCode || !extractedData.provider?.cif || !extractedData.issueDate || typeof extractedData.totalAmount !== 'number') {
                     console.warn(`[Batch ${batchNumber}] Missing crucial invoice-level data for file: ${file.name}. Data: ${JSON.stringify(extractedData)}`);
@@ -1566,8 +1263,7 @@ export async function createInvoiceFromFiles(
                         file,
                         extractedData: extractedData,
                         error: "Missing or invalid crucial invoice-level data after PDF extraction.",
-                        fileName: file.name,
-                        rateLimitHeaders
+                        fileName: file.name
                     };
                 }
                 if (!extractedData.items || extractedData.items.length === 0) {
@@ -1579,8 +1275,7 @@ export async function createInvoiceFromFiles(
                     return {
                         file,
                         extractedData: extractedData,
-                        fileName: file.name,
-                        rateLimitHeaders
+                        fileName: file.name
                     };
                 } catch (dateError) {
                     console.warn(`[Batch ${batchNumber}] Invalid issue date format for file: ${file.name}. Date: ${extractedData.issueDate}`);
@@ -1588,36 +1283,19 @@ export async function createInvoiceFromFiles(
                         file,
                         extractedData: extractedData,
                         error: `Invalid issue date format: ${extractedData.issueDate}.`,
-                        fileName: file.name,
-                        rateLimitHeaders
+                        fileName: file.name
                     };
                 }
             } catch (topLevelError: unknown) {
                 console.error(`[Batch ${batchNumber}] Unexpected error during file processing for ${file.name}:`, topLevelError);
                 const errorMessage = topLevelError instanceof Error ? topLevelError.message : "Unknown error during file item processing.";
-                return { file, extractedData: null, error: errorMessage, fileName: file.name, rateLimitHeaders: undefined };
+                return { file, extractedData: null, error: errorMessage, fileName: file.name };
             }
         });
 
         const chunkResults = await Promise.all(chunkExtractionPromises);
         allFileProcessingResults.push(...chunkResults);
 
-        // Update rate limits more intelligently - prioritize the most restrictive
-        for (const result of chunkResults) {
-            if (result.rateLimitHeaders) {
-                if (!lastKnownRateLimits ||
-                    (result.rateLimitHeaders.remainingRequests !== undefined &&
-                        (lastKnownRateLimits.remainingRequests === undefined || result.rateLimitHeaders.remainingRequests < lastKnownRateLimits.remainingRequests)) ||
-                    (result.rateLimitHeaders.remainingTokens !== undefined &&
-                        (lastKnownRateLimits.remainingTokens === undefined || result.rateLimitHeaders.remainingTokens < lastKnownRateLimits.remainingTokens))) {
-                    lastKnownRateLimits = result.rateLimitHeaders;
-                }
-            }
-        }
-
-        if (lastKnownRateLimits) {
-            console.log(`[RateLimit] After Batch ${batchNumber}: Remaining Requests: ${lastKnownRateLimits.remainingRequests ?? 'N/A'}, Remaining Tokens: ${lastKnownRateLimits.remainingTokens ?? 'N/A'}, Consecutive Hits: ${consecutiveRateLimitHits}`);
-        }
     }
 
     const extractionResults: ExtractedFileItem[] = allFileProcessingResults.map(item => ({
@@ -2422,35 +2100,14 @@ export async function createManualInvoice(data: ManualInvoiceData): Promise<Crea
 // ---------------------------------------------------------------------------
 
 async function prepareBatchLine(file: File): Promise<string> {
-    // 1️⃣  Convert PDF pages to PNG images (same logic we used in callPdfExtractAPI)
+    // 1️⃣  Read original file and compute base64 to send as inlineData to Gemini
     const buffer = Buffer.from(await file.arrayBuffer());
-    const arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+    const base64 = buffer.toString('base64');
 
-    const pages = await pdfToPng(arrayBuffer, {
-        disableFontFace: true,
-        useSystemFonts: false,
-        viewportScale: 1.5,
-        verbosityLevel: 0,
-    });
+    // 2️⃣  Build prompt for direct PDF processing
+    const promptText = `Extract invoice data from this PDF document (consolidate all pages into a single invoice). Only extract visible data, use null for missing optional fields.
 
-    const imageUrls = pages.map((page) => ({
-        type: "image_url" as const,
-        image_url: {
-            url: `data:image/png;base64,${page.content.toString("base64")}`,
-            detail: "high" as const,
-        },
-    }));
-
-    // 2️⃣  Extract raw text (CIF / phone heuristics) so that the prompt can be enriched
-    const textData = await extractTextFromPdf(file);
-
-    const potentialCifs = textData.cifNumbers.length > 0 ? `\n\nPOTENTIAL CIF/NIF/NIE FOUND IN TEXT: ${textData.cifNumbers.join(', ')}` : '';
-    const potentialPhones = textData.phoneNumbers.length > 0 ? `\nPOTENTIAL PHONES FOUND IN TEXT: ${textData.phoneNumbers.join(', ')}` : '';
-
-    // 3️⃣  Build prompt identical to callPdfExtractAPI()
-    const promptText = `Extract invoice data from these images (consolidate all pages into a single invoice). Only extract visible data, use null for missing optional fields.
-
-CRITICAL NUMBER ACCURACY: 
+CRITICAL NUMBER ACCURACY:
 - Distinguish 5 vs S (flat top vs curved), 8 vs B (complete vs open), 0 vs O vs 6 (oval vs round vs curved)
 - Double-check all digit sequences, especially CIF/NIF numbers
 - Verify quantities and codes character by character
@@ -2462,15 +2119,15 @@ PROVIDER (Invoice Issuer - NOT the client):
 
 TAX ID (CIF/NIF/NIE) - EXTREMELY IMPORTANT:
 - CIF format: Letter + exactly 8 digits (e.g., A12345678)
-- NIF format: exactly 8 digits + Letter (e.g., 12345678A) 
+- NIF format: exactly 8 digits + Letter (e.g., 12345678A)
 - NIE format: X/Y/Z + exactly 7 digits + Letter (e.g., X1234567A)
 - Look for labels: "CIF:", "NIF:", "Cód. Fiscal:", "Tax ID:", "RFC:"
-- VERIFY digit count is correct (8 for CIF/NIF, 7 for NIE)${potentialCifs}
+- VERIFY digit count is correct (8 for CIF/NIF, 7 for NIE)
 
 PHONE NUMBER:
 - Spanish format: 6/7/8/9 + 8 more digits (9 total)
 - May have +34 country code
-- Look for labels: "Tel:", "Teléfono:", "Phone:"${potentialPhones}
+- Look for labels: "Tel:", "Teléfono:", "Phone:"
 
 INVOICE: Extract code, issue date (ISO), total amount
 
@@ -2489,7 +2146,7 @@ JSON format:
   "provider": {
     "name": "string",
     "cif": "string|null",
-    "email": "string|null", 
+    "email": "string|null",
     "phone": "string|null",
     "address": "string|null"
   },
@@ -2500,7 +2157,7 @@ JSON format:
     "materialCode": "string|null",
     "isMaterial": "boolean",
     "quantity": "number",
-    "unitPrice": "number", 
+    "unitPrice": "number",
     "totalPrice": "number",
     "itemDate": "string|null",
     "workOrder": "string|null",
@@ -2509,29 +2166,28 @@ JSON format:
   }]
 }`;
 
-    // Build messages array in valid Chat format: a single user message whose content
-    // is an array consisting of the prompt text followed by the image URLs.
-    const messages = [
-        {
-            role: "user" as const,
-            content: [
-                { type: "text" as const, text: promptText },
-                ...imageUrls,
+    // Build Gemini JSONL request line
+    const jsonlObject = {
+        key: file.name,
+        request: {
+            contents: [
+                {
+                    role: 'user',
+                    parts: [
+                        { text: promptText },
+                        { inlineData: { mimeType: 'application/pdf', data: base64 } }
+                    ]
+                }
             ],
-        },
-    ];
+            generationConfig: {
+                responseMimeType: 'application/json',
+                temperature: 0.1,
+                candidateCount: 1
+            }
+        }
+    };
 
-    return JSON.stringify({
-        custom_id: file.name,
-        method: "POST",
-        url: "/v1/chat/completions",
-        body: {
-            model: "gpt-4.1",
-            temperature: 0.1,
-            messages,
-            response_format: { type: "json_object" },
-        },
-    });
+    return JSON.stringify(jsonlObject);
 }
 
 // Convenience: generate all lines in parallel with limited concurrency (4)
@@ -2760,8 +2416,6 @@ export async function startInvoiceBatch(formDataWithFiles: FormData): Promise<{ 
 async function processBatchInBackground(files: File[]) {
     try {
         // STEP A – Build JSONL chunks
-        const fs = await import('fs');
-        const path = await import('path');
         const tmpDir = path.join(process.cwd(), 'tmp');
         if (!fs.existsSync(tmpDir)) {
             fs.mkdirSync(tmpDir);
@@ -2772,37 +2426,29 @@ async function processBatchInBackground(files: File[]) {
             throw new Error('No JSONL chunks built.');
         }
 
-        // Keep track of how many files we have successfully enqueued so we can
-        // update the placeholder record at the end.
-        let filesEnqueued = 0;
-
         for (const [index, chunk] of chunks.entries()) {
-            const jsonlPath = path.join(tmpDir, `batch-input-${Date.now()}-${index}.jsonl`);
+            const jsonlPath = path.join(tmpDir, `gemini-batch-${Date.now()}-${index}.jsonl`);
             await fs.promises.writeFile(jsonlPath, chunk.content, 'utf8');
 
-            // Upload file to OpenAI
-            const batchFile = await openai.files.create({
-                file: fs.createReadStream(jsonlPath) as unknown as File,
-                purpose: 'batch',
-            });
+            // Upload file to Gemini
+            const uploaded = await gemini.files.upload({
+                file: jsonlPath,
+                config: { displayName: `invoices-${Date.now()}-${index}`, mimeType: 'application/jsonl' }
+            }) as unknown as { name?: string; id?: string };
 
-            // Create remote Batch job
-            const batch = await openai.batches.create({
-                input_file_id: batchFile.id,
-                endpoint: '/v1/chat/completions',
-                completion_window: '24h',
-            });
+            // Create Gemini batch job
+            const created = await gemini.batches.create({
+                model: GEMINI_MODEL,
+                src: uploaded.name || uploaded.id || 'unknown',
+                config: { displayName: `invoice-job-${Date.now()}-${index}` }
+            }) as unknown as { name: string };
 
-            // Record each real batch so the UI can track real progress
-            await createBatchProcessing(chunk.files.length, batch.id);
-
-            filesEnqueued += chunk.files.length;
+            const remoteId: string = created.name;
+            await createBatchProcessing(chunk.files.length, remoteId);
 
             // Cleanup temp file in background (don't block loop)
             fs.promises.unlink(jsonlPath).catch(() => undefined);
         }
-
-        // All real batches are now tracked individually; no further action needed here.
     } catch (err) {
         console.error('[processBatchInBackground] Failed to enqueue batches', err);
     }
@@ -2812,37 +2458,28 @@ async function processBatchInBackground(files: File[]) {
 // Helper to download and persist results of a completed OpenAI Batch
 // ---------------------------------------------------------------------------
 
-async function ingestBatchOutput(batchId: string, outputFileId: string | null | undefined) {
-    if (!outputFileId) {
-        console.warn(`[ingestBatchOutput] Batch ${batchId} completed but has no output_file_id`);
-        return;
-    }
+interface GeminiInlineResponse { key?: string; response?: { text?: string }; error?: unknown }
+type GeminiDest = { file_name?: string; fileName?: string; inlined_responses?: Array<GeminiInlineResponse>; inlinedResponses?: Array<GeminiInlineResponse> } | undefined | null;
 
-    console.log(`[ingestBatchOutput] Downloading output for batch ${batchId} (file ${outputFileId})`);
-
-    try {
-        // The SDK returns a Response object which we can stream.
-        const fileResp = await openai.files.content(outputFileId);
-
-        // The Response type from OpenAI SDK uses the Web Streams API; convert cautiously.
-        const responseWithBody = fileResp as unknown as { body?: Readable; text: () => Promise<string> };
-        const body = responseWithBody.body;
-
-        // Fallback: if body is undefined, read text at once.
-        if (!body) {
-            const text = await fileResp.text();
-            await processOutputLines(text.split(/\r?\n/));
-            return;
-        }
-
-        const rl = readline.createInterface({ input: body, crlfDelay: Infinity });
-        const lines: string[] = [];
-        for await (const line of rl) {
-            lines.push(line);
-        }
+async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiDest) {
+    // Supports file-based dest or inlined_responses
+    if (dest && (dest.file_name || dest.fileName)) {
+        const fileName: string = (dest.file_name ?? dest.fileName) as string;
+        console.log(`[ingestBatchOutput] Downloading Gemini output for batch ${batchId} (file ${fileName})`);
+        const tmpDir = path.join(process.cwd(), 'tmp');
+        await fs.promises.mkdir(tmpDir, { recursive: true });
+        const downloadPath: string = path.join(tmpDir, path.basename(fileName));
+        await gemini.files.download({ file: fileName as unknown as string, downloadPath });
+        const fileText = await fs.promises.readFile(downloadPath, 'utf8');
+        const lines = fileText.split(/\r?\n/);
         await processOutputLines(lines);
-    } catch (err) {
-        console.error(`[ingestBatchOutput] Failed to ingest output for batch ${batchId}`, err);
+        await fs.promises.unlink(downloadPath).catch(() => { });
+    } else if (dest && (dest.inlined_responses || dest.inlinedResponses)) {
+        const inlined = (dest.inlined_responses ?? dest.inlinedResponses) as Array<GeminiInlineResponse>;
+        const lines = inlined.map((r) => JSON.stringify(r));
+        await processOutputLines(lines);
+    } else {
+        console.warn(`[ingestBatchOutput] Gemini batch ${batchId} has no dest results`);
     }
 
     interface ErrorContext {
@@ -2866,31 +2503,13 @@ async function ingestBatchOutput(batchId: string, outputFileId: string | null | 
 
             try {
                 const parsed = JSON.parse(raw);
-                const response = parsed.response as { status_code: number; body: ChatCompletionBody } | null;
-
-                if (!response || response.status_code !== 200) {
-                    const errorMsg = `OpenAI API error: status ${response?.status_code ?? 'unknown'}`;
-                    console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (custom_id: ${parsed.custom_id ?? 'unknown'})`);
-                    errors.push({
-                        lineIndex: i + 1,
-                        error: errorMsg,
-                        context: { custom_id: parsed.custom_id, status_code: response?.status_code }
-                    });
-                    failed++;
-                    continue;
-                }
-
-                const chatBody = response.body as ChatCompletionBody;
-                const content = chatBody.choices?.[0]?.message?.content;
-
+                // Gemini result line shape: { key, response: { text }, error }
+                const content = parsed?.response?.text as string | undefined;
+                const key = parsed?.key as string | undefined;
                 if (!content) {
-                    const errorMsg = 'No content in OpenAI response';
-                    console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (custom_id: ${parsed.custom_id ?? 'unknown'})`);
-                    errors.push({
-                        lineIndex: i + 1,
-                        error: errorMsg,
-                        context: { custom_id: parsed.custom_id, hasChoices: !!chatBody.choices }
-                    });
+                    const errorMsg = 'No content in Gemini response';
+                    console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (key: ${key ?? 'unknown'})`);
+                    errors.push({ lineIndex: i + 1, error: errorMsg, context: { custom_id: key } });
                     failed++;
                     continue;
                 }
@@ -2911,17 +2530,17 @@ async function ingestBatchOutput(batchId: string, outputFileId: string | null | 
                     continue;
                 }
 
-                const result = await saveExtractedInvoice(extracted, parsed.custom_id ?? undefined);
+                const result = await saveExtractedInvoice(extracted, key ?? undefined);
                 if (result.success) {
                     success++;
                 } else {
                     const errorMsg = `Failed to save invoice: ${result.message}`;
-                    console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (custom_id: ${parsed.custom_id ?? 'unknown'})`);
+                    console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (key: ${key ?? 'unknown'})`);
                     console.error(`[ingestBatchOutput] Extracted data:`, JSON.stringify(extracted, null, 2));
                     errors.push({
                         lineIndex: i + 1,
                         error: errorMsg,
-                        context: { custom_id: parsed.custom_id, extractedData: extracted, result }
+                        context: { custom_id: key, extractedData: extracted, result }
                     });
                     failed++;
                 }

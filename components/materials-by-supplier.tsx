@@ -153,14 +153,13 @@ export function MaterialsBySupplier({ data: rawData }: MaterialsBySupplierProps)
                   formatter={(value: number) => {
                     return [`${value} €`]
                   }}
-                  labelFormatter={(label: string, payload: Array<{ payload?: ChartDataEntry & { fullName?: string } }>) => {
-                    const entry = payload?.[0]?.payload
+                  labelFormatter={(label, payload) => {
+                    const entry = (payload as any)?.[0]?.payload as any
                     if (entry) {
-                      // Use full name in tooltip if available
                       const materialName = entry.fullName || entry.materialName
-                      return `${materialName} - ${SUPPLIER_TYPE_MAP[entry.supplier]}`
+                      return `${materialName} - ${SUPPLIER_TYPE_MAP[entry.supplier as keyof typeof SUPPLIER_TYPE_MAP]}`
                     }
-                    return label
+                    return String(label)
                   }}
                   contentStyle={{
                     backgroundColor: 'white',

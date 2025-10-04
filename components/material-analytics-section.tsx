@@ -167,9 +167,9 @@ export function MaterialAnalyticsSection({
                                     if (name === 'quantity') return [value.toString(), 'Cantidad Total']
                                     return [value, name]
                                 }}
-                                labelFormatter={(label: string, payload: Array<{ payload?: { fullName?: string } }>) => {
-                                    const entry = payload?.[0]?.payload
-                                    return entry?.fullName || label
+                                labelFormatter={(label, payload) => {
+                                    const entry = (payload as any)?.[0]?.payload as any
+                                    return entry?.fullName || String(label)
                                 }}
                             />
                             <Bar

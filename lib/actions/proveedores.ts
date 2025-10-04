@@ -47,7 +47,7 @@ export async function getSuppliers() {
 const CreateSupplierSchema = z.object({
     name: z.string().min(3, 'El nombre debe tener al menos 3 caracteres.'),
     // Ensure ProviderType enum is correctly imported and used
-    type: z.nativeEnum(ProviderType, { errorMap: () => ({ message: 'Selecciona un tipo de proveedor válido.' }) }),
+    type: z.nativeEnum(ProviderType),
     cif: z.string()
         .regex(/^[A-HJNP-SUVW]{1}\d{7}[0-9A-J]$/, 'Formato de CIF inválido.') // Basic Spanish CIF format regex
         .min(9, 'El CIF debe tener 9 caracteres.')
