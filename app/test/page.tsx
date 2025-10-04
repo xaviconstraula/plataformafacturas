@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import Image from 'next/image'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -154,12 +155,15 @@ export default function TestPage() {
                                                 Dimensions: {page.width} x {page.height}
                                             </p>
                                             <div className="border rounded-lg p-4 bg-white">
-                                                <img
-                                                    src={page.imageUrl}
-                                                    alt={`Page ${page.pageNumber}`}
-                                                    className="max-w-full h-auto mx-auto shadow-lg"
-                                                    style={{ maxHeight: '800px' }}
-                                                />
+                                                <div className="relative max-w-full h-auto mx-auto shadow-lg" style={{ maxHeight: '800px' }}>
+                                                    <Image
+                                                        src={page.imageUrl}
+                                                        alt={`Page ${page.pageNumber}`}
+                                                        fill
+                                                        className="object-contain"
+                                                        sizes="(max-width: 768px) 100vw, 800px"
+                                                    />
+                                                </div>
                                             </div>
                                         </div>
                                     ))}

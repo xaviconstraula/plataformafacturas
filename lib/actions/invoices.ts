@@ -24,14 +24,9 @@ interface ChatCompletionBody {
 }
 
 // Gemini configuration
-const GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-1.5-pro-002";
+const GEMINI_MODEL = "gemini-2.5-flash";
 
-// OpenAI (kept for non-batch flows that currently use it)
-const openaiApiKey = process.env.OPENAI_API_KEY;
-if (!openaiApiKey) {
-    throw new Error("Missing OPENAI_API_KEY environment variable. This is required for some AI operations.");
-}
-const openai = new OpenAI({ apiKey: openaiApiKey });
+
 
 // Batch Processing Types and Functions
 export interface BatchProgressInfo {
@@ -133,10 +128,28 @@ export async function getActiveBatches(): Promise<BatchProgressInfo[]> {
     for (const batch of localBatches) {
         if (['PENDING', 'PROCESSING'].includes(batch.status)) {
             try {
-                const remote = await gemini.batches.get({ name: batch.id }) as unknown as { state?: string; request_counts?: { total?: number; completed?: number; failed?: number }; requestCounts?: { total?: number; completed?: number; failed?: number }; dest?: GeminiDest };
+                // Retry logic for batch status check
+                let remote;
+                let attempts = 0;
+                while (attempts < 3) {
+                    try {
+                        remote = await gemini.batches.get({ name: batch.id }) as unknown as { state?: string; request_counts?: { total?: number; completed?: number; failed?: number }; requestCounts?: { total?: number; completed?: number; failed?: number }; dest?: GeminiDest };
+                        break;
+                    } catch (error: unknown) {
+                        attempts++;
+                        if (attempts >= 3) throw error;
+                        const err = error as { status?: number; error?: { code?: number } };
+                        if (err?.status === 429 || err?.error?.code === 429) {
+                            console.log(`[getActiveBatches] Rate limit hit for batch ${batch.id}, waiting 3s before retry ${attempts}/3`);
+                            await new Promise(resolve => setTimeout(resolve, 3000));
+                        } else {
+                            throw error;
+                        }
+                    }
+                }
 
                 // Map Gemini state → local BatchStatus
-                const state = remote.state as string | undefined;
+                const state = remote?.state as string | undefined;
                 const statusMap: Record<string, BatchStatus> = {
                     JOB_STATE_PENDING: 'PENDING',
                     JOB_STATE_RUNNING: 'PROCESSING',
@@ -148,7 +161,7 @@ export async function getActiveBatches(): Promise<BatchProgressInfo[]> {
                 const newStatus = state ? statusMap[state] ?? batch.status : batch.status;
 
                 // Counts if present
-                const rc = (remote.request_counts ?? remote.requestCounts ?? {});
+                const rc = (remote?.request_counts ?? remote?.requestCounts ?? {});
 
                 await updateBatchProgress(batch.id, {
                     status: newStatus,
@@ -160,7 +173,7 @@ export async function getActiveBatches(): Promise<BatchProgressInfo[]> {
                 reconciledBatches.push({ ...batch, status: newStatus, processedFiles: (rc.completed ?? 0) + (rc.failed ?? 0), successfulFiles: rc.completed ?? 0, failedFiles: rc.failed ?? 0 });
 
                 // If batch completed, ingest results
-                if (newStatus === 'COMPLETED' && !batch.completedAt && remote.dest) {
+                if (newStatus === 'COMPLETED' && !batch.completedAt && remote?.dest) {
                     await ingestBatchOutputFromGemini(batch.id, remote.dest);
                 }
 
@@ -2188,7 +2201,10 @@ JSON format:
             generationConfig: {
                 responseMimeType: 'application/json',
                 temperature: 0.1,
-                candidateCount: 1
+                candidateCount: 1,
+                // Force more deterministic and structured output
+                topP: 0.8,
+                topK: 40,
             }
         }
     };
@@ -2439,20 +2455,54 @@ async function processBatchInBackground(files: File[], userId: string) {
             const jsonlPath = path.join(tmpDir, `gemini-batch-${Date.now()}-${index}.jsonl`);
             await fs.promises.writeFile(jsonlPath, chunk.content, 'utf8');
 
-            // Upload file to Gemini
-            const uploaded = await gemini.files.upload({
-                file: jsonlPath,
-                config: { displayName: `invoices-${Date.now()}-${index}`, mimeType: 'application/jsonl' }
-            }) as unknown as { name?: string; id?: string };
+            // Upload file to Gemini with retry logic
+            let uploaded;
+            let uploadAttempts = 0;
+            while (uploadAttempts < 3) {
+                try {
+                    uploaded = await gemini.files.upload({
+                        file: jsonlPath,
+                        config: { displayName: `invoices-${Date.now()}-${index}`, mimeType: 'application/jsonl' }
+                    }) as unknown as { name?: string; id?: string };
+                    break;
+                } catch (error: unknown) {
+                    uploadAttempts++;
+                    if (uploadAttempts >= 3) throw error;
+                    const err = error as { status?: number; error?: { code?: number } };
+                    if (err?.status === 429 || err?.error?.code === 429) {
+                        console.log(`[processBatchInBackground] Rate limit hit during file upload, waiting 2s before retry ${uploadAttempts}/3`);
+                        await new Promise(resolve => setTimeout(resolve, 2000));
+                    } else {
+                        throw error;
+                    }
+                }
+            }
 
-            // Create Gemini batch job
-            const created = await gemini.batches.create({
-                model: GEMINI_MODEL,
-                src: uploaded.name || uploaded.id || 'unknown',
-                config: { displayName: `invoice-job-${Date.now()}-${index}` }
-            }) as unknown as { name: string };
+            // Create Gemini batch job with retry logic
+            let created;
+            let batchAttempts = 0;
+            while (batchAttempts < 3) {
+                try {
+                    created = await gemini.batches.create({
+                        model: GEMINI_MODEL,
+                        src: uploaded?.name || uploaded?.id || 'unknown',
+                        config: { displayName: `invoice-job-${Date.now()}-${index}` }
+                    }) as unknown as { name: string };
+                    break;
+                } catch (error: unknown) {
+                    batchAttempts++;
+                    if (batchAttempts >= 3) throw error;
+                    const err = error as { status?: number; error?: { code?: number } };
+                    if (err?.status === 429 || err?.error?.code === 429) {
+                        console.log(`[processBatchInBackground] Rate limit hit during batch creation, waiting 1s before retry ${batchAttempts}/3`);
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                    } else {
+                        throw error;
+                    }
+                }
+            }
 
-            const remoteId: string = created.name;
+            const remoteId: string = created?.name || 'unknown';
             await createBatchProcessing(chunk.files.length, remoteId, userId);
 
             // Cleanup temp file in background (don't block loop)
@@ -2471,22 +2521,114 @@ interface GeminiInlineResponse { key?: string; response?: { text?: string }; err
 type GeminiDest = { file_name?: string; fileName?: string; inlined_responses?: Array<GeminiInlineResponse>; inlinedResponses?: Array<GeminiInlineResponse> } | undefined | null;
 
 async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiDest) {
+    const parseJsonString = (rawInput: string, context?: string): unknown => {
+        if (!rawInput) return null;
+        let raw = rawInput.trim();
+        if (raw.startsWith('```')) {
+            raw = raw.replace(/^```[a-zA-Z]*\s*/m, "").replace(/```\s*$/m, "").trim();
+        }
+        raw = raw.replace(/[\uFEFF\u200B-\u200D]/g, '');
+        if (raw.startsWith('{\\')) {
+            raw = raw
+                .replace(/\\"/g, '"')
+                .replace(/\\\\/g, '\\')
+                .replace(/\\n/g, '\n')
+                .replace(/\\r/g, '\r')
+                .replace(/\\t/g, '\t');
+        }
+        try { return JSON.parse(raw); } catch { }
+        const start = raw.indexOf('{');
+        const end = raw.lastIndexOf('}');
+        if (start !== -1 && end !== -1 && end > start) {
+            const slice = raw.slice(start, end + 1);
+            try { return JSON.parse(slice); } catch { }
+        }
+        if (context) console.error(`[Batch ${batchId}] Failed to parse JSON in ${context}. First 200 chars:`, raw.substring(0, 200));
+        return null;
+    };
+
     // Supports file-based dest or inlined_responses
     if (dest && (dest.file_name || dest.fileName)) {
         const fileName: string = (dest.file_name ?? dest.fileName) as string;
         console.log(`[ingestBatchOutput] Downloading Gemini output for batch ${batchId} (file ${fileName})`);
         const tmpDir = path.join(process.cwd(), 'tmp');
         await fs.promises.mkdir(tmpDir, { recursive: true });
-        const downloadPath: string = path.join(tmpDir, path.basename(fileName));
-        await gemini.files.download({ file: fileName as unknown as string, downloadPath });
-        const fileText = await fs.promises.readFile(downloadPath, 'utf8');
-        const lines = fileText.split(/\r?\n/);
-        await processOutputLines(lines);
-        await fs.promises.unlink(downloadPath).catch(() => { });
+        let downloadedPath: string;
+        try {
+            downloadedPath = path.join(tmpDir, path.basename(fileName));
+            await gemini.files.download({ file: fileName as unknown as string, downloadPath: downloadedPath });
+            if (!await fs.promises.access(downloadedPath).then(() => true).catch(() => false)) {
+                try {
+                    const files = await fs.promises.readdir(tmpDir);
+                    console.log(`[ingestBatchOutput] Expected file: ${downloadedPath}, Available files: ${files.join(', ')}`);
+                    const fileStats = await Promise.all(files.map(async (file) => {
+                        try { const fullPath = path.join(tmpDir, file); const stats = await fs.promises.stat(fullPath); return { file, fullPath, mtime: stats.mtime, isFile: stats.isFile() }; }
+                        catch { return null; }
+                    }));
+                    const validFiles = fileStats.filter(s => s !== null && s.isFile) as Array<{ file: string; fullPath: string; mtime: Date; isFile: boolean; }>;
+                    const expectedBaseName = path.basename(fileName);
+                    const matchingFiles = validFiles.filter(f => f.file === expectedBaseName || f.file.includes(expectedBaseName.split('.')[0]));
+                    const recentJsonlFiles = validFiles.filter(f => f.file.endsWith('.jsonl') && (Date.now() - f.mtime.getTime()) < 10 * 60 * 1000);
+                    let selectedFile: typeof validFiles[0] | null = null;
+                    if (matchingFiles.length > 0) {
+                        selectedFile = matchingFiles.sort((a, b) => b.mtime.getTime() - a.mtime.getTime())[0];
+                        console.log(`[ingestBatchOutput] Using matching file: ${selectedFile.file}`);
+                    } else if (recentJsonlFiles.length === 1) {
+                        selectedFile = recentJsonlFiles[0];
+                        console.log(`[ingestBatchOutput] Using recent .jsonl file: ${selectedFile.file}`);
+                    } else if (recentJsonlFiles.length > 1) {
+                        throw new Error(`Multiple recent .jsonl files found, cannot determine which belongs to batch ${batchId}. Files: ${recentJsonlFiles.map(f => f.file).join(', ')}`);
+                    } else {
+                        throw new Error(`No suitable batch result file found for batch ${batchId}. Expected: ${expectedBaseName}, Available: ${files.join(', ')}`);
+                    }
+                    downloadedPath = selectedFile.fullPath;
+                    console.log(`[ingestBatchOutput] Selected file: ${downloadedPath}`);
+                } catch (dirErr) {
+                    throw new Error(`Failed to process tmp directory ${tmpDir}: ${dirErr instanceof Error ? dirErr.message : 'Unknown error'}`);
+                }
+            }
+            try { const stats = await fs.promises.stat(downloadedPath); if (stats.isDirectory()) { throw new Error(`Downloaded path ${downloadedPath} is a directory, not a file`); } }
+            catch (statErr) { throw new Error(`Cannot access file stats for ${downloadedPath}: ${statErr instanceof Error ? statErr.message : 'Unknown error'}`); }
+            console.log(`[ingestBatchOutput] Using streaming parser for ${downloadedPath}`);
+            const fileText = await fs.promises.readFile(downloadedPath, 'utf8');
+            const lines = fileText.split(/\r?\n/);
+            const processingSucceeded = await processOutputLines(lines, parseJsonString);
+
+            // Only clean up the downloaded file if processing succeeded (no errors)
+            if (processingSucceeded) {
+                try {
+                    await fs.promises.unlink(downloadedPath);
+                    console.log(`[ingestBatchOutput] Cleaned up downloaded result file: ${downloadedPath}`);
+                } catch (cleanupErr) {
+                    console.warn(`[ingestBatchOutput] Failed to clean up downloaded result file ${downloadedPath}:`, cleanupErr);
+                }
+            } else {
+                console.log(`[ingestBatchOutput] Keeping failed batch result file for debugging: ${downloadedPath}`);
+            }
+
+            // Clean up old temporary files (older than 1 hour)
+            try {
+                const files = await fs.promises.readdir(tmpDir);
+                const oneHourAgo = Date.now() - 60 * 60 * 1000;
+                for (const file of files) {
+                    try {
+                        const filePath = path.join(tmpDir, file);
+                        const stats = await fs.promises.stat(filePath);
+                        if (stats.isFile() && stats.mtime.getTime() < oneHourAgo) {
+                            await fs.promises.unlink(filePath);
+                            console.log(`[ingestBatchOutput] Cleaned up old tmp file: ${file}`);
+                        }
+                    } catch { }
+                }
+            } catch { }
+        } catch (error) {
+            console.error(`[ingestBatchOutput] Error downloading or processing batch results for ${batchId}:`, error);
+            throw error;
+        }
     } else if (dest && (dest.inlined_responses || dest.inlinedResponses)) {
         const inlined = (dest.inlined_responses ?? dest.inlinedResponses) as Array<GeminiInlineResponse>;
         const lines = inlined.map((r) => JSON.stringify(r));
-        await processOutputLines(lines);
+        await processOutputLines(lines, parseJsonString);
     } else {
         console.warn(`[ingestBatchOutput] Gemini batch ${batchId} has no dest results`);
     }
@@ -2501,7 +2643,7 @@ async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiDest) {
         result?: CreateInvoiceResult;
     }
 
-    async function processOutputLines(lines: string[]) {
+    async function processOutputLines(lines: string[], parseJsonString: (rawInput: string, context?: string) => unknown): Promise<boolean> {
         let success = 0;
         let failed = 0;
         const errors: Array<{ lineIndex: number; error: string; context?: ErrorContext }> = [];
@@ -2512,8 +2654,8 @@ async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiDest) {
 
             try {
                 const parsed = JSON.parse(raw);
-                // Gemini result line shape: { key, response: { text }, error }
-                const content = parsed?.response?.text as string | undefined;
+                // Gemini result line shape: { key, response: { candidates: [{ content: { parts: [{ text }] } }] }, error }
+                const content = parsed?.response?.candidates?.[0]?.content?.parts?.[0]?.text as string | undefined;
                 const key = parsed?.key as string | undefined;
                 if (!content) {
                     const errorMsg = 'No content in Gemini response';
@@ -2523,11 +2665,9 @@ async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiDest) {
                     continue;
                 }
 
-                let extracted: ExtractedPdfData;
-                try {
-                    extracted = JSON.parse(content) as ExtractedPdfData;
-                } catch (parseErr) {
-                    const errorMsg = `Failed to parse extracted data JSON: ${(parseErr as Error).message}`;
+                const extracted = parseJsonString(content, `extracted data for ${key ?? 'unknown'}`) as ExtractedPdfData;
+                if (!extracted) {
+                    const errorMsg = `Failed to parse extracted data JSON`;
                     console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (custom_id: ${parsed.custom_id ?? 'unknown'})`);
                     console.error(`[ingestBatchOutput] Raw content: ${content.substring(0, 500)}${content.length > 500 ? '...' : ''}`);
                     errors.push({
@@ -2584,5 +2724,8 @@ async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiDest) {
                 }
             });
         }
+
+        // Return true if no errors occurred, false otherwise
+        return errors.length === 0;
     }
 } 
