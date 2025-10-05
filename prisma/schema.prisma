@@ -90,7 +90,7 @@ model Invoice {
 
 model Material {
   id          String   @id @default(cuid())
-  code        String   @unique // Código único del material
+  code        String // Código del material (único por usuario)
   name        String
   description String?
   createdAt   DateTime @default(now())
@@ -115,6 +115,7 @@ model Material {
   invoiceItems InvoiceItem[]
   PriceAlert   PriceAlert[]
 
+  @@unique([code, userId])
   @@index([code])
   @@index([category])
   @@index([productGroupId])

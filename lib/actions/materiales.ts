@@ -64,6 +64,7 @@ export async function createMaterial(
     prevState: MaterialFormState,
     formData: FormData
 ): Promise<MaterialFormState> {
+    const user = await requireAuth()
     const validatedFields = CreateMaterialSchema.safeParse(
         Object.fromEntries(formData.entries())
     )
@@ -79,8 +80,8 @@ export async function createMaterial(
 
     try {
         // Check if code already exists
-        const existingMaterial = await prisma.material.findUnique({
-            where: { code },
+        const existingMaterial = await prisma.material.findFirst({
+            where: { code, userId: user.id },
         })
 
         if (existingMaterial) {
@@ -96,6 +97,7 @@ export async function createMaterial(
                 name,
                 description: description || null,
                 referenceCode: referenceCode || null,
+                user: { connect: { id: user.id } },
             },
         })
 
@@ -117,8 +119,9 @@ export async function createMaterial(
 export async function getMaterialById(id: string) {
     // Removed noStore(); // Opt out of caching for this specific query if needed for fresh data
     try {
-        const material = await prisma.material.findUnique({
-            where: { id },
+        const user = await requireAuth()
+        const material = await prisma.material.findFirst({
+            where: { id, userId: user.id },
         });
         if (!material) {
             // Consider how to handle not found, maybe return null or throw specific error
@@ -137,6 +140,7 @@ export async function updateMaterial(
     prevState: MaterialFormState,
     formData: FormData
 ): Promise<MaterialFormState> {
+    const user = await requireAuth()
     const validatedFields = UpdateMaterialSchema.safeParse(
         Object.fromEntries(formData.entries())
     );
@@ -155,6 +159,7 @@ export async function updateMaterial(
         const existingMaterialWithCode = await prisma.material.findFirst({
             where: {
                 code,
+                userId: user.id,
                 NOT: { id }, // Exclude the current material from the check
             },
         });
@@ -166,8 +171,8 @@ export async function updateMaterial(
             };
         }
 
-        await prisma.material.update({
-            where: { id },
+        await prisma.material.updateMany({
+            where: { id, userId: user.id },
             data: {
                 code,
                 name,
@@ -196,6 +201,7 @@ export async function deleteMaterial(id: string): Promise<{ success: boolean; me
         return { success: false, message: "ID de material es obligatorio." };
     }
     try {
+        const user = await requireAuth()
         // Optional: Check if the material is associated with any invoice items
         const invoiceItemsCount = await prisma.invoiceItem.count({
             where: { materialId: id },
@@ -208,8 +214,8 @@ export async function deleteMaterial(id: string): Promise<{ success: boolean; me
             };
         }
 
-        await prisma.material.delete({
-            where: { id },
+        await prisma.material.deleteMany({
+            where: { id, userId: user.id },
         });
 
         revalidatePath('/materiales');

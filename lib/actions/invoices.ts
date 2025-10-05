@@ -29,6 +29,49 @@ const GEMINI_MODEL = "gemini-2.5-flash";
 
 
 // Batch Processing Types and Functions
+// Strict JSON schema to constrain Gemini outputs to valid JSON matching ExtractedPdfData
+const EXTRACTED_INVOICE_SCHEMA = {
+    type: 'object',
+    additionalProperties: false,
+    required: ['invoiceCode', 'provider', 'issueDate', 'totalAmount', 'items'],
+    properties: {
+        invoiceCode: { type: 'string' },
+        provider: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['name'],
+            properties: {
+                name: { type: 'string' },
+                cif: { type: ['string', 'null'] },
+                email: { type: ['string', 'null'] },
+                phone: { type: ['string', 'null'] },
+                address: { type: ['string', 'null'] }
+            }
+        },
+        issueDate: { type: 'string' },
+        totalAmount: { type: 'number' },
+        items: {
+            type: 'array',
+            items: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['materialName', 'quantity', 'unitPrice', 'totalPrice'],
+                properties: {
+                    materialName: { type: 'string' },
+                    materialCode: { type: ['string', 'null'] },
+                    isMaterial: { type: 'boolean' },
+                    quantity: { type: 'number' },
+                    unitPrice: { type: 'number' },
+                    totalPrice: { type: 'number' },
+                    itemDate: { type: ['string', 'null'] },
+                    workOrder: { type: ['string', 'null'] },
+                    description: { type: ['string', 'null'] },
+                    lineNumber: { type: ['number', 'null'] }
+                }
+            }
+        }
+    }
+} as const;
 export interface BatchProgressInfo {
     id: string;
     status: BatchStatus;
@@ -407,6 +450,7 @@ JSON format:
             ],
             config: {
                 responseMimeType: 'application/json',
+                responseSchema: EXTRACTED_INVOICE_SCHEMA,
                 temperature: 0.1,
                 candidateCount: 1
             }
@@ -750,7 +794,8 @@ async function findOrCreateMaterialTxWithCache(
     materialName: string,
     materialCode?: string,
     providerType?: string,
-    materialCache?: Map<string, { id: string; name: string; code: string; referenceCode: string | null; category: string | null }>
+    materialCache?: Map<string, { id: string; name: string; code: string; referenceCode: string | null; category: string | null }>,
+    userId?: string,
 ): Promise<Material> {
     const normalizedName = materialName.trim();
 
@@ -795,11 +840,11 @@ async function findOrCreateMaterialTxWithCache(
         }
     }
 
-    // Fall back to original database lookup logic
-    return await findOrCreateMaterialTx(tx, materialName, materialCode, providerType);
+    // Fall back to original database lookup logic (scoped by user)
+    return await findOrCreateMaterialTx(tx, materialName, materialCode, providerType, userId);
 }
 
-async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName: string, materialCode?: string, providerType?: string): Promise<Material> {
+async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName: string, materialCode?: string, providerType?: string, userId?: string): Promise<Material> {
     const normalizedName = materialName.trim();
     let material: Material | null = null;
 
@@ -808,8 +853,8 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
 
     // Buscar primero por código exacto
     if (finalCode) {
-        material = await tx.material.findUnique({
-            where: { code: finalCode },
+        material = await tx.material.findFirst({
+            where: { code: finalCode, userId: userId ?? undefined },
         });
 
         if (material) {
@@ -821,7 +866,7 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
     // Si no se encuentra por código exacto, buscar por referenceCode
     if (finalCode) {
         material = await tx.material.findFirst({
-            where: { referenceCode: finalCode }
+            where: { referenceCode: finalCode, userId: userId ?? undefined }
         });
 
         if (material) {
@@ -832,7 +877,7 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
 
     // Buscar por nombre exacto
     material = await tx.material.findFirst({
-        where: { name: { equals: normalizedName, mode: 'insensitive' } }
+        where: { name: { equals: normalizedName, mode: 'insensitive' }, userId: userId ?? undefined }
     });
 
     if (material) {
@@ -843,6 +888,7 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
     // Solo si no encontramos nada, hacer búsqueda por similitud (más conservadora)
     if (finalCode && finalCode.length >= 6) {
         const allMaterials = await tx.material.findMany({
+            where: { userId: userId ?? undefined },
             select: { id: true, name: true, code: true, referenceCode: true, category: true }
         });
 
@@ -888,8 +934,8 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
 
             // First, check if a material with this code already exists to avoid the unique constraint violation
             // which would abort the entire transaction.
-            const existingMaterialWithCode = await tx.material.findUnique({
-                where: { code: codeToTry },
+            const existingMaterialWithCode = await tx.material.findFirst({
+                where: { code: codeToTry, userId: userId ?? undefined },
                 select: { id: true }, // Lightweight query
             });
 
@@ -906,6 +952,7 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
                         name: normalizedName,
                         category: category,
                         referenceCode: materialCode, // Keep original code from PDF
+                        ...(userId ? { user: { connect: { id: userId } } } : {}),
                     },
                 });
                 break; // Success, exit loop
@@ -1560,7 +1607,7 @@ export async function createInvoiceFromFiles(
                                     await tx.invoiceItem.create({
                                         data: {
                                             invoiceId: invoice.id,
-                                            materialId: (await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache)).id,
+                                            materialId: (await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache, user.id)).id,
                                             quantity: quantityDecimal,
                                             unitPrice: currentUnitPriceDecimal,
                                             totalPrice: totalPriceDecimal,
@@ -1574,7 +1621,7 @@ export async function createInvoiceFromFiles(
 
                                 let material: Material;
                                 try {
-                                    material = await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache);
+                                    material = await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache, user.id);
                                 } catch (materialError) {
                                     console.error(`Error creating/finding material '${itemData.materialName}' in invoice ${invoice.invoiceCode}:`, materialError);
                                     throw new Error(`Failed to process material '${itemData.materialName}': ${materialError instanceof Error ? materialError.message : 'Unknown error'}`);
@@ -1967,7 +2014,7 @@ export async function createManualInvoice(data: ManualInvoiceData): Promise<Crea
                 }
 
                 // Find or create material
-                const material = await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialCode, provider.type);
+                const material = await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialCode, provider.type, user.id);
 
                 // Create invoice item
                 const invoiceItem = await tx.invoiceItem.create({
@@ -2200,6 +2247,7 @@ JSON format:
             ],
             generationConfig: {
                 responseMimeType: 'application/json',
+                responseSchema: EXTRACTED_INVOICE_SCHEMA,
                 temperature: 0.1,
                 candidateCount: 1,
                 // Force more deterministic and structured output
@@ -2361,7 +2409,7 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
                 }
 
                 try {
-                    const material = await findOrCreateMaterialTx(tx, item.materialName, item.materialCode, provider.type);
+                    const material = await findOrCreateMaterialTx(tx, item.materialName, item.materialCode, provider.type, user.id);
                     await processInvoiceItemTx(
                         tx,
                         item,
