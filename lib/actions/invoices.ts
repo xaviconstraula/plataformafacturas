@@ -29,16 +29,14 @@ const GEMINI_MODEL = "gemini-2.5-flash";
 
 
 // Batch Processing Types and Functions
-// Strict JSON schema to constrain Gemini outputs to valid JSON matching ExtractedPdfData
+// JSON schema for Gemini outputs (Gemini doesn't support additionalProperties)
 const EXTRACTED_INVOICE_SCHEMA = {
     type: 'object',
-    additionalProperties: false,
     required: ['invoiceCode', 'provider', 'issueDate', 'totalAmount', 'items'],
     properties: {
         invoiceCode: { type: 'string' },
         provider: {
             type: 'object',
-            additionalProperties: false,
             required: ['name'],
             properties: {
                 name: { type: 'string' },
@@ -54,7 +52,6 @@ const EXTRACTED_INVOICE_SCHEMA = {
             type: 'array',
             items: {
                 type: 'object',
-                additionalProperties: false,
                 required: ['materialName', 'quantity', 'unitPrice', 'totalPrice'],
                 properties: {
                     materialName: { type: 'string' },
@@ -2249,10 +2246,7 @@ JSON format:
                 responseMimeType: 'application/json',
                 responseSchema: EXTRACTED_INVOICE_SCHEMA,
                 temperature: 0.1,
-                candidateCount: 1,
-                // Force more deterministic and structured output
-                topP: 0.8,
-                topK: 40,
+                candidateCount: 1
             }
         }
     };
@@ -2533,8 +2527,7 @@ async function processBatchInBackground(files: File[], userId: string) {
                 try {
                     created = await gemini.batches.create({
                         model: GEMINI_MODEL,
-                        src: uploaded?.name || uploaded?.id || 'unknown',
-                        config: { displayName: `invoice-job-${Date.now()}-${index}` }
+                        src: uploaded?.name || uploaded?.id || 'unknown'
                     }) as unknown as { name: string };
                     break;
                 } catch (error: unknown) {
