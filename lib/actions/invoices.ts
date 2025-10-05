@@ -29,41 +29,42 @@ const GEMINI_MODEL = "gemini-2.5-flash";
 
 
 // Batch Processing Types and Functions
-// JSON schema for Gemini outputs (Gemini doesn't support additionalProperties)
+// JSON schema for Gemini outputs (Gemini doesn't support additionalProperties or type arrays)
+// For nullable fields, we omit them from 'required' and use single type
 const EXTRACTED_INVOICE_SCHEMA = {
-    type: 'object',
+    type: 'OBJECT',
     required: ['invoiceCode', 'provider', 'issueDate', 'totalAmount', 'items'],
     properties: {
-        invoiceCode: { type: 'string' },
+        invoiceCode: { type: 'STRING' },
         provider: {
-            type: 'object',
+            type: 'OBJECT',
             required: ['name'],
             properties: {
-                name: { type: 'string' },
-                cif: { type: ['string', 'null'] },
-                email: { type: ['string', 'null'] },
-                phone: { type: ['string', 'null'] },
-                address: { type: ['string', 'null'] }
+                name: { type: 'STRING' },
+                cif: { type: 'STRING' },
+                email: { type: 'STRING' },
+                phone: { type: 'STRING' },
+                address: { type: 'STRING' }
             }
         },
-        issueDate: { type: 'string' },
-        totalAmount: { type: 'number' },
+        issueDate: { type: 'STRING' },
+        totalAmount: { type: 'NUMBER' },
         items: {
-            type: 'array',
+            type: 'ARRAY',
             items: {
-                type: 'object',
+                type: 'OBJECT',
                 required: ['materialName', 'quantity', 'unitPrice', 'totalPrice'],
                 properties: {
-                    materialName: { type: 'string' },
-                    materialCode: { type: ['string', 'null'] },
-                    isMaterial: { type: 'boolean' },
-                    quantity: { type: 'number' },
-                    unitPrice: { type: 'number' },
-                    totalPrice: { type: 'number' },
-                    itemDate: { type: ['string', 'null'] },
-                    workOrder: { type: ['string', 'null'] },
-                    description: { type: ['string', 'null'] },
-                    lineNumber: { type: ['number', 'null'] }
+                    materialName: { type: 'STRING' },
+                    materialCode: { type: 'STRING' },
+                    isMaterial: { type: 'BOOLEAN' },
+                    quantity: { type: 'NUMBER' },
+                    unitPrice: { type: 'NUMBER' },
+                    totalPrice: { type: 'NUMBER' },
+                    itemDate: { type: 'STRING' },
+                    workOrder: { type: 'STRING' },
+                    description: { type: 'STRING' },
+                    lineNumber: { type: 'NUMBER' }
                 }
             }
         }
@@ -2523,11 +2524,17 @@ async function processBatchInBackground(files: File[], userId: string) {
             // Create Gemini batch job with retry logic
             let created;
             let batchAttempts = 0;
+            // Ensure we have a valid file identifier from the upload response
+            const fileIdentifier = (uploaded as { name?: string; id?: string } | undefined)?.name ?? (uploaded as { name?: string; id?: string } | undefined)?.id;
+            if (!fileIdentifier) {
+                throw new Error('[processBatchInBackground] Gemini file upload did not return a valid file identifier (name or id)');
+            }
             while (batchAttempts < 3) {
                 try {
                     created = await gemini.batches.create({
                         model: GEMINI_MODEL,
-                        src: uploaded?.name || uploaded?.id || 'unknown'
+                        src: fileIdentifier,
+                        config: { displayName: `invoice-job-${Date.now()}-${index}` }
                     }) as unknown as { name: string };
                     break;
                 } catch (error: unknown) {
