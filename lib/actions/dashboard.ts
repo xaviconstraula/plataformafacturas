@@ -23,7 +23,8 @@ export async function getDashboardStats() {
             }),
             prisma.material.count({
                 where: {
-                    userId: user.id
+                    userId: user.id,
+                    isActive: true
                 }
             }),
             prisma.priceAlert.count({
@@ -58,7 +59,7 @@ export async function getOverviewData() {
 
         const invoices = await prisma.invoice.findMany({
             where: {
-                createdAt: {
+                issueDate: {
                     gte: sixMonthsAgo
                 },
                 provider: {
@@ -66,21 +67,22 @@ export async function getOverviewData() {
                 }
             },
             select: {
-                createdAt: true,
+                issueDate: true,
                 totalAmount: true
             },
             orderBy: {
-                createdAt: 'asc'
+                issueDate: 'asc'
             }
         })
 
         // Group by month and calculate total
         const monthlyData = invoices.reduce((acc, invoice) => {
-            const month = invoice.createdAt.toLocaleString('default', { month: 'long' })
+            const month = invoice.issueDate.toLocaleString('default', { month: 'long' })
             if (!acc[month]) {
                 acc[month] = 0
             }
-            acc[month] += 1 // Increment count for each invoice
+            // Sum total amount per month
+            acc[month] += invoice.totalAmount.toNumber()
             return acc
         }, {} as Record<string, number>)
 
@@ -106,64 +108,58 @@ export async function getMaterialsBySupplierType(): Promise<MaterialBySupplierTy
 
     // Removed noStore() - materials by supplier type can be cached for better performance
     try {
-        // Get all materials with their invoice items and provider information
-        const materials = await prisma.material.findMany({
-            where: { userId: user.id },
-            include: {
-                invoiceItems: {
-                    include: {
-                        invoice: {
-                            include: {
-                                provider: true
-                            }
-                        }
-                    }
+        // Bound time window to reduce data size
+        const twelveMonthsAgo = new Date()
+        twelveMonthsAgo.setMonth(twelveMonthsAgo.getMonth() - 12)
+
+        // Aggregate directly from invoice items to avoid deep nested loads
+        const items = await prisma.invoiceItem.findMany({
+            where: {
+                material: { userId: user.id },
+                invoice: {
+                    provider: { userId: user.id },
+                    issueDate: { gte: twelveMonthsAgo }
                 }
+            },
+            select: {
+                totalPrice: true,
+                material: { select: { id: true, name: true } },
+                invoice: { select: { provider: { select: { type: true } } } }
             }
-        });
+        })
 
-        const materialsByType: Record<string, {
-            totalValue: number
-            providerType: 'MATERIAL_SUPPLIER' | 'MACHINERY_RENTAL'
-        }> = {};
+        // Aggregate per material and provider type by value
+        const materialAgg = new Map<string, { name: string; byType: Record<'MATERIAL_SUPPLIER' | 'MACHINERY_RENTAL', number> }>()
 
-        // Process each material
-        for (const material of materials) {
-            if (material.invoiceItems.length === 0) continue;
+        for (const it of items) {
+            const materialId = it.material.id
+            const materialName = it.material.name
+            const providerType = it.invoice.provider.type as 'MATERIAL_SUPPLIER' | 'MACHINERY_RENTAL'
+            const value = it.totalPrice.toNumber()
 
-            // Get the most common provider type for this material
-            const providerTypes = material.invoiceItems.map(item => item.invoice.provider.type);
-            const typeCount = providerTypes.reduce((acc, type) => {
-                acc[type] = (acc[type] || 0) + 1;
-                return acc;
-            }, {} as Record<string, number>);
-
-            const dominantType = Object.entries(typeCount)
-                .sort(([, a], [, b]) => b - a)[0]?.[0] as 'MATERIAL_SUPPLIER' | 'MACHINERY_RENTAL';
-
-            if (dominantType) {
-                // Calculate total value from invoice items
-                const totalValue = material.invoiceItems.reduce((sum, item) =>
-                    sum + item.totalPrice.toNumber(), 0);
-
-                materialsByType[material.name] = {
-                    totalValue: totalValue, // Store the raw total value
-                    providerType: dominantType
-                };
+            if (!materialAgg.has(materialId)) {
+                materialAgg.set(materialId, { name: materialName, byType: { MATERIAL_SUPPLIER: 0, MACHINERY_RENTAL: 0 } })
             }
+            const entry = materialAgg.get(materialId)!
+            entry.byType[providerType] += value
         }
 
-        // Convert to the format expected by the chart
-        const result = Object.entries(materialsByType)
-            .map(([name, data]) => ({
-                name,
-                value: data.totalValue,
-                supplier: (data.providerType === 'MATERIAL_SUPPLIER' ? 'Materiales' : 'Maquinaria') as "Materiales" | "Maquinaria"
-            }))
+        const result = Array.from(materialAgg.values())
+            .map(entry => {
+                const ms = entry.byType.MATERIAL_SUPPLIER
+                const mr = entry.byType.MACHINERY_RENTAL
+                const dominantType = (ms >= mr ? 'MATERIAL_SUPPLIER' : 'MACHINERY_RENTAL') as 'MATERIAL_SUPPLIER' | 'MACHINERY_RENTAL'
+                const totalValue = ms + mr
+                return {
+                    name: entry.name,
+                    value: totalValue,
+                    supplier: (dominantType === 'MATERIAL_SUPPLIER' ? 'Materiales' : 'Maquinaria') as "Materiales" | "Maquinaria"
+                }
+            })
             .sort((a, b) => b.value - a.value)
-            .slice(0, 10); // Get top 10 materials by value
+            .slice(0, 10)
 
-        return result;
+        return result
     } catch (error) {
         console.error('Database Error:', error);
         throw new Error('Failed to fetch materials by supplier type.');

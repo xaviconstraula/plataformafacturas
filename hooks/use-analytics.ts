@@ -2,7 +2,6 @@
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'next/navigation'
-import { getPendingPriceAlerts } from '@/lib/actions/dashboard'
 import { getActiveBatches } from '@/lib/actions/invoices'
 import { getMaterialById } from '@/lib/actions/materiales'
 
@@ -31,12 +30,29 @@ interface SupplierAnalytics {
     lastInvoiceDate: Date
 }
 
+// Minimal type for alerts list items
+interface PriceAlertSummary {
+    id: string
+    oldPrice: number
+    newPrice: number
+    percentage: number
+    createdAt: string
+    materialId: string
+    providerId: string
+    materialName: string
+    providerName: string
+}
+
 // Hook for price alerts with caching
 export function usePriceAlerts() {
-    return useQuery({
+    return useQuery<PriceAlertSummary[]>({
         queryKey: ['price-alerts'],
         queryFn: async () => {
-            return await getPendingPriceAlerts()
+            const response = await fetch('/api/alerts')
+            if (!response.ok) {
+                throw new Error('Failed to fetch price alerts')
+            }
+            return response.json()
         },
         staleTime: 1 * 60 * 1000, // 1 minute - alerts should be fresh
         gcTime: 5 * 60 * 1000, // 5 minutes

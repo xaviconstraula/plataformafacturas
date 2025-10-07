@@ -35,7 +35,8 @@ export const GET = withAuthHandler(async (request: NextRequest, user) => {
             },
             orderBy: {
                 createdAt: 'desc'
-            }
+            },
+            take: 3
         })
 
         const formattedAlerts = alerts.map(alert => ({

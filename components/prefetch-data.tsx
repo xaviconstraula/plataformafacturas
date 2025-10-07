@@ -16,15 +16,6 @@ export function PrefetchData({ children }: PrefetchDataProps) {
     useEffect(() => {
         const prefetchTimer = setTimeout(() => {
             prefetchCommonData()
-            queryClient.prefetchQuery({
-                queryKey: ['dashboard-stats'],
-                queryFn: async () => {
-                    const response = await fetch('/api/dashboard/stats')
-                    if (!response.ok) throw new Error('Failed to fetch dashboard stats')
-                    return response.json()
-                },
-                staleTime: 2 * 60 * 1000,
-            })
         }, 1500)
 
         return () => clearTimeout(prefetchTimer)
