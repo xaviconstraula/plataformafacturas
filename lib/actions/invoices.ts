@@ -4,11 +4,8 @@ import { prisma } from "@/lib/db";
 import { type ExtractedPdfData, type ExtractedPdfItemData } from "@/lib/types/pdf";
 import { Prisma, type Provider, type Material, type Invoice, type InvoiceItem, type PriceAlert, type MaterialProvider, BatchStatus } from "@/generated/prisma";
 import { revalidatePath } from "next/cache";
-import OpenAI from "openai";
 import { GoogleGenAI } from "@google/genai";
-import { extractMaterialCode, normalizeMaterialCode, areMaterialCodesSimilar, generateStandardMaterialCode, areMaterialNamesSimilar, normalizeCifForComparison, buildCifVariants } from "@/lib/utils";
-import readline from "readline"; // Node stdlib for streaming large files
-import { Readable } from "stream";
+import { normalizeMaterialCode, areMaterialCodesSimilar, normalizeCifForComparison, buildCifVariants } from "@/lib/utils";
 import { requireAuth } from "@/lib/auth-utils";
 import fs from "fs";
 import path from "path";
@@ -163,7 +160,7 @@ interface GeminiBatchStatus { state?: string; request_counts?: GeminiRequestCoun
 export async function createBatchProcessing(totalFiles: number, providedId?: string, userId?: string): Promise<string> {
     const batch = await prisma.batchProcessing.create({
         data: {
-            // Use providedId when supplied so that our local record id matches OpenAI's batch id.
+            // Use providedId when supplied so that our local record id matches the external batch id.
             ...(providedId ? { id: providedId } : {}),
             totalFiles,
             status: 'PENDING',
@@ -584,7 +581,7 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
 
     // Ensure CIF is available for provider unification
     if (!cif) {
-        throw new Error(`Provider '${name}' does not have a CIF. All providers must have a CIF for proper unification.`);
+        throw new Error(`Provider tax ID (CIF/NIF) is required to process invoices for '${name}'.`);
     }
 
     try {
@@ -838,8 +835,10 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
                 }
             }
 
-            // 4. Search by similar name as last resort
-            const allProviders = await tx.provider.findMany();
+            // 4. Search by similar name as last resort (scoped by user if provided)
+            const allProviders = await tx.provider.findMany({
+                where: userId ? { userId } : undefined
+            });
             for (const candidate of allProviders) {
                 if (areProviderNamesSimilar(name, candidate.name)) {
                     console.log(`Found provider after race condition by similar name: ${candidate.name} (CIF: ${candidate.cif}) - updating with new data`);
@@ -880,7 +879,7 @@ async function findOrCreateMaterialTxWithCache(
 ): Promise<Material> {
     const normalizedName = materialName.trim();
 
-    // Priorizar el código extraído del PDF por OpenAI
+    // Priorizar el código extraído del PDF por Gemini
     // Handle case where AI returns string 'null' instead of null
     const finalCode: string | null = materialCode && materialCode !== 'null' ? normalizeMaterialCode(materialCode) : null;
 
@@ -930,7 +929,7 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
     const normalizedName = materialName.trim();
     let material: Material | null = null;
 
-    // Priorizar el código extraído del PDF por OpenAI
+    // Priorizar el código extraído del PDF por Gemini
     // Handle case where AI returns string 'null' instead of null
     const finalCode: string | null = materialCode && materialCode !== 'null' ? normalizeMaterialCode(materialCode) : null;
 
@@ -1065,7 +1064,7 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
                 return existingMaterial;
             }
 
-            throw new Error(`Failed to create material '${normalizedName}' after ${maxAttempts} attempts due to persistent code conflicts.`);
+            throw new Error(`Could not create material '${normalizedName}' due to a temporary code conflict. Please try again.`);
         }
     } else {
         // Update category if not set or different
@@ -1521,20 +1520,40 @@ export async function createInvoiceFromFiles(
         }
     }
 
-    // Pre-load common materials to reduce database queries during processing
+    // Pre-load a focused set of materials to reduce queries during processing
     console.log("Pre-loading existing materials for faster lookup...");
-    const existingMaterials = await prisma.material.findMany({
-        select: {
-            id: true,
-            name: true,
-            code: true,
-            referenceCode: true,
-            category: true
+    const referencedCodes = new Set<string>();
+    for (const item of processableItems) {
+        const items = item.extractedData?.items ?? [];
+        for (const it of items) {
+            if (it.materialCode && it.materialCode !== 'null') {
+                referencedCodes.add(normalizeMaterialCode(it.materialCode));
+            }
+        }
+    }
+
+    // Try to fetch by referenced codes first, then fall back to a recent slice
+    let existingMaterials = await prisma.material.findMany({
+        select: { id: true, name: true, code: true, referenceCode: true, category: true },
+        where: {
+            userId: user.id,
+            OR: referencedCodes.size > 0 ? [
+                { code: { in: Array.from(referencedCodes) } },
+                { referenceCode: { in: Array.from(referencedCodes) } },
+            ] : undefined,
         },
-        take: 1000, // Limit to most recent/common materials to avoid memory issues
-        orderBy: { updatedAt: 'desc' },
-        where: { userId: user.id }
+        take: referencedCodes.size > 0 ? undefined : 300,
+        orderBy: referencedCodes.size > 0 ? undefined : { updatedAt: 'desc' },
     });
+
+    if (existingMaterials.length === 0) {
+        existingMaterials = await prisma.material.findMany({
+            select: { id: true, name: true, code: true, referenceCode: true, category: true },
+            where: { userId: user.id },
+            take: 300,
+            orderBy: { updatedAt: 'desc' },
+        });
+    }
 
     const materialCache = new Map<string, { id: string; name: string; code: string; referenceCode: string | null; category: string | null }>();
 
@@ -1556,8 +1575,8 @@ export async function createInvoiceFromFiles(
 
     console.log(`Pre-loaded ${existingMaterials.length} materials for faster processing`);
 
-    // 5. Process database operations with optimized concurrency
-    const DB_CONCURRENCY_LIMIT = Math.min(3, Math.max(1, Math.ceil(processableItems.length / 10))); // Optimized concurrency: 1-3 based on batch size
+    // 5. Process database operations strictly sequentially to preserve chronological order
+    const DB_CONCURRENCY_LIMIT = 1; // Enforce chronological processing by date
     const dbResults: CreateInvoiceResult[] = [];
 
     // Circuit breaker for catastrophic failures
@@ -1750,19 +1769,17 @@ export async function createInvoiceFromFiles(
                                                     invoiceId: invoice.id,
                                                 },
                                             });
+                                            alertsCounter++;
+                                            console.log(`[Invoice ${invoice.invoiceCode}][Material '${material.name}'] INTRA-INVOICE Price alert created. Old (from item ${lastSeenPriceRecordInThisInvoice.invoiceItemId} in this invoice): ${lastSeenPriceRecordInThisInvoice.price}, New (current item): ${currentItemUnitPrice}, Change: ${percentageChangeDecimal.toFixed(2)}%, Effective Date: ${effectiveItemDate.toISOString()}`);
                                         } catch (alertError) {
                                             // Manejar error de constraint único para alertas intra-factura
                                             if (typeof alertError === 'object' && alertError !== null && 'code' in alertError &&
                                                 (alertError as { code: string }).code === 'P2002') {
                                                 console.log(`[Invoice ${invoice.invoiceCode}][Material '${material.name}'] Intra-invoice price alert already exists (caught constraint violation). Skipping duplicate creation.`);
-                                                // No incrementar alertsCounter en este caso
-                                                alertsCounter--; // Compensar el incremento que viene después
                                             } else {
                                                 throw alertError;
                                             }
                                         }
-                                        alertsCounter++;
-                                        console.log(`[Invoice ${invoice.invoiceCode}][Material '${material.name}'] INTRA-INVOICE Price alert created. Old (from item ${lastSeenPriceRecordInThisInvoice.invoiceItemId} in this invoice): ${lastSeenPriceRecordInThisInvoice.price}, New (current item): ${currentItemUnitPrice}, Change: ${percentageChangeDecimal.toFixed(2)}%, Effective Date: ${effectiveItemDate.toISOString()}`);
                                     }
                                 }
 
@@ -2371,7 +2388,6 @@ async function buildBatchJsonl(files: File[]): Promise<string> {
 }
 
 // Convenience: generate JSONL chunks whose size stays safely under the 100 MB limit imposed by the Batch API
-// OpenAI currently rejects Batch input files larger than 100 MB.
 // Stay well below that hard limit so we never lose the entire
 // batch due to a single oversize upload.
 const MAX_BATCH_FILE_SIZE = 90 * 1024 * 1024; // 90 MB safety threshold
@@ -2676,7 +2692,7 @@ async function processBatchInBackground(files: File[], userId: string) {
 }
 
 // ---------------------------------------------------------------------------
-// Helper to download and persist results of a completed OpenAI Batch
+// Helper to download and persist results of a completed batch
 // ---------------------------------------------------------------------------
 
 interface GeminiInlineResponse { key?: string; response?: { text?: string }; error?: unknown }
