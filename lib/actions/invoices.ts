@@ -15,8 +15,8 @@ import path from "path";
 // ------------------------------
 const MAX_UPLOAD_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
 const ALLOWED_MIME_TYPES = ["application/pdf"] as const;
-const MAX_FILES_PER_UPLOAD = 500;
-const MAX_TOTAL_UPLOAD_BYTES = 500 * 1024 * 1024; // 500 MB per request
+const MAX_FILES_PER_UPLOAD = 700;
+const MAX_TOTAL_UPLOAD_BYTES = 700 * 1024 * 1024; // 500 MB per request
 
 function validateUploadFile(file: File): { valid: boolean; error?: string } {
     if (!ALLOWED_MIME_TYPES.includes(file.type as (typeof ALLOWED_MIME_TYPES)[number])) {
