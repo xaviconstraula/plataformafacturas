@@ -13,6 +13,76 @@ import { requireAuth } from "@/lib/auth-utils";
 import fs from "fs";
 import path from "path";
 
+// ------------------------------
+// Upload constraints & utilities
+// ------------------------------
+const MAX_UPLOAD_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
+const ALLOWED_MIME_TYPES = ["application/pdf"] as const;
+const MAX_FILES_PER_UPLOAD = 500;
+const MAX_TOTAL_UPLOAD_BYTES = 500 * 1024 * 1024; // 500 MB per request
+
+function validateUploadFile(file: File): { valid: boolean; error?: string } {
+    if (!ALLOWED_MIME_TYPES.includes(file.type as (typeof ALLOWED_MIME_TYPES)[number])) {
+        return { valid: false, error: `File is not a PDF.` };
+    }
+    if (typeof file.size === 'number' && file.size > MAX_UPLOAD_FILE_SIZE) {
+        return { valid: false, error: `File exceeds ${Math.round(MAX_UPLOAD_FILE_SIZE / 1024 / 1024)}MB limit.` };
+    }
+    if (typeof file.size === 'number' && file.size === 0) {
+        return { valid: false, error: `File is empty.` };
+    }
+    return { valid: true };
+}
+
+function isRateLimitError(error: unknown): boolean {
+    const e = error as { status?: number; error?: { code?: number }; message?: string } | undefined;
+    if (!e) return false;
+    if (e.status === 429 || e.error?.code === 429) return true;
+    if (typeof e.message === 'string') {
+        const m = e.message.toLowerCase();
+        if (m.includes('rate limit') || m.includes('quota exceeded')) return true;
+    }
+    return false;
+}
+
+function parseJsonSafe(rawInput: string): unknown {
+    if (!rawInput) return null;
+    let raw = rawInput.trim();
+    if (raw.startsWith('```')) {
+        raw = raw.replace(/^```[a-zA-Z]*\s*/m, "").replace(/```\s*$/m, "").trim();
+    }
+    raw = raw.replace(/[\uFEFF\u200B-\u200D]/g, '');
+    if (raw.startsWith('{\\')) {
+        raw = raw
+            .replace(/\\"/g, '"')
+            .replace(/\\\\/g, '\\')
+            .replace(/\\n/g, '\n')
+            .replace(/\\r/g, '\r')
+            .replace(/\\t/g, '\t');
+    }
+    try { return JSON.parse(raw); } catch { }
+    const start = raw.indexOf('{');
+    const end = raw.lastIndexOf('}');
+    if (start !== -1 && end !== -1 && end > start) {
+        const slice = raw.slice(start, end + 1);
+        try { return JSON.parse(slice); } catch { }
+    }
+    return null;
+}
+
+function isExtractedPdfData(value: unknown): value is ExtractedPdfData {
+    if (!value || typeof value !== 'object') return false;
+    const v = value as Record<string, unknown>;
+    const provider = v.provider as Record<string, unknown> | undefined;
+    const items = v.items as unknown[] | undefined;
+    return typeof v.invoiceCode === 'string'
+        && provider !== undefined
+        && typeof provider.name === 'string'
+        && typeof v.issueDate === 'string'
+        && typeof v.totalAmount === 'number'
+        && Array.isArray(items);
+}
+
 // Represents the minimal part of the ChatCompletion response we need when
 // reading a Batch output file. Only the assistant message content is required.
 interface ChatCompletionBody {
@@ -84,6 +154,10 @@ export interface BatchProgressInfo {
     completedAt?: Date;
     errors?: string[]; // Array of error messages
 }
+
+// Minimal typing for Gemini batch status lookup
+interface GeminiRequestCounts { total?: number; completed?: number; failed?: number }
+interface GeminiBatchStatus { state?: string; request_counts?: GeminiRequestCounts; requestCounts?: GeminiRequestCounts; dest?: GeminiDest }
 
 // Create a new batch processing record
 export async function createBatchProcessing(totalFiles: number, providedId?: string, userId?: string): Promise<string> {
@@ -174,13 +248,12 @@ export async function getActiveBatches(): Promise<BatchProgressInfo[]> {
                 let attempts = 0;
                 while (attempts < 3) {
                     try {
-                        remote = await gemini.batches.get({ name: batch.id }) as unknown as { state?: string; request_counts?: { total?: number; completed?: number; failed?: number }; requestCounts?: { total?: number; completed?: number; failed?: number }; dest?: GeminiDest };
+                        remote = await gemini.batches.get({ name: batch.id }) as GeminiBatchStatus;
                         break;
                     } catch (error: unknown) {
                         attempts++;
                         if (attempts >= 3) throw error;
-                        const err = error as { status?: number; error?: { code?: number } };
-                        if (err?.status === 429 || err?.error?.code === 429) {
+                        if (isRateLimitError(error)) {
                             console.log(`[getActiveBatches] Rate limit hit for batch ${batch.id}, waiting 3s before retry ${attempts}/3`);
                             await new Promise(resolve => setTimeout(resolve, 3000));
                         } else {
@@ -368,6 +441,11 @@ function isBlockedProvider(providerName: string): boolean {
 async function callPdfExtractAPI(file: File): Promise<CallPdfExtractAPIResponse> {
     try {
         console.log(`Starting PDF extraction for file: ${file.name}`);
+        const validation = validateUploadFile(file);
+        if (!validation.valid) {
+            console.warn(`Validation failed for ${file.name}: ${validation.error}`);
+            return { extractedData: null, error: validation.error };
+        }
         const buffer = Buffer.from(await file.arrayBuffer());
         const base64 = buffer.toString('base64');
 
@@ -464,7 +542,12 @@ JSON format:
         }
 
         try {
-            const extractedData = JSON.parse(text) as ExtractedPdfData;
+            const parsed = parseJsonSafe(text);
+            if (!isExtractedPdfData(parsed)) {
+                console.warn(`Gemini response did not match expected schema for ${file.name}`);
+                return { extractedData: null, error: "Invalid AI response format." };
+            }
+            const extractedData = parsed as ExtractedPdfData;
             console.log(`Successfully parsed Gemini JSON response for file: ${file.name}. Items extracted: ${extractedData.items?.length || 0}`);
 
             if (!extractedData.invoiceCode || !extractedData.provider?.cif || !extractedData.issueDate || typeof extractedData.totalAmount !== 'number') {
@@ -798,7 +881,8 @@ async function findOrCreateMaterialTxWithCache(
     const normalizedName = materialName.trim();
 
     // Priorizar el código extraído del PDF por OpenAI
-    const finalCode: string | null = materialCode ? normalizeMaterialCode(materialCode) : null;
+    // Handle case where AI returns string 'null' instead of null
+    const finalCode: string | null = materialCode && materialCode !== 'null' ? normalizeMaterialCode(materialCode) : null;
 
     // Try cache first if available
     if (materialCache) {
@@ -847,7 +931,8 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
     let material: Material | null = null;
 
     // Priorizar el código extraído del PDF por OpenAI
-    const finalCode: string | null = materialCode ? normalizeMaterialCode(materialCode) : null;
+    // Handle case where AI returns string 'null' instead of null
+    const finalCode: string | null = materialCode && materialCode !== 'null' ? normalizeMaterialCode(materialCode) : null;
 
     // Buscar primero por código exacto
     if (finalCode) {
@@ -916,7 +1001,7 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
 
     if (!material) {
         // Generate a base code
-        const baseCode = materialCode || normalizedName.toLowerCase()
+        const baseCode = (materialCode && materialCode !== 'null') ? materialCode : normalizedName.toLowerCase()
             .normalize('NFD')
             .replace(/[\u0300-\u036f]/g, '') // Remove accents
             .replace(/[^a-z0-9\s]/g, '') // Remove special characters
@@ -949,7 +1034,7 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
                         code: codeToTry,
                         name: normalizedName,
                         category: category,
-                        referenceCode: materialCode, // Keep original code from PDF
+                        referenceCode: materialCode && materialCode !== 'null' ? materialCode : null, // Keep original code from PDF, but not string 'null'
                         ...(userId ? { user: { connect: { id: userId } } } : {}),
                     },
                 });
@@ -1206,6 +1291,14 @@ export async function createInvoiceFromFiles(
         throw new Error("No files provided.");
     }
 
+    if (files.length > MAX_FILES_PER_UPLOAD) {
+        throw new Error(`Too many files. Maximum allowed is ${MAX_FILES_PER_UPLOAD}.`);
+    }
+    const totalBytes = files.reduce((sum, f) => sum + (typeof f.size === 'number' ? f.size : 0), 0);
+    if (totalBytes > MAX_TOTAL_UPLOAD_BYTES) {
+        throw new Error(`Total upload size exceeds ${Math.round(MAX_TOTAL_UPLOAD_BYTES / 1024 / 1024)}MB.`);
+    }
+
     // Identify the current authenticated user so that all subsequent
     // provider/invoice creations are correctly scoped. Without this the UI
     // queries (which filter by userId) may fail to find newly created records
@@ -1254,6 +1347,15 @@ export async function createInvoiceFromFiles(
 
     for (let i = 0; i < files.length; i += CONCURRENCY_LIMIT) {
         const fileChunk = files.slice(i, i + CONCURRENCY_LIMIT);
+        // Validate files early to avoid unnecessary processing
+        const validatedChunk = fileChunk.map((file) => ({ file, validation: validateUploadFile(file) }));
+        const invalids = validatedChunk.filter(v => !v.validation.valid);
+        if (invalids.length > 0) {
+            for (const inv of invalids) {
+                allFileProcessingResults.push({ file: inv.file, extractedData: null, error: inv.validation.error || 'Invalid file', fileName: inv.file.name });
+            }
+        }
+        const validFiles = validatedChunk.filter(v => v.validation.valid).map(v => v.file);
         const batchNumber = Math.floor(i / CONCURRENCY_LIMIT) + 1;
         const totalBatches = Math.ceil(files.length / CONCURRENCY_LIMIT);
 
@@ -1298,16 +1400,9 @@ export async function createInvoiceFromFiles(
         }
 
 
-        const chunkExtractionPromises = fileChunk.map(async (file): Promise<ExtractedFileItem> => {
+        const chunkExtractionPromises = validFiles.map(async (file): Promise<ExtractedFileItem> => {
             console.log(`[Batch ${batchNumber}] Processing file for extraction: ${file.name}`);
-            if (file.size === 0) {
-                console.warn(`[Batch ${batchNumber}] Skipping empty file: ${file.name}`);
-                return { file, extractedData: null, error: "File is empty.", fileName: file.name };
-            }
-            if (file.type !== 'application/pdf') {
-                console.warn(`[Batch ${batchNumber}] Skipping non-PDF file: ${file.name}, type: ${file.type}`);
-                return { file, extractedData: null, error: "File is not a PDF.", fileName: file.name };
-            }
+            // Basic guards already applied by validateUploadFile
 
             try {
                 // Use the retry wrapper function
@@ -1416,7 +1511,7 @@ export async function createInvoiceFromFiles(
     for (const [cif, providerData] of uniqueProviders.entries()) {
         try {
             const provider = await prisma.$transaction(async (tx) => {
-                return await findOrCreateProviderTx(tx, providerData, undefined);
+                return await findOrCreateProviderTx(tx, providerData, user.id);
             });
             providerCache.set(cif, provider.id);
             console.log(`Pre-processed provider: ${provider.name} (${cif})`);
@@ -1437,7 +1532,8 @@ export async function createInvoiceFromFiles(
             category: true
         },
         take: 1000, // Limit to most recent/common materials to avoid memory issues
-        orderBy: { updatedAt: 'desc' }
+        orderBy: { updatedAt: 'desc' },
+        where: { userId: user.id }
     });
 
     const materialCache = new Map<string, { id: string; name: string; code: string; referenceCode: string | null; category: string | null }>();
@@ -2164,6 +2260,11 @@ export async function createManualInvoice(data: ManualInvoiceData): Promise<Crea
 // ---------------------------------------------------------------------------
 
 async function prepareBatchLine(file: File): Promise<string> {
+    // Validate file before heavy processing
+    const validation = validateUploadFile(file);
+    if (!validation.valid) {
+        throw new Error(validation.error || 'Invalid file');
+    }
     // 1️⃣  Read original file and compute base64 to send as inlineData to Gemini
     const buffer = Buffer.from(await file.arrayBuffer());
     const base64 = buffer.toString('base64');
@@ -2262,7 +2363,8 @@ async function buildBatchJsonl(files: File[]): Promise<string> {
 
     for (let i = 0; i < files.length; i += CONCURRENCY) {
         const chunk = files.slice(i, i + CONCURRENCY);
-        const chunkLines = await Promise.all(chunk.map(prepareBatchLine));
+        const validChunk = chunk.filter(f => validateUploadFile(f).valid);
+        const chunkLines = await Promise.all(validChunk.map(prepareBatchLine));
         lines.push(...chunkLines);
     }
     return lines.join("\n");
@@ -2294,7 +2396,7 @@ async function buildBatchJsonlChunks(files: File[]): Promise<JsonlChunk[]> {
 
     for (let i = 0; i < files.length; i += CONCURRENCY) {
         // Slice the next group of files and process them in parallel.
-        const slice = files.slice(i, i + CONCURRENCY);
+        const slice = files.slice(i, i + CONCURRENCY).filter(f => validateUploadFile(f).valid);
 
         const results = await Promise.all(
             slice.map(async (file) => {
@@ -2460,6 +2562,20 @@ export async function startInvoiceBatch(formDataWithFiles: FormData): Promise<{ 
         throw new Error('No files provided.');
     }
 
+    if (files.length > MAX_FILES_PER_UPLOAD) {
+        throw new Error(`Too many files. Maximum allowed is ${MAX_FILES_PER_UPLOAD}.`);
+    }
+    const totalBytes = files.reduce((sum, f) => sum + (typeof f.size === 'number' ? f.size : 0), 0);
+    if (totalBytes > MAX_TOTAL_UPLOAD_BYTES) {
+        throw new Error(`Total upload size exceeds ${Math.round(MAX_TOTAL_UPLOAD_BYTES / 1024 / 1024)}MB.`);
+    }
+
+    // Filter invalid files early
+    const validFiles = files.filter(f => validateUploadFile(f).valid);
+    if (validFiles.length === 0) {
+        throw new Error('No valid files to process. Ensure PDFs under the size limit.');
+    }
+
     // Get authenticated user for batch ownership
     const user = await requireAuth();
 
@@ -2469,7 +2585,7 @@ export async function startInvoiceBatch(formDataWithFiles: FormData): Promise<{ 
     const tempId = `temp-${randomUUID()}`;
 
     // 2️⃣  Launch heavy work in background (no await).
-    void processBatchInBackground(files, user.id).catch((err) => {
+    void processBatchInBackground(validFiles, user.id).catch((err) => {
         console.error('[startInvoiceBatch] Background batch failed', err);
     });
 
@@ -2499,7 +2615,7 @@ async function processBatchInBackground(files: File[], userId: string) {
             await fs.promises.writeFile(jsonlPath, chunk.content, 'utf8');
 
             // Upload file to Gemini with retry logic
-            let uploaded;
+            let uploaded: { name?: string; id?: string } | undefined;
             let uploadAttempts = 0;
             while (uploadAttempts < 3) {
                 try {
@@ -2511,8 +2627,7 @@ async function processBatchInBackground(files: File[], userId: string) {
                 } catch (error: unknown) {
                     uploadAttempts++;
                     if (uploadAttempts >= 3) throw error;
-                    const err = error as { status?: number; error?: { code?: number } };
-                    if (err?.status === 429 || err?.error?.code === 429) {
+                    if (isRateLimitError(error)) {
                         console.log(`[processBatchInBackground] Rate limit hit during file upload, waiting 2s before retry ${uploadAttempts}/3`);
                         await new Promise(resolve => setTimeout(resolve, 2000));
                     } else {
@@ -2522,7 +2637,7 @@ async function processBatchInBackground(files: File[], userId: string) {
             }
 
             // Create Gemini batch job with retry logic
-            let created;
+            let created: { name: string } | undefined;
             let batchAttempts = 0;
             // Ensure we have a valid file identifier from the upload response
             const fileIdentifier = (uploaded as { name?: string; id?: string } | undefined)?.name ?? (uploaded as { name?: string; id?: string } | undefined)?.id;
@@ -2540,8 +2655,7 @@ async function processBatchInBackground(files: File[], userId: string) {
                 } catch (error: unknown) {
                     batchAttempts++;
                     if (batchAttempts >= 3) throw error;
-                    const err = error as { status?: number; error?: { code?: number } };
-                    if (err?.status === 429 || err?.error?.code === 429) {
+                    if (isRateLimitError(error)) {
                         console.log(`[processBatchInBackground] Rate limit hit during batch creation, waiting 1s before retry ${batchAttempts}/3`);
                         await new Promise(resolve => setTimeout(resolve, 1000));
                     } else {
@@ -2570,29 +2684,12 @@ type GeminiDest = { file_name?: string; fileName?: string; inlined_responses?: A
 
 async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiDest) {
     const parseJsonString = (rawInput: string, context?: string): unknown => {
-        if (!rawInput) return null;
-        let raw = rawInput.trim();
-        if (raw.startsWith('```')) {
-            raw = raw.replace(/^```[a-zA-Z]*\s*/m, "").replace(/```\s*$/m, "").trim();
+        const parsed = parseJsonSafe(rawInput);
+        if (!parsed && context) {
+            const trimmed = (rawInput || '').trim();
+            console.error(`[Batch ${batchId}] Failed to parse JSON in ${context}. First 200 chars:`, trimmed.substring(0, 200));
         }
-        raw = raw.replace(/[\uFEFF\u200B-\u200D]/g, '');
-        if (raw.startsWith('{\\')) {
-            raw = raw
-                .replace(/\\"/g, '"')
-                .replace(/\\\\/g, '\\')
-                .replace(/\\n/g, '\n')
-                .replace(/\\r/g, '\r')
-                .replace(/\\t/g, '\t');
-        }
-        try { return JSON.parse(raw); } catch { }
-        const start = raw.indexOf('{');
-        const end = raw.lastIndexOf('}');
-        if (start !== -1 && end !== -1 && end > start) {
-            const slice = raw.slice(start, end + 1);
-            try { return JSON.parse(slice); } catch { }
-        }
-        if (context) console.error(`[Batch ${batchId}] Failed to parse JSON in ${context}. First 200 chars:`, raw.substring(0, 200));
-        return null;
+        return parsed;
     };
 
     // Supports file-based dest or inlined_responses
@@ -2713,8 +2810,8 @@ async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiDest) {
                     continue;
                 }
 
-                const extracted = parseJsonString(content, `extracted data for ${key ?? 'unknown'}`) as ExtractedPdfData;
-                if (!extracted) {
+                const extractedUnknown = parseJsonString(content, `extracted data for ${key ?? 'unknown'}`);
+                if (!extractedUnknown || !isExtractedPdfData(extractedUnknown)) {
                     const errorMsg = `Failed to parse extracted data JSON`;
                     console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (custom_id: ${parsed.custom_id ?? 'unknown'})`);
                     console.error(`[ingestBatchOutput] Raw content: ${content.substring(0, 500)}${content.length > 500 ? '...' : ''}`);
@@ -2727,6 +2824,7 @@ async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiDest) {
                     continue;
                 }
 
+                const extracted = extractedUnknown as ExtractedPdfData;
                 const result = await saveExtractedInvoice(extracted, key ?? undefined);
                 if (result.success) {
                     success++;
