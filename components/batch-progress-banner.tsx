@@ -18,6 +18,12 @@ export function BatchProgressBanner() {
     useEffect(() => {
         if (isLoading || batches.length === 0) return
 
+        console.log('Checking batch status and its current status:', {
+            totalBatches: batches.length,
+            batchStatuses: batches.map(b => ({ id: b.id, status: b.status })),
+            activeBatches: batches.filter(b => b.status === 'PENDING' || b.status === 'PROCESSING').length
+        })
+
         const previousBatches = previousBatchesRef.current
         const newlyCompletedBatches = previousBatches.filter(prevBatch =>
             prevBatch.status === 'PROCESSING' &&

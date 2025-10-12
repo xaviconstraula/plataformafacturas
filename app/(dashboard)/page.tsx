@@ -3,8 +3,8 @@ import Link from "next/link"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Overview } from "@/components/overview"
 import { PriceAlerts } from "@/components/price-alerts"
-import { HelpTooltip, helpContent } from "@/components/help-tooltip"
-import { WelcomeBanner } from "@/components/welcome-banner"
+import { HelpTooltip } from "@/components/help-tooltip"
+import { helpContent } from "@/components/help-content"
 import { getDashboardStats, getOverviewData } from "@/lib/actions/dashboard"
 import { ErrorBoundary } from "@/components/ui/error-boundary"
 import { DashboardStatsSkeleton, ChartSkeleton, PriceAlertsSkeleton } from "@/components/ui/skeleton"
@@ -87,9 +87,6 @@ export default function Home() {
             content={helpContent.dashboard.content}
           />
         </div>
-
-        {/* Welcome Banner */}
-        <WelcomeBanner />
 
         {/* Stats Section with individual loading */}
         <ErrorBoundary>

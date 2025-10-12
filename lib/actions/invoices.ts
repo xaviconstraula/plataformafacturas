@@ -93,6 +93,12 @@ interface ChatCompletionBody {
 // Gemini configuration
 const GEMINI_MODEL = "gemini-2.5-flash";
 
+// Regex helpers used to keep Gemini outputs constrained and avoid noisy payloads
+const CIF_REGEX = "^(?:ES)?[A-Z0-9][A-Z0-9\\-]{5,15}$";
+const ISO_DATE_REGEX = "^\\d{4}-\\d{2}-\\d{2}$";
+const PHONE_REGEX = "^(?:\\+?\\d{9,15})$";
+const WORK_ORDER_REGEX = "^(?:OT-)?[0-9A-Za-z]{3,12}$";
+
 
 
 // Batch Processing Types and Functions
@@ -102,36 +108,100 @@ const EXTRACTED_INVOICE_SCHEMA = {
     type: 'OBJECT',
     required: ['invoiceCode', 'provider', 'issueDate', 'totalAmount', 'items'],
     properties: {
-        invoiceCode: { type: 'STRING' },
+        invoiceCode: {
+            type: 'STRING',
+            minLength: 1,
+            maxLength: 80
+        },
         provider: {
             type: 'OBJECT',
-            required: ['name'],
+            required: ['name', 'cif'],
             properties: {
-                name: { type: 'STRING' },
-                cif: { type: 'STRING' },
-                email: { type: 'STRING' },
-                phone: { type: 'STRING' },
-                address: { type: 'STRING' }
+                name: {
+                    type: 'STRING',
+                    minLength: 1,
+                    maxLength: 160
+                },
+                cif: {
+                    type: 'STRING',
+                    pattern: CIF_REGEX,
+                    minLength: 9,
+                    maxLength: 10
+                },
+                email: {
+                    type: 'STRING',
+                    maxLength: 160,
+                    nullable: true
+                },
+                phone: {
+                    type: 'STRING',
+                    pattern: PHONE_REGEX,
+                    maxLength: 16,
+                    nullable: true
+                },
+                address: {
+                    type: 'STRING',
+                    maxLength: 200,
+                    nullable: true
+                }
             }
         },
-        issueDate: { type: 'STRING' },
-        totalAmount: { type: 'NUMBER' },
+        issueDate: {
+            type: 'STRING',
+            pattern: ISO_DATE_REGEX
+        },
+        totalAmount: {
+            type: 'NUMBER'
+        },
         items: {
             type: 'ARRAY',
+            minItems: 1,
             items: {
                 type: 'OBJECT',
-                required: ['materialName', 'quantity', 'unitPrice', 'totalPrice'],
+                required: ['materialName', 'quantity', 'unitPrice', 'totalPrice', 'isMaterial'],
                 properties: {
-                    materialName: { type: 'STRING' },
-                    materialCode: { type: 'STRING' },
-                    isMaterial: { type: 'BOOLEAN' },
-                    quantity: { type: 'NUMBER' },
-                    unitPrice: { type: 'NUMBER' },
-                    totalPrice: { type: 'NUMBER' },
-                    itemDate: { type: 'STRING' },
-                    workOrder: { type: 'STRING' },
-                    description: { type: 'STRING' },
-                    lineNumber: { type: 'NUMBER' }
+                    materialName: {
+                        type: 'STRING',
+                        minLength: 1,
+                        maxLength: 160
+                    },
+                    materialCode: {
+                        type: 'STRING',
+                        maxLength: 60,
+                        nullable: true
+                    },
+                    isMaterial: {
+                        type: 'BOOLEAN'
+                    },
+                    quantity: {
+                        type: 'NUMBER'
+                    },
+                    unitPrice: {
+                        type: 'NUMBER'
+                    },
+                    totalPrice: {
+                        type: 'NUMBER'
+                    },
+                    itemDate: {
+                        type: 'STRING',
+                        pattern: ISO_DATE_REGEX,
+                        nullable: true
+                    },
+                    workOrder: {
+                        type: 'STRING',
+                        pattern: WORK_ORDER_REGEX,
+                        maxLength: 20,
+                        nullable: true
+                    },
+                    description: {
+                        type: 'STRING',
+                        maxLength: 240,
+                        nullable: true
+                    },
+                    lineNumber: {
+                        type: 'NUMBER',
+                        nullable: true
+                    }
                 }
             }
         }

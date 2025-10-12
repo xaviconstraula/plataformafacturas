@@ -282,7 +282,7 @@ export async function processBatches() {
             await prisma.aIBatch.update({ where: { id: batch.id }, data: { status: 'FAILED', errorMessage: 'Gemini authentication failed' } });
             try {
               await createNotification({ userId: batch.admin.id, message: `El procesamiento por lotes ha fallado debido a un error de autenticación con Gemini.`, type: 'INVOICE_PROCESSING_FAILED', relatedId: batch.id });
-            } catch {}
+            } catch { }
           }
         }
       }));

@@ -3,7 +3,8 @@ import { AlertList } from "@/components/alert-list"
 import { getPriceAlerts } from "@/lib/actions/alertas"
 import { Pagination } from "@/components/ui/pagination"
 import { AlertStatusFilter } from "@/components/alert-status-filter"
-import { HelpTooltip, helpContent } from "@/components/help-tooltip"
+import { HelpTooltip } from "@/components/help-tooltip"
+import { helpContent } from "@/components/help-content"
 import { AlertsExcelExportButton } from "@/components/alerts-excel-export-button"
 
 interface SearchParams {
