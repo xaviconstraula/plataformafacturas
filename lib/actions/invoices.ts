@@ -2753,9 +2753,13 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
             try { const stats = await fs.promises.stat(downloadedPath); if (stats.isDirectory()) { throw new Error(`Downloaded path ${downloadedPath} is a directory, not a file`); } }
             catch (statErr) { throw new Error(`Cannot access file stats for ${downloadedPath}: ${statErr instanceof Error ? statErr.message : 'Unknown error'}`); }
             console.log(`[ingestBatchOutput] Using streaming parser for ${downloadedPath}`);
-            const fileText = await fs.promises.readFile(downloadedPath, 'utf8');
-            const lines = fileText.split(/\r?\n/);
-            const processingSucceeded = await processOutputLines(lines, parseJsonString);
+
+            // Use streaming JSONL parser to handle large files and avoid truncation issues
+            const { parseJsonLinesFromFile } = await import('@/lib/utils/jsonl-parser');
+            const parsedLines = await parseJsonLinesFromFile(downloadedPath);
+
+            // Process the parsed lines directly (they're already JSON objects)
+            const processingSucceeded = await processOutputLinesFromParsed(parsedLines, parseJsonString);
 
             // Only clean up the downloaded file if processing succeeded (no errors)
             if (processingSucceeded) {
@@ -2865,6 +2869,101 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                     lineIndex: i + 1,
                     error: errorMsg,
                     context: { rawLine: raw }
+                });
+                failed++;
+            }
+        }
+
+        await updateBatchProgress(batchId, {
+            successfulFiles: success,
+            failedFiles: failed,
+            processedFiles: success + failed,
+            completedAt: new Date(),
+            ...(errors.length > 0 ? { errors: JSON.parse(JSON.stringify(errors)) } : {}),
+        });
+
+        console.log(`[ingestBatchOutput] Persisted ${success} invoices, ${failed} errors for batch ${batchId}`);
+
+        if (errors.length > 0) {
+            console.error(`[ingestBatchOutput] Detailed errors for batch ${batchId}:`);
+            errors.forEach(({ lineIndex, error, context }) => {
+                console.error(`  Line ${lineIndex}: ${error}`);
+                if (context) {
+                    console.error(`    Context:`, context);
+                }
+            });
+        }
+
+        // Return true if no errors occurred, false otherwise
+        return errors.length === 0;
+    }
+
+    /**
+     * Process already-parsed JSONL objects (from streaming parser)
+     * This avoids the "Unterminated string" issue from splitting large text files
+     */
+    async function processOutputLinesFromParsed(parsedLines: unknown[], parseJsonString: (rawInput: string, context?: string) => unknown): Promise<boolean> {
+        let success = 0;
+        let failed = 0;
+        const errors: Array<{ lineIndex: number; error: string; context?: ErrorContext }> = [];
+
+        for (let i = 0; i < parsedLines.length; i++) {
+            const parsed = parsedLines[i] as Record<string, unknown>;
+
+            try {
+                // Gemini result line shape: { key, response: { candidates: [{ content: { parts: [{ text }] } }] }, error }
+                const response = parsed?.response as Record<string, unknown> | undefined;
+                const candidates = response?.candidates as Array<Record<string, unknown>> | undefined;
+                const content = (candidates?.[0]?.content as Record<string, unknown>)?.parts as Array<Record<string, unknown>> | undefined;
+                const text = content?.[0]?.text as string | undefined;
+                const key = parsed?.key as string | undefined;
+
+                if (!text) {
+                    const errorMsg = 'No content in Gemini response';
+                    console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (key: ${key ?? 'unknown'})`);
+                    errors.push({ lineIndex: i + 1, error: errorMsg, context: { custom_id: key } });
+                    failed++;
+                    continue;
+                }
+
+                const extractedUnknown = parseJsonString(text, `extracted data for ${key ?? 'unknown'}`);
+                if (!extractedUnknown || !isExtractedPdfData(extractedUnknown)) {
+                    const errorMsg = `Failed to parse extracted data JSON`;
+                    const customId = (parsed as Record<string, unknown>).custom_id as string | undefined;
+                    console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (custom_id: ${customId ?? 'unknown'})`);
+                    console.error(`[ingestBatchOutput] Raw content: ${text.substring(0, 500)}${text.length > 500 ? '...' : ''}`);
+                    errors.push({
+                        lineIndex: i + 1,
+                        error: errorMsg,
+                        context: { custom_id: customId, rawContent: text }
+                    });
+                    failed++;
+                    continue;
+                }
+
+                const extracted = extractedUnknown as ExtractedPdfData;
+                const result = await saveExtractedInvoice(extracted, key ?? undefined);
+                if (result.success) {
+                    success++;
+                } else {
+                    const errorMsg = `Failed to save invoice: ${result.message}`;
+                    console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (key: ${key ?? 'unknown'})`);
+                    console.error(`[ingestBatchOutput] Extracted data:`, JSON.stringify(extracted, null, 2));
+                    errors.push({
+                        lineIndex: i + 1,
+                        error: errorMsg,
+                        context: { custom_id: key, extractedData: extracted, result }
+                    });
+                    failed++;
+                }
+            } catch (err) {
+                const errorMsg = `Error processing line: ${(err as Error).message}`;
+                console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1}`);
+                console.error(`[ingestBatchOutput] Parsed object:`, JSON.stringify(parsed).substring(0, 500));
+                errors.push({
+                    lineIndex: i + 1,
+                    error: errorMsg,
+                    context: { rawLine: JSON.stringify(parsed).substring(0, 500) }
                 });
                 failed++;
             }
