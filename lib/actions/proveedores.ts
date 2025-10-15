@@ -225,7 +225,10 @@ export async function editProviderAction(providerId: string, data: {
         }
 
         await prisma.provider.update({
-            where: { id: providerId },
+            where: {
+                id: providerId,
+                userId: user.id
+            },
             data: {
                 name: data.name,
                 type: data.type,

@@ -59,7 +59,7 @@ export const POST = withAuthHandler(async (request: NextRequest, user) => {
 
         const includeDetails = body.includeDetails !== false; // Default to true
 
-        const buffer = await generateExcelReport(filters, includeDetails);
+        const buffer = await generateExcelReport(filters, includeDetails, user.id);
 
         // Generate filename with current date and work order info
         const now = new Date();
@@ -126,7 +126,7 @@ export const GET = withAuthHandler(async (request: NextRequest, user) => {
     const includeDetails = searchParams.get('includeDetails') !== 'false';
 
     try {
-        const buffer = await generateExcelReport(filters, includeDetails);
+        const buffer = await generateExcelReport(filters, includeDetails, user.id);
 
         const now = new Date();
         const dateStr = now.toISOString().split('T')[0];

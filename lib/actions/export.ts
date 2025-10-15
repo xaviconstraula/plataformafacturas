@@ -249,14 +249,17 @@ export interface MaterialDetailExport {
     'Nº Factura': string;
 }
 
-export async function exportDetailedInvoiceData(filters: ExportFilters = {}) {
-    const user = await requireAuth()
+export async function exportDetailedInvoiceData(filters: ExportFilters = {}, userId?: string) {
+    if (!userId) {
+        const user = await requireAuth()
+        userId = user.id
+    }
 
     const where: Prisma.InvoiceItemWhereInput = {
         ...buildWhereClause(filters),
         invoice: {
             provider: {
-                userId: user.id
+                userId: userId
             }
         }
     };
@@ -321,8 +324,20 @@ export interface MaterialDetailedExport {
 }
 
 // New detailed materials export function
-export async function exportMaterialsListDetailed(filters: ExportFilters = {}) {
-    const where: Prisma.InvoiceItemWhereInput = buildWhereClause(filters);
+export async function exportMaterialsListDetailed(filters: ExportFilters = {}, userId?: string) {
+    if (!userId) {
+        const user = await requireAuth()
+        userId = user.id
+    }
+
+    const where: Prisma.InvoiceItemWhereInput = {
+        ...buildWhereClause(filters),
+        invoice: {
+            provider: {
+                userId: userId
+            }
+        }
+    };
 
     const items = await prisma.invoiceItem.findMany({
         where,
@@ -461,52 +476,22 @@ export interface SupplierDetailedExport {
 }
 
 // New detailed suppliers export function
-export async function exportSuppliersListDetailed(filters: ExportFilters = {}) {
+export async function exportSuppliersListDetailed(filters: ExportFilters = {}, userId?: string) {
+    if (!userId) {
+        const user = await requireAuth()
+        userId = user.id
+    }
+
     // Normalize search parameters
     const normalizedSupplierCif = normalizeCifForComparison(filters.supplierCif);
 
     const where: Prisma.InvoiceItemWhereInput = {
-        ...(filters.supplierId ? { invoice: { providerId: filters.supplierId } } : {}),
-        ...((normalizedSupplierCif || filters.supplierCif) ? {
-            invoice: {
-                provider: {
-                    OR: [
-                        ...(filters.supplierCif ? [{ cif: { in: buildCifVariants(filters.supplierCif) } }] : []),
-                        ...(normalizedSupplierCif ? [{ cif: { contains: normalizedSupplierCif, mode: Prisma.QueryMode.insensitive } }] : [])
-                    ]
-                }
+        ...buildWhereClause(filters),
+        invoice: {
+            provider: {
+                userId: userId
             }
-        } : {}),
-        ...(filters.startDate || filters.endDate ? {
-            invoice: {
-                issueDate: {
-                    ...(filters.startDate ? { gte: filters.startDate } : {}),
-                    ...(filters.endDate ? { lte: filters.endDate } : {})
-                }
-            }
-        } : {}),
-        ...(filters.fiscalYear ? {
-            invoice: {
-                issueDate: {
-                    gte: new Date(filters.fiscalYear, 3, 1),
-                    lt: new Date(filters.fiscalYear + 1, 3, 1)
-                }
-            }
-        } : {}),
-        ...(filters.naturalYear ? {
-            invoice: {
-                issueDate: {
-                    gte: new Date(filters.naturalYear, 0, 1),
-                    lt: new Date(filters.naturalYear + 1, 0, 1)
-                }
-            }
-        } : {}),
-        ...(filters.workOrder || filters.materialId || filters.category || filters.materialSearch ? {
-            ...(processWorkOrderSearch(filters.workOrder) ? { workOrder: { contains: processWorkOrderSearch(filters.workOrder), mode: 'insensitive' } } : {}),
-            ...(filters.materialId ? { materialId: filters.materialId } : {}),
-            ...(normalizeSearch(filters.category) ? { material: { category: { contains: normalizeSearch(filters.category), mode: 'insensitive' } } } : {}),
-            ...(normalizeSearch(filters.materialSearch) ? { material: { name: { contains: normalizeSearch(filters.materialSearch), mode: 'insensitive' } } } : {})
-        } : {})
+        }
     };
 
     const items = await prisma.invoiceItem.findMany({
@@ -933,13 +918,23 @@ export async function exportMaterialDetail(filters: ExportFilters = {}) {
 }
 
 // Function to export material detail by work order for analytics
-export async function exportMaterialDetailByWorkOrder(filters: ExportFilters = {}) {
+export async function exportMaterialDetailByWorkOrder(filters: ExportFilters = {}, userId?: string) {
+    if (!userId) {
+        const user = await requireAuth()
+        userId = user.id
+    }
+
     const whereClause = buildWhereClause(filters);
 
     const items = await prisma.invoiceItem.findMany({
         where: {
             ...whereClause,
-            workOrder: { not: null } // Only items with work orders
+            workOrder: { not: null }, // Only items with work orders
+            invoice: {
+                provider: {
+                    userId: userId
+                }
+            }
         },
         include: {
             material: true,
@@ -1072,7 +1067,7 @@ export async function exportMaterialDetailByWorkOrder(filters: ExportFilters = {
     return exportData;
 }
 
-export async function generateExcelReport(filters: ExportFilters = {}, includeDetails = true) {
+export async function generateExcelReport(filters: ExportFilters = {}, includeDetails = true, userId?: string) {
     const workbook = XLSX.utils.book_new();
 
     // Check if this is a specific list export from dedicated pages
@@ -1083,7 +1078,7 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
     // If this is a work orders list export, create work orders summary and detailed sheets
     if (isWorkOrdersListExport) {
         // First sheet: Summary by work order (one row per work order)
-        const workOrdersSummary = await exportWorkOrdersListSummary(filters);
+        const workOrdersSummary = await exportWorkOrdersListSummary(filters, userId);
         if (workOrdersSummary.length > 0) {
             const summarySheet = createStyledWorksheet(workOrdersSummary, [
                 { wch: 20 }, // Orden de Trabajo
@@ -1102,7 +1097,7 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
         }
 
         // Second sheet: Detailed breakdown (each material purchase gets its own row)
-        const workOrdersDetailed = await exportWorkOrdersListDetailed(filters);
+        const workOrdersDetailed = await exportWorkOrdersListDetailed(filters, userId);
         if (workOrdersDetailed.length > 0) {
             const detailedSheet = createStyledWorksheet(workOrdersDetailed, [
                 { wch: 20 }, // Código OT
@@ -1124,7 +1119,7 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
     }
     // If this is a materials list export, create materials detailed analysis
     else if (isMaterialsListExport) {
-        const materialsData = await exportMaterialsListDetailed(filters);
+        const materialsData = await exportMaterialsListDetailed(filters, userId);
         if (materialsData.length > 0) {
             const materialsSheet = createStyledWorksheet(materialsData, [
                 { wch: 35 }, // Material
@@ -1146,7 +1141,7 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
     }
     // If this is a suppliers list export, create suppliers detailed analysis
     else if (isSuppliersListExport) {
-        const suppliersData = await exportSuppliersListDetailed(filters);
+        const suppliersData = await exportSuppliersListDetailed(filters, userId);
         if (suppliersData.length > 0) {
             const suppliersSheet = createStyledWorksheet(suppliersData, [
                 { wch: 25 }, // Proveedor
@@ -1171,7 +1166,7 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
         const workOrder = filters.workOrder;
 
         // 1. Analysis by Provider Sheet (with detailed items)
-        const providerData = await exportWorkOrderByProvider(workOrder);
+        const providerData = await exportWorkOrderByProvider(workOrder, userId);
         if (providerData.length > 0) {
             const providerSheet = createStyledWorksheet(providerData, [
                 { wch: 20 }, // Orden de Trabajo
@@ -1198,7 +1193,7 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
         }
 
         // 2. Analysis by Material Sheet (with detailed items)
-        const materialData = await exportWorkOrderByMaterial(workOrder);
+        const materialData = await exportWorkOrderByMaterial(workOrder, userId);
         if (materialData.length > 0) {
             const materialSheet = createStyledWorksheet(materialData, [
                 { wch: 20 }, // Orden de Trabajo
@@ -1224,7 +1219,7 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
         }
 
         // 3. Analysis by Month Sheet (with detailed items)
-        const monthData = await exportWorkOrderByMonth(workOrder);
+        const monthData = await exportWorkOrderByMonth(workOrder, userId);
         if (monthData.length > 0) {
             const monthSheet = createStyledWorksheet(monthData, [
                 { wch: 20 }, // Orden de Trabajo
@@ -1254,7 +1249,7 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
 
         // 4. Detailed Items Sheet
         if (includeDetails) {
-            const detailData = await exportDetailedInvoiceData(filters);
+            const detailData = await exportDetailedInvoiceData(filters, userId);
             if (detailData.length > 0) {
                 const detailSheet = createStyledWorksheet(detailData, [
                     { wch: 15 }, // Código Factura
@@ -1283,7 +1278,7 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
 
         if (isSupplierFocused) {
             // Enhanced supplier export with detailed analysis
-            const supplierDetailData = await exportSuppliersListDetailed(filters);
+            const supplierDetailData = await exportSuppliersListDetailed(filters, userId);
             if (supplierDetailData.length > 0) {
                 const supplierDetailSheet = createStyledWorksheet(supplierDetailData, [
                     { wch: 25 }, // Proveedor
@@ -1304,7 +1299,7 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
             }
         } else if (isMaterialFocused) {
             // Enhanced material export with detailed analysis
-            const materialDetailData = await exportMaterialsListDetailed(filters);
+            const materialDetailData = await exportMaterialsListDetailed(filters, userId);
             if (materialDetailData.length > 0) {
                 const materialDetailSheet = createStyledWorksheet(materialDetailData, [
                     { wch: 35 }, // Material
@@ -1327,7 +1322,7 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
             // General export with both detailed analyses
 
             // Add detailed supplier analysis
-            const supplierDetailData = await exportSuppliersListDetailed(filters);
+            const supplierDetailData = await exportSuppliersListDetailed(filters, userId);
             if (supplierDetailData.length > 0) {
                 const supplierDetailSheet = createStyledWorksheet(supplierDetailData, [
                     { wch: 25 }, // Proveedor
@@ -1348,7 +1343,7 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
             }
 
             // Add detailed material analysis
-            const materialDetailData = await exportMaterialsListDetailed(filters);
+            const materialDetailData = await exportMaterialsListDetailed(filters, userId);
             if (materialDetailData.length > 0) {
                 const materialDetailSheet = createStyledWorksheet(materialDetailData, [
                     { wch: 35 }, // Material
@@ -1373,7 +1368,7 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
         if (includeDetails) {
             // For analytics exports, use "Detalle por Material" by OT instead of "Items Detallados"
             if (filters.exportType === 'analytics') {
-                const materialDetailByOTData = await exportMaterialDetailByWorkOrder(filters);
+                const materialDetailByOTData = await exportMaterialDetailByWorkOrder(filters, userId);
                 if (materialDetailByOTData.length > 0) {
                     const materialDetailByOTSheet = createStyledWorksheet(materialDetailByOTData, [
                         { wch: 20 }, // Orden de Trabajo
@@ -1399,7 +1394,7 @@ export async function generateExcelReport(filters: ExportFilters = {}, includeDe
                 }
             } else {
                 // Default behavior: use "Items Detallados"
-                const detailData = await exportDetailedInvoiceData(filters);
+                const detailData = await exportDetailedInvoiceData(filters, userId);
                 if (detailData.length > 0) {
                     const detailSheet = createStyledWorksheet(detailData, [
                         { wch: 15 }, // Código Factura
@@ -1499,11 +1494,21 @@ export interface WorkOrderDetailedExport {
     'Fecha Factura': string;
 }
 
-export async function exportWorkOrdersListSummary(filters: ExportFilters = {}) {
+export async function exportWorkOrdersListSummary(filters: ExportFilters = {}, userId?: string) {
+    if (!userId) {
+        const user = await requireAuth()
+        userId = user.id
+    }
+
     // Build where clause exactly like the work orders page
     const normalizedSearch = normalizeSearch(filters.workOrder);
 
     const baseWhere: Prisma.InvoiceItemWhereInput = {
+        invoice: {
+            provider: {
+                userId: userId
+            }
+        },
         workOrder: {
             not: null,
             ...(normalizedSearch && { contains: normalizedSearch, mode: Prisma.QueryMode.insensitive })
@@ -1604,11 +1609,21 @@ export async function exportWorkOrdersListSummary(filters: ExportFilters = {}) {
     return exportData;
 }
 
-export async function exportWorkOrdersListDetailed(filters: ExportFilters = {}) {
+export async function exportWorkOrdersListDetailed(filters: ExportFilters = {}, userId?: string) {
+    if (!userId) {
+        const user = await requireAuth()
+        userId = user.id
+    }
+
     // Build where clause exactly like the work orders page
     const normalizedSearch = normalizeSearch(filters.workOrder);
 
     const baseWhere: Prisma.InvoiceItemWhereInput = {
+        invoice: {
+            provider: {
+                userId: userId
+            }
+        },
         workOrder: {
             not: null,
             ...(normalizedSearch && { contains: normalizedSearch, mode: Prisma.QueryMode.insensitive })
@@ -1740,9 +1755,21 @@ export async function exportWorkOrderSummary(workOrder: string) {
     }];
 }
 
-export async function exportWorkOrderByProvider(workOrder: string) {
+export async function exportWorkOrderByProvider(workOrder: string, userId?: string) {
+    if (!userId) {
+        const user = await requireAuth()
+        userId = user.id
+    }
+
     const items = await prisma.invoiceItem.findMany({
-        where: { workOrder: decodeURIComponent(workOrder) },
+        where: {
+            workOrder: decodeURIComponent(workOrder),
+            invoice: {
+                provider: {
+                    userId: userId
+                }
+            }
+        },
         include: {
             material: true,
             invoice: {
@@ -1852,9 +1879,21 @@ export async function exportWorkOrderByProvider(workOrder: string) {
     return exportData;
 }
 
-export async function exportWorkOrderByMaterial(workOrder: string) {
+export async function exportWorkOrderByMaterial(workOrder: string, userId?: string) {
+    if (!userId) {
+        const user = await requireAuth()
+        userId = user.id
+    }
+
     const items = await prisma.invoiceItem.findMany({
-        where: { workOrder: decodeURIComponent(workOrder) },
+        where: {
+            workOrder: decodeURIComponent(workOrder),
+            invoice: {
+                provider: {
+                    userId: userId
+                }
+            }
+        },
         include: {
             material: true,
             invoice: {
@@ -1962,9 +2001,21 @@ export async function exportWorkOrderByMaterial(workOrder: string) {
     return exportData;
 }
 
-export async function exportWorkOrderByMonth(workOrder: string) {
+export async function exportWorkOrderByMonth(workOrder: string, userId?: string) {
+    if (!userId) {
+        const user = await requireAuth()
+        userId = user.id
+    }
+
     const items = await prisma.invoiceItem.findMany({
-        where: { workOrder: decodeURIComponent(workOrder) },
+        where: {
+            workOrder: decodeURIComponent(workOrder),
+            invoice: {
+                provider: {
+                    userId: userId
+                }
+            }
+        },
         include: {
             material: true,
             invoice: {
