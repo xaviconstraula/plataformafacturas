@@ -255,14 +255,16 @@ export async function exportDetailedInvoiceData(filters: ExportFilters = {}, use
         userId = user.id
     }
 
-    const where: Prisma.InvoiceItemWhereInput = {
-        ...buildWhereClause(filters),
-        invoice: {
-            provider: {
-                userId: userId
+    const where: Prisma.InvoiceItemWhereInput = combineInvoiceItemConditions(
+        buildWhereClause(filters),
+        {
+            invoice: {
+                provider: {
+                    userId: userId
+                }
             }
         }
-    };
+    );
 
     const items = await prisma.invoiceItem.findMany({
         where,
@@ -315,9 +317,9 @@ export interface MaterialDetailedExport {
     'Tipo Proveedor': string;
     'OT/CECO': string;
     'Cantidad': number;
-    'Precio Unitario': string;
-    'Total Material (s/IVA)': string;
-    'Total Material (c/IVA)': string;
+    'Precio Unitario': number;
+    'Total Material (s/IVA)': number;
+    'Total Material (c/IVA)': number;
     'Fecha Item': string;
     'Nº Factura': string;
     'Fecha Factura': string;
@@ -330,14 +332,16 @@ export async function exportMaterialsListDetailed(filters: ExportFilters = {}, u
         userId = user.id
     }
 
-    const where: Prisma.InvoiceItemWhereInput = {
-        ...buildWhereClause(filters),
-        invoice: {
-            provider: {
-                userId: userId
+    const where: Prisma.InvoiceItemWhereInput = combineInvoiceItemConditions(
+        buildWhereClause(filters),
+        {
+            invoice: {
+                provider: {
+                    userId: userId
+                }
             }
         }
-    };
+    );
 
     const items = await prisma.invoiceItem.findMany({
         where,
@@ -373,24 +377,9 @@ export async function exportMaterialsListDetailed(filters: ExportFilters = {}, u
             'Tipo Proveedor': item.invoice.provider.type === 'MATERIAL_SUPPLIER' ? 'Suministro Material' : 'Alquiler Maquinaria',
             'OT/CECO': item.workOrder || '',
             'Cantidad': item.quantity.toNumber(),
-            'Precio Unitario': item.unitPrice.toNumber().toLocaleString('es-ES', {
-                style: 'currency',
-                currency: 'EUR',
-                minimumFractionDigits: 4,
-                maximumFractionDigits: 4
-            }),
-            'Total Material (s/IVA)': basePrice.toLocaleString('es-ES', {
-                style: 'currency',
-                currency: 'EUR',
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 2
-            }),
-            'Total Material (c/IVA)': priceWithIva.toLocaleString('es-ES', {
-                style: 'currency',
-                currency: 'EUR',
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 2
-            }),
+            'Precio Unitario': item.unitPrice.toNumber(),
+            'Total Material (s/IVA)': basePrice,
+            'Total Material (c/IVA)': priceWithIva,
             'Fecha Item': item.itemDate.toLocaleDateString('es-ES'),
             'Nº Factura': item.invoice.invoiceCode,
             'Fecha Factura': item.invoice.issueDate.toLocaleDateString('es-ES')
@@ -467,9 +456,9 @@ export interface SupplierDetailedExport {
     'Código Material': string;
     'OT/CECO': string;
     'Cantidad': number;
-    'Precio Unitario': string;
-    'Total Material (s/IVA)': string;
-    'Total Material (c/IVA)': string;
+    'Precio Unitario': number;
+    'Total Material (s/IVA)': number;
+    'Total Material (c/IVA)': number;
     'Fecha Item': string;
     'Nº Factura': string;
     'Fecha Factura': string;
@@ -485,14 +474,16 @@ export async function exportSuppliersListDetailed(filters: ExportFilters = {}, u
     // Normalize search parameters
     const normalizedSupplierCif = normalizeCifForComparison(filters.supplierCif);
 
-    const where: Prisma.InvoiceItemWhereInput = {
-        ...buildWhereClause(filters),
-        invoice: {
-            provider: {
-                userId: userId
+    const where: Prisma.InvoiceItemWhereInput = combineInvoiceItemConditions(
+        buildWhereClause(filters),
+        {
+            invoice: {
+                provider: {
+                    userId: userId
+                }
             }
         }
-    };
+    );
 
     const items = await prisma.invoiceItem.findMany({
         where,
@@ -528,24 +519,9 @@ export async function exportSuppliersListDetailed(filters: ExportFilters = {}, u
             'Código Material': item.material.code,
             'OT/CECO': item.workOrder || '',
             'Cantidad': item.quantity.toNumber(),
-            'Precio Unitario': item.unitPrice.toNumber().toLocaleString('es-ES', {
-                style: 'currency',
-                currency: 'EUR',
-                minimumFractionDigits: 4,
-                maximumFractionDigits: 4
-            }),
-            'Total Material (s/IVA)': basePrice.toLocaleString('es-ES', {
-                style: 'currency',
-                currency: 'EUR',
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 2
-            }),
-            'Total Material (c/IVA)': priceWithIva.toLocaleString('es-ES', {
-                style: 'currency',
-                currency: 'EUR',
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 2
-            }),
+            'Precio Unitario': item.unitPrice.toNumber(),
+            'Total Material (s/IVA)': basePrice,
+            'Total Material (c/IVA)': priceWithIva,
             'Fecha Item': item.itemDate.toLocaleDateString('es-ES'),
             'Nº Factura': item.invoice.invoiceCode,
             'Fecha Factura': item.invoice.issueDate.toLocaleDateString('es-ES')
@@ -650,7 +626,10 @@ export async function exportSupplierSummary(filters: ExportFilters = {}) {
 }
 
 export async function exportSupplierDetail(filters: ExportFilters = {}) {
-    const where = buildWhereClause(filters);
+    const where = combineInvoiceItemConditions(
+        buildWhereClause(filters),
+        filters.supplierId ? {} : {}
+    )
 
     // Get all invoice items with supplier information
     const items = await prisma.invoiceItem.findMany({
@@ -780,7 +759,10 @@ export async function exportSupplierDetail(filters: ExportFilters = {}) {
 }
 
 export async function exportMaterialDetail(filters: ExportFilters = {}) {
-    const where = buildWhereClause(filters);
+    const where = combineInvoiceItemConditions(
+        buildWhereClause(filters),
+        {} // Placeholder; will be refined when user context is available
+    )
 
     // Get all invoice items with material information
     const items = await prisma.invoiceItem.findMany({
@@ -1477,6 +1459,20 @@ function buildWhereClause(filters: ExportFilters): Prisma.InvoiceItemWhereInput 
     };
 }
 
+function combineInvoiceItemConditions(...conditions: Prisma.InvoiceItemWhereInput[]): Prisma.InvoiceItemWhereInput {
+    const validConditions = conditions.filter(condition => condition && Object.keys(condition).length > 0)
+
+    if (validConditions.length === 0) {
+        return {}
+    }
+
+    if (validConditions.length === 1) {
+        return validConditions[0]
+    }
+
+    return { AND: validConditions }
+}
+
 // Interface for detailed work order analysis with material breakdown
 export interface WorkOrderDetailedExport {
     'Código OT': string;
@@ -1486,9 +1482,9 @@ export interface WorkOrderDetailedExport {
     'Material': string;
     'Código Material': string;
     'Cantidad': number;
-    'Precio Unitario': string;
-    'Total Material (s/IVA)': string;
-    'Total Material (c/IVA)': string;
+    'Precio Unitario': number;
+    'Total Material (s/IVA)': number;
+    'Total Material (c/IVA)': number;
     'Fecha Item': string;
     'Nº Factura': string;
     'Fecha Factura': string;
@@ -1688,24 +1684,9 @@ export async function exportWorkOrdersListDetailed(filters: ExportFilters = {}, 
             'Material': item.material.name,
             'Código Material': item.material.code,
             'Cantidad': item.quantity.toNumber(),
-            'Precio Unitario': item.unitPrice.toNumber().toLocaleString('es-ES', {
-                style: 'currency',
-                currency: 'EUR',
-                minimumFractionDigits: 4,
-                maximumFractionDigits: 4
-            }),
-            'Total Material (s/IVA)': basePrice.toLocaleString('es-ES', {
-                style: 'currency',
-                currency: 'EUR',
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 2
-            }),
-            'Total Material (c/IVA)': priceWithIva.toLocaleString('es-ES', {
-                style: 'currency',
-                currency: 'EUR',
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 2
-            }),
+            'Precio Unitario': item.unitPrice.toNumber(),
+            'Total Material (s/IVA)': basePrice,
+            'Total Material (c/IVA)': priceWithIva,
             'Fecha Item': item.itemDate.toLocaleDateString('es-ES'),
             'Nº Factura': item.invoice.invoiceCode,
             'Fecha Factura': item.invoice.issueDate.toLocaleDateString('es-ES')

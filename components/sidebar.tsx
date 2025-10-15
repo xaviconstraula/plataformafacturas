@@ -135,7 +135,7 @@ export default function Sidebar() {
             <div className="mb-3">
               <UserMenu />
             </div>
-            <p className="text-xs text-muted-foreground font-nexa-light text-center">© 2025 Constraula</p>
+
           </div>
         </div>
       </div>
