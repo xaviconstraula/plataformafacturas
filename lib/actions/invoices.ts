@@ -271,6 +271,87 @@ export async function updateBatchProgress(
 }
 
 // Get active batch processing records
+// Background batch status checker for cron jobs/webhooks
+export async function checkAndUpdateBatchStatuses(): Promise<{
+    processedBatches: number
+    completedBatches: number
+}> {
+    console.log('[checkAndUpdateBatchStatuses] Starting batch status check...')
+
+    // Get all active batches across all users (for background processing)
+    const activeBatches = await prisma.batchProcessing.findMany({
+        where: {
+            status: {
+                in: ['PENDING', 'PROCESSING']
+            }
+        }
+    });
+
+    let processedBatches = 0;
+    let completedBatches = 0;
+
+    for (const batch of activeBatches) {
+        try {
+            processedBatches++;
+
+            // Check Gemini batch status
+            let remote;
+            let attempts = 0;
+            while (attempts < 3) {
+                try {
+                    remote = await gemini.batches.get({ name: batch.id }) as GeminiBatchStatus;
+                    break;
+                } catch (error: unknown) {
+                    attempts++;
+                    if (attempts >= 3) throw error;
+                    if (isRateLimitError(error)) {
+                        await new Promise(resolve => setTimeout(resolve, 3000));
+                    } else {
+                        throw error;
+                    }
+                }
+            }
+
+            // Map Gemini state → local BatchStatus
+            const state = remote?.state as string | undefined;
+            const statusMap: Record<string, BatchStatus> = {
+                JOB_STATE_PENDING: 'PENDING',
+                JOB_STATE_RUNNING: 'PROCESSING',
+                JOB_STATE_SUCCEEDED: 'COMPLETED',
+                JOB_STATE_FAILED: 'FAILED',
+                JOB_STATE_EXPIRED: 'FAILED',
+                JOB_STATE_CANCELLED: 'CANCELLED',
+            };
+            const newStatus = state ? statusMap[state] ?? batch.status : batch.status;
+
+            // Update batch with new status and counts
+            const rc = (remote?.request_counts ?? remote?.requestCounts ?? {});
+            await updateBatchProgress(batch.id, {
+                status: newStatus,
+                processedFiles: rc.completed !== undefined || rc.failed !== undefined ? (rc.completed ?? 0) + (rc.failed ?? 0) : undefined,
+                successfulFiles: rc.completed,
+                failedFiles: rc.failed,
+            });
+
+            // If batch completed, ingest results
+            if (newStatus === 'COMPLETED' && !batch.completedAt && remote?.dest) {
+                await ingestBatchOutputFromGemini(batch.id, remote.dest);
+                completedBatches++;
+                console.log(`[checkAndUpdateBatchStatuses] Completed batch ${batch.id}`);
+            } else if (newStatus === 'FAILED') {
+                completedBatches++;
+                console.log(`[checkAndUpdateBatchStatuses] Failed batch ${batch.id}`);
+            }
+
+        } catch (err) {
+            console.error(`[checkAndUpdateBatchStatuses] Failed to check batch ${batch.id}:`, err);
+        }
+    }
+
+    console.log(`[checkAndUpdateBatchStatuses] Finished. Processed ${processedBatches} batches, ${completedBatches} completed.`);
+    return { processedBatches, completedBatches };
+}
+
 export async function getActiveBatches(): Promise<BatchProgressInfo[]> {
     const user = await requireAuth();
 
