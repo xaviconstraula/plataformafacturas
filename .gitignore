@@ -12,6 +12,7 @@
 
 # generated
 /generated
+/example_gemini
 
 # testing
 /coverage

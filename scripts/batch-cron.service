@@ -1,0 +1,15 @@
+[Unit]
+Description=Facturas Facil Batch Cron Checker
+After=network.target
+Wants=network.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/facturasfacil
+ExecStart=/home/ubuntu/facturasfacil/scripts/run-batch-check.sh
+StandardOutput=append:/home/ubuntu/facturasfacil/logs/batch-cron.log
+StandardError=append:/home/ubuntu/facturasfacil/logs/batch-cron.log
+
+[Install]
+WantedBy=multi-user.target

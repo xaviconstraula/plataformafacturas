@@ -2700,7 +2700,7 @@ async function processBatchInBackground(files: File[], userId: string) {
 interface GeminiInlineResponse { key?: string; response?: { text?: string }; error?: unknown }
 type GeminiDest = { file_name?: string; fileName?: string; inlined_responses?: Array<GeminiInlineResponse>; inlinedResponses?: Array<GeminiInlineResponse> } | undefined | null;
 
-async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiDest) {
+export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiDest) {
     const parseJsonString = (rawInput: string, context?: string): unknown => {
         const parsed = parseJsonSafe(rawInput);
         if (!parsed && context) {
@@ -2875,6 +2875,7 @@ async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiDest) {
             failedFiles: failed,
             processedFiles: success + failed,
             completedAt: new Date(),
+            ...(errors.length > 0 ? { errors: JSON.parse(JSON.stringify(errors)) } : {}),
         });
 
         console.log(`[ingestBatchOutput] Persisted ${success} invoices, ${failed} errors for batch ${batchId}`);
