@@ -113,80 +113,89 @@ export default async function SupplierDetailPage({ params, searchParams }: Suppl
         includeMonthlyBreakdown: true
     }
 
-    const [supplierAnalyticsResult, workOrdersData, categories, workOrdersForFilters, filteredInvoices] = await Promise.all([
+    // Group database queries to reduce connection pool pressure
+    const [supplierAnalyticsResult, workOrdersData, dbData] = await Promise.all([
         getSupplierAnalytics(filters).then(analytics => analytics.length > 0 ? analytics[0] : null),
         getWorkOrdersForSuppliers(filters),
-        // Get material categories for filters
-        prisma.material.findMany({
-            select: { category: true },
-            where: {
-                userId: user.id,
-                category: { not: null },
-                invoiceItems: {
-                    some: {
-                        invoice: {
-                            providerId: resolvedParams.id,
-                            provider: { userId: user.id }
-                        }
-                    }
-                }
-            },
-            distinct: ['category'],
-            take: 100
-        }).then(results => results.map(r => r.category!).filter(Boolean)),
-        // Get work orders for this supplier for filters
-        prisma.invoiceItem.findMany({
-            select: { workOrder: true },
-            where: {
-                workOrder: { not: null },
-                material: { userId: user.id },
-                invoice: {
-                    providerId: resolvedParams.id,
-                    provider: { userId: user.id }
-                }
-            },
-            distinct: ['workOrder'],
-            take: 500
-        }).then(results => results.map(r => r.workOrder!).filter(Boolean)),
-        // Get filtered invoices for the invoices tab
-        prisma.invoice.findMany({
-            where: {
-                providerId: resolvedParams.id,
-                provider: { userId: user.id },
-                ...(filters.startDate || filters.endDate ? {
-                    issueDate: {
-                        ...(filters.startDate ? { gte: filters.startDate } : {}),
-                        ...(filters.endDate ? { lte: filters.endDate } : {})
-                    }
-                } : {}),
-                ...(filters.workOrder || filters.materialCategory ? {
-                    items: {
+        // Group all Prisma queries in a single transaction to share one connection
+        prisma.$transaction([
+            // Get material categories for filters
+            prisma.material.findMany({
+                select: { category: true },
+                where: {
+                    userId: user.id,
+                    category: { not: null },
+                    invoiceItems: {
                         some: {
-                            material: { userId: user.id },
-                            ...(filters.workOrder ? { workOrder: { contains: filters.workOrder, mode: 'insensitive' } } : {}),
-                            ...(filters.materialCategory ? { material: { category: { contains: filters.materialCategory, mode: 'insensitive' } } } : {})
+                            invoice: {
+                                providerId: resolvedParams.id,
+                                provider: { userId: user.id }
+                            }
                         }
                     }
-                } : {})
-            },
-            include: {
-                items: {
-                    include: {
-                        material: true
-                    },
+                },
+                distinct: ['category'],
+                take: 100
+            }),
+            // Get work orders for this supplier for filters
+            prisma.invoiceItem.findMany({
+                select: { workOrder: true },
+                where: {
+                    workOrder: { not: null },
+                    material: { userId: user.id },
+                    invoice: {
+                        providerId: resolvedParams.id,
+                        provider: { userId: user.id }
+                    }
+                },
+                distinct: ['workOrder'],
+                take: 500
+            }),
+            // Get filtered invoices for the invoices tab
+            prisma.invoice.findMany({
+                where: {
+                    providerId: resolvedParams.id,
+                    provider: { userId: user.id },
+                    ...(filters.startDate || filters.endDate ? {
+                        issueDate: {
+                            ...(filters.startDate ? { gte: filters.startDate } : {}),
+                            ...(filters.endDate ? { lte: filters.endDate } : {})
+                        }
+                    } : {}),
                     ...(filters.workOrder || filters.materialCategory ? {
-                        where: {
-                            material: { userId: user.id },
-                            ...(filters.workOrder ? { workOrder: { contains: filters.workOrder, mode: 'insensitive' } } : {}),
-                            ...(filters.materialCategory ? { material: { category: { contains: filters.materialCategory, mode: 'insensitive' } } } : {})
+                        items: {
+                            some: {
+                                material: { userId: user.id },
+                                ...(filters.workOrder ? { workOrder: { contains: filters.workOrder, mode: 'insensitive' } } : {}),
+                                ...(filters.materialCategory ? { material: { category: { contains: filters.materialCategory, mode: 'insensitive' } } } : {})
+                            }
                         }
                     } : {})
-                }
-            },
-            orderBy: { issueDate: 'desc' },
-            take: 20 // Limit to recent invoices
-        })
+                },
+                include: {
+                    items: {
+                        include: {
+                            material: true
+                        },
+                        ...(filters.workOrder || filters.materialCategory ? {
+                            where: {
+                                material: { userId: user.id },
+                                ...(filters.workOrder ? { workOrder: { contains: filters.workOrder, mode: 'insensitive' } } : {}),
+                                ...(filters.materialCategory ? { material: { category: { contains: filters.materialCategory, mode: 'insensitive' } } } : {})
+                            }
+                        } : {})
+                    }
+                },
+                orderBy: { issueDate: 'desc' },
+                take: 20 // Limit to recent invoices
+            })
+        ])
     ])
+
+    // Extract results from transaction
+    const [categoriesRaw, workOrdersForFiltersRaw, filteredInvoices] = dbData
+    const categories = categoriesRaw.map(r => r.category!).filter(Boolean)
+    const workOrdersForFilters = workOrdersForFiltersRaw.map(r => r.workOrder!).filter(Boolean)
 
     // Check if supplier analytics exist
     if (!supplierAnalyticsResult) {
