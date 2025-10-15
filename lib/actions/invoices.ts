@@ -321,7 +321,6 @@ export async function getActiveBatches(): Promise<BatchProgressInfo[]> {
                         attempts++;
                         if (attempts >= 3) throw error;
                         if (isRateLimitError(error)) {
-                            console.log(`[getActiveBatches] Rate limit hit for batch ${batch.id}, waiting 3s before retry ${attempts}/3`);
                             await new Promise(resolve => setTimeout(resolve, 3000));
                         } else {
                             throw error;
@@ -409,7 +408,6 @@ export async function cleanupOldBatches(): Promise<void> {
         });
 
         if (result.count > 0) {
-            console.log(`Cleaned up ${result.count} old batch processing records`);
         }
     } catch (error) {
         console.error("Error cleaning up old batch records:", error);
@@ -507,7 +505,6 @@ function isBlockedProvider(providerName: string): boolean {
 
 async function callPdfExtractAPI(file: File): Promise<CallPdfExtractAPIResponse> {
     try {
-        console.log(`Starting PDF extraction for file: ${file.name}`);
         const validation = validateUploadFile(file);
         if (!validation.valid) {
             console.warn(`Validation failed for ${file.name}: ${validation.error}`);
@@ -578,7 +575,6 @@ JSON format:
   }]
 }`;
 
-        console.log(`Calling Gemini API for file: ${file.name}`);
 
         const result = await gemini.models.generateContent({
             model: GEMINI_MODEL,
@@ -594,7 +590,10 @@ JSON format:
             config: {
                 responseMimeType: 'application/json',
                 responseSchema: EXTRACTED_INVOICE_SCHEMA,
-                temperature: 0.1,
+                temperature: 0.2,
+                topP: 0.8,
+                topK: 40,
+                maxOutputTokens: 8192,
                 candidateCount: 1
             }
         });
@@ -615,7 +614,6 @@ JSON format:
                 return { extractedData: null, error: "Invalid AI response format." };
             }
             const extractedData = parsed as ExtractedPdfData;
-            console.log(`Successfully parsed Gemini JSON response for file: ${file.name}. Items extracted: ${extractedData.items?.length || 0}`);
 
             if (!extractedData.invoiceCode || !extractedData.provider?.cif || !extractedData.issueDate || typeof extractedData.totalAmount !== 'number') {
                 console.warn(`Response for ${file.name} missing crucial invoice-level data. Data: ${JSON.stringify(extractedData)}`);
@@ -770,8 +768,6 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
 
         // If we found an existing provider, update it with the latest information
         if (existingProvider) {
-            console.log(`Found existing provider by ${matchType}: "${existingProvider.name}" (CIF: ${existingProvider.cif}) -> updating with new data: "${name}" (CIF: ${cif})`);
-
             const updatedProvider = await tx.provider.update({
                 where: { id: existingProvider.id },
                 data: {
@@ -784,12 +780,10 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
                 }
             });
 
-            console.log(`Updated existing provider found by ${matchType}: ${updatedProvider.name} (CIF: ${updatedProvider.cif})`);
             return updatedProvider;
         }
 
         // No existing provider found, create a new one
-        console.log(`No existing provider found for name: "${name}", CIF: "${cif}", phone: "${phone}". Creating new provider.`);
 
         // Since we already checked for existence scoped by user, we can create directly
         let createData: Prisma.ProviderCreateInput = {
@@ -816,15 +810,12 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
             data: createData,
         });
 
-        console.log(`Created new provider: ${name} (CIF: ${cif})`);
         return newProvider;
 
     } catch (error) {
         // Handle unique constraint violations that might still occur due to race conditions
         if (typeof error === 'object' && error !== null && 'code' in error &&
             (error as { code: string }).code === 'P2002') {
-
-            console.log(`Race condition detected for provider CIF ${cif}, performing comprehensive search...`);
 
             // P2002 means a unique constraint was violated, likely the CIF
             // Another transaction might have created a provider with this CIF or a similar one
@@ -837,7 +828,6 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
             });
 
             if (existingProvider) {
-                console.log(`Found provider after race condition by exact CIF: ${existingProvider.name} (CIF: ${cif})`);
                 return existingProvider;
             }
 
@@ -860,7 +850,6 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
             });
 
             if (existingProvider) {
-                console.log(`Found provider after race condition by name: ${existingProvider.name} (CIF: ${existingProvider.cif}) - updating with new CIF: ${cif}`);
                 // Update the existing provider with the new CIF if needed
                 const updatedProvider = await tx.provider.update({
                     where: { id: existingProvider.id },
@@ -889,7 +878,6 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
                 });
 
                 if (existingProvider) {
-                    console.log(`Found provider after race condition by phone: ${existingProvider.name} (CIF: ${existingProvider.cif}) - updating with new CIF: ${cif}`);
                     const updatedProvider = await tx.provider.update({
                         where: { id: existingProvider.id },
                         data: {
@@ -911,7 +899,6 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
             });
             for (const candidate of allProviders) {
                 if (areProviderNamesSimilar(name, candidate.name)) {
-                    console.log(`Found provider after race condition by similar name: ${candidate.name} (CIF: ${candidate.cif}) - updating with new data`);
                     const updatedProvider = await tx.provider.update({
                         where: { id: candidate.id },
                         data: {
@@ -929,7 +916,6 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
 
             // If we still haven't found anything, the race condition might have resolved
             // Try one more time to create the provider
-            console.log(`No existing provider found after race condition, attempting final creation for ${name} (CIF: ${cif})`);
             throw error; // Re-throw to let the caller handle it
         }
 
@@ -959,13 +945,11 @@ async function findOrCreateMaterialTxWithCache(
         if (finalCode) {
             const cachedByCode = materialCache.get(`code:${finalCode}`);
             if (cachedByCode) {
-                console.log(`Found material in cache by code: "${finalCode}" -> "${cachedByCode.name}"`);
                 return await tx.material.findUnique({ where: { id: cachedByCode.id } }) as Material;
             }
 
             const cachedByRef = materialCache.get(`ref:${finalCode}`);
             if (cachedByRef) {
-                console.log(`Found material in cache by reference code: "${finalCode}" -> "${cachedByRef.name}"`);
                 return await tx.material.findUnique({ where: { id: cachedByRef.id } }) as Material;
             }
         }
@@ -973,7 +957,6 @@ async function findOrCreateMaterialTxWithCache(
         // Search by name
         const cachedByName = materialCache.get(`name:${normalizedName.toLowerCase()}`);
         if (cachedByName) {
-            console.log(`Found material in cache by name: "${normalizedName}" -> "${cachedByName.name}"`);
             return await tx.material.findUnique({ where: { id: cachedByName.id } }) as Material;
         }
 
@@ -983,7 +966,6 @@ async function findOrCreateMaterialTxWithCache(
                 if (key.startsWith('code:') || key.startsWith('ref:')) {
                     const cacheCode = key.substring(key.indexOf(':') + 1);
                     if (areMaterialCodesSimilar(finalCode, cacheCode)) {
-                        console.log(`Found material in cache with similar code: "${cacheCode}" vs "${finalCode}" for material "${materialName}"`);
                         return await tx.material.findUnique({ where: { id: cachedMaterial.id } }) as Material;
                     }
                 }
@@ -1010,7 +992,6 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
         });
 
         if (material) {
-            console.log(`Found existing material by exact code: "${finalCode}" -> "${material.name}"`);
             return material;
         }
     }
@@ -1022,7 +1003,6 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
         });
 
         if (material) {
-            console.log(`Found existing material by reference code: "${finalCode}" -> "${material.name}"`);
             return material;
         }
     }
@@ -1033,7 +1013,6 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
     });
 
     if (material) {
-        console.log(`Found existing material by exact name: "${normalizedName}" -> "${material.name}"`);
         return material;
     }
 
@@ -1047,7 +1026,6 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
         for (const existingMaterial of allMaterials) {
             // Verificar similitud por código solo si ambos códigos son largos
             if (existingMaterial.code && areMaterialCodesSimilar(finalCode, existingMaterial.code)) {
-                console.log(`Found material with similar code: "${existingMaterial.code}" vs "${finalCode}" for material "${materialName}"`);
                 material = await tx.material.findUnique({
                     where: { id: existingMaterial.id }
                 });
@@ -1056,7 +1034,6 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
 
             // También verificar con referenceCode
             if (existingMaterial.referenceCode && areMaterialCodesSimilar(finalCode, existingMaterial.referenceCode)) {
-                console.log(`Found material with similar reference code: "${existingMaterial.referenceCode}" vs "${finalCode}" for material "${materialName}"`);
                 material = await tx.material.findUnique({
                     where: { id: existingMaterial.id }
                 });
@@ -1093,7 +1070,6 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
 
             if (existingMaterialWithCode) {
                 attempts++;
-                console.log(`Material code '${codeToTry}' already exists. Attempt ${attempts} of ${maxAttempts}. Trying next suffix...`);
                 continue; // Move to the next attempt with a new suffix
             }
 
@@ -1113,7 +1089,6 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
                 // transaction created a material with the same code *after* our check but *before* our create.
                 if (typeof error === 'object' && error !== null && 'code' in error && (error as { code: string }).code === 'P2002') {
                     attempts++;
-                    console.log(`Caught race condition for material code '${codeToTry}'. Attempt ${attempts} of ${maxAttempts}. Retrying...`);
                     // The loop will continue, and our check at the top will now find the conflicting material.
                 } else {
                     // For any other error, we must re-throw to abort the transaction.
@@ -1210,7 +1185,6 @@ async function processInvoiceItemTx(
 
         if (previousInvoiceItemRecord) {
             const previousPrice = previousInvoiceItemRecord.unitPrice;
-            console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Previous price from ${previousInvoiceItemRecord.itemDate.toISOString()}: ${previousPrice}. Current unit price from ${effectiveDate.toISOString()}: ${currentUnitPriceDecimal}.`);
 
             if (!currentUnitPriceDecimal.equals(previousPrice)) {
                 const priceDiff = currentUnitPriceDecimal.minus(previousPrice);
@@ -1250,7 +1224,7 @@ async function processInvoiceItemTx(
                         // Manejar error de constraint único
                         if (typeof alertError === 'object' && alertError !== null && 'code' in alertError &&
                             (alertError as { code: string }).code === 'P2002') {
-                            console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Price alert already exists (caught constraint violation). Skipping duplicate creation.`);
+                            // Price alert already exists (constraint violation). Skipping duplicate creation.
                         } else {
                             // Re-lanzar otros errores
                             throw alertError;
@@ -1273,7 +1247,6 @@ async function processInvoiceItemTx(
         if (materialProvider) {
             if (!materialProvider.lastPriceDate || effectiveDate.getTime() > materialProvider.lastPriceDate.getTime()) {
                 if (!materialProvider.lastPrice.equals(currentUnitPriceDecimal) || (materialProvider.lastPriceDate && effectiveDate.getTime() !== materialProvider.lastPriceDate.getTime()) || !materialProvider.lastPriceDate) {
-                    console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Updating MaterialProvider. Old lastPriceDate: ${materialProvider.lastPriceDate?.toISOString()}, Old lastPrice: ${materialProvider.lastPrice}. New: Date ${effectiveDate.toISOString()}, Price ${currentUnitPriceDecimal}.`);
                     await tx.materialProvider.update({
                         where: { id: materialProvider.id },
                         data: {
@@ -1281,11 +1254,7 @@ async function processInvoiceItemTx(
                             lastPriceDate: effectiveDate,
                         },
                     });
-                } else {
-                    console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] MaterialProvider already reflects the latest price and date from this or a newer item. Price: ${currentUnitPriceDecimal} @ ${effectiveDate.toISOString()}. Stored: ${materialProvider.lastPrice} @ ${materialProvider.lastPriceDate?.toISOString()}. No update to MaterialProvider needed.`);
                 }
-            } else {
-                console.log(`[Invoice ${invoiceId}][Material '${createdMaterial.name}'] Current item date (${effectiveDate.toISOString()}) is older than or same as MaterialProvider's lastPriceDate (${materialProvider.lastPriceDate?.toISOString()}). MaterialProvider not updated by this item's data.`);
             }
         } else {
 
@@ -1298,8 +1267,6 @@ async function processInvoiceItemTx(
                 },
             });
         }
-    } else {
-        console.log(`[Invoice ${invoiceId}][Item: ${createdMaterial.name}] Item is not a material. Skipping price alert and MaterialProvider updates.`);
     }
 
     return { invoiceItem, alert };
@@ -1326,7 +1293,6 @@ async function callPdfExtractAPIWithRetry(file: File, maxRetries: number = 3): P
             if (isRateLimitError && attempt < maxRetries) {
                 // Simple backoff for rate limits
                 const backoffTime = Math.min(2000 * Math.pow(2, attempt - 1), 30000); // 2s, 4s, 8s, max 30s
-                console.log(`[RateLimit] Attempt ${attempt} rate limited. Waiting ${backoffTime / 1000}s before retry...`);
                 await new Promise(resolve => setTimeout(resolve, backoffTime));
                 continue;
             }
@@ -1334,7 +1300,6 @@ async function callPdfExtractAPIWithRetry(file: File, maxRetries: number = 3): P
             // For non-rate-limit errors, retry with minimal delay
             if (!isRateLimitError && attempt < maxRetries) {
                 const quickRetryDelay = 1000 * attempt; // 1s, 2s for attempts 1, 2
-                console.log(`[Retry] Non-rate-limit error on attempt ${attempt}. Quick retry in ${quickRetryDelay / 1000}s...`);
                 await new Promise(resolve => setTimeout(resolve, quickRetryDelay));
                 continue;
             }
@@ -1380,11 +1345,9 @@ export async function createInvoiceFromFiles(
 
     if (existingBatchId) {
         batchId = existingBatchId;
-        console.log(`Using existing batch processing record: ${batchId} for ${files.length} files`);
     } else {
         // Create new batch processing record (fallback for backward compatibility)
         batchId = await createBatchProcessing(files.length, undefined, user.id);
-        console.log(`Created new batch processing record: ${batchId} for ${files.length} files`);
     }
 
     // Start batch processing
@@ -1400,17 +1363,12 @@ export async function createInvoiceFromFiles(
 
     const allFileProcessingResults: Array<ExtractedFileItem> = [];
 
-    console.log(`Starting extraction for ${files.length} files with initial concurrency limit of ${CONCURRENCY_LIMIT} (conservative for large batches).`);
 
     // Add memory pressure detection
     const initialMemory = process.memoryUsage();
-    console.log(`Initial memory usage: ${Math.round(initialMemory.heapUsed / 1024 / 1024)}MB heap, ${Math.round(initialMemory.rss / 1024 / 1024)}MB RSS`);
 
     // For very large batches (100+ files), add periodic memory cleanup
     const isVeryLargeBatch = files.length >= 100;
-    if (isVeryLargeBatch) {
-        console.log(`[Very Large Batch] Processing ${files.length} files - enabling enhanced memory management`);
-    }
 
     const batchErrors: string[] = [];
 
@@ -1428,7 +1386,6 @@ export async function createInvoiceFromFiles(
         const batchNumber = Math.floor(i / CONCURRENCY_LIMIT) + 1;
         const totalBatches = Math.ceil(files.length / CONCURRENCY_LIMIT);
 
-        console.log(`Processing batch ${batchNumber} of ${totalBatches} (files ${i + 1} to ${i + fileChunk.length} of ${files.length}) with concurrency ${CONCURRENCY_LIMIT}.`);
 
         // Update batch progress
         const currentFileIndex = i + 1;
@@ -1453,14 +1410,12 @@ export async function createInvoiceFromFiles(
 
             // Force garbage collection if available
             if (global.gc) {
-                console.log(`[Memory] Running garbage collection...`);
                 global.gc();
             }
         }
 
         // For very large batches, run periodic cleanup every 50 files
         if (isVeryLargeBatch && (i / CONCURRENCY_LIMIT) % 10 === 0 && i > 0) {
-            console.log(`[Very Large Batch] Processed ${i} files, running memory cleanup...`);
             if (global.gc) {
                 global.gc();
             }
@@ -1470,7 +1425,6 @@ export async function createInvoiceFromFiles(
 
 
         const chunkExtractionPromises = validFiles.map(async (file): Promise<ExtractedFileItem> => {
-            console.log(`[Batch ${batchNumber}] Processing file for extraction: ${file.name}`);
             // Basic guards already applied by validateUploadFile
 
             try {
@@ -1557,13 +1511,9 @@ export async function createInvoiceFromFiles(
         return dateA - dateB;
     });
 
-    console.log("Processing order after sorting by issue date:", processableItems.map(p => ({
-        file: p.fileName,
-        date: p.extractedData?.issueDate
-    })));
+
 
     // 4. Pre-process providers to reduce race conditions and improve performance
-    console.log("Pre-processing providers to optimize database operations...");
     const uniqueProviders = new Map<string, ExtractedPdfData['provider']>();
 
     for (const item of processableItems) {
@@ -1583,7 +1533,6 @@ export async function createInvoiceFromFiles(
                 return await findOrCreateProviderTx(tx, providerData, user.id);
             });
             providerCache.set(cif, provider.id);
-            console.log(`Pre-processed provider: ${provider.name} (${cif})`);
         } catch (error) {
             console.error(`Failed to pre-process provider ${providerData.name} (${cif}):`, error);
             // Continue with other providers, individual invoice processing will handle this error
@@ -1643,7 +1592,6 @@ export async function createInvoiceFromFiles(
         }
     }
 
-    console.log(`Pre-loaded ${existingMaterials.length} materials for faster processing`);
 
     // 5. Process database operations strictly sequentially to preserve chronological order
     const DB_CONCURRENCY_LIMIT = 1; // Enforce chronological processing by date
@@ -1674,7 +1622,6 @@ export async function createInvoiceFromFiles(
 
             for (let attempt = 1; attempt <= maxRetries; attempt++) {
                 try {
-                    console.log(`Starting optimized database transaction for sorted invoice from file: ${fileName}, invoice code: ${extractedData.invoiceCode}, issue date: ${extractedData.issueDate} (attempt ${attempt}/${maxRetries})`);
 
                     // For large invoices, use longer timeout and optimized processing
                     const itemCount = extractedData.items?.length || 0;
@@ -1686,7 +1633,6 @@ export async function createInvoiceFromFiles(
                     const transactionTimeout = Math.min(baseTimeout, 1800000); // Cap at 30 minutes
 
                     if (isLargeInvoice) {
-                        console.log(`[Large Invoice] Processing ${itemCount} items with optimized timeout: ${transactionTimeout / 1000}s (cached lookups enabled)`);
                     }
 
                     const operationResult: TransactionOperationResult = await prisma.$transaction(async (tx) => {
@@ -1716,7 +1662,6 @@ export async function createInvoiceFromFiles(
                         });
 
                         if (existingInvoice) {
-                            console.log(`Invoice ${extractedData.invoiceCode} from provider ${provider.name} (file: ${fileName}) already exists. Skipping creation.`);
                             return {
                                 success: true,
                                 message: `Invoice ${extractedData.invoiceCode} from provider ${provider.name} already exists.`,
@@ -1753,7 +1698,6 @@ export async function createInvoiceFromFiles(
                             const itemChunk = itemChunks[chunkIndex];
 
                             if (isLargeInvoice && chunkIndex > 0) {
-                                console.log(`[Large Invoice] Processing chunk ${chunkIndex + 1}/${itemChunks.length} (${itemChunk.length} items) - using cached lookups`);
                                 // Minimal delay between chunks for very large invoices
                                 await new Promise(resolve => setTimeout(resolve, isVeryLargeInvoice ? 50 : 100));
                             }
@@ -1781,7 +1725,6 @@ export async function createInvoiceFromFiles(
                                 const isMaterialItem = typeof itemData.isMaterial === 'boolean' ? itemData.isMaterial : true;
 
                                 if (!isMaterialItem) {
-                                    console.log(`[Invoice ${invoice.invoiceCode}][Item: ${itemData.materialName}] Marked as non-material. Creating InvoiceItem only.`);
                                     const quantityDecimal = new Prisma.Decimal(itemData.quantity.toFixed(2));
                                     const currentUnitPriceDecimal = new Prisma.Decimal(itemData.unitPrice.toFixed(2));
                                     const totalPriceDecimal = new Prisma.Decimal(itemData.totalPrice.toFixed(2));
@@ -1798,7 +1741,6 @@ export async function createInvoiceFromFiles(
                                             workOrder: itemData.workOrder || null,
                                         },
                                     });
-                                    console.log(`[Invoice ${invoice.invoiceCode}] Non-material item "${itemData.materialName}" added to invoice items. No price alert/MaterialProvider update.`);
                                     continue;
                                 }
 
@@ -1840,12 +1782,10 @@ export async function createInvoiceFromFiles(
                                                 },
                                             });
                                             alertsCounter++;
-                                            console.log(`[Invoice ${invoice.invoiceCode}][Material '${material.name}'] INTRA-INVOICE Price alert created. Old (from item ${lastSeenPriceRecordInThisInvoice.invoiceItemId} in this invoice): ${lastSeenPriceRecordInThisInvoice.price}, New (current item): ${currentItemUnitPrice}, Change: ${percentageChangeDecimal.toFixed(2)}%, Effective Date: ${effectiveItemDate.toISOString()}`);
                                         } catch (alertError) {
                                             // Manejar error de constraint único para alertas intra-factura
                                             if (typeof alertError === 'object' && alertError !== null && 'code' in alertError &&
                                                 (alertError as { code: string }).code === 'P2002') {
-                                                console.log(`[Invoice ${invoice.invoiceCode}][Material '${material.name}'] Intra-invoice price alert already exists (caught constraint violation). Skipping duplicate creation.`);
                                             } else {
                                                 throw alertError;
                                             }
@@ -1876,7 +1816,6 @@ export async function createInvoiceFromFiles(
                                 }
                             }
                         }
-                        console.log(`Successfully created invoice ${invoice.invoiceCode} from file: ${fileName}. Total alerts for this invoice: ${alertsCounter}`);
                         return {
                             success: true,
                             message: `Invoice ${invoice.invoiceCode} created successfully.`,
@@ -1941,7 +1880,6 @@ export async function createInvoiceFromFiles(
                     if (isMemoryError) {
                         console.error(`[Memory Error] Memory exhaustion detected for ${fileName}. This file will be skipped.`);
                         if (global.gc) {
-                            console.log(`[Memory Error] Running emergency garbage collection...`);
                             global.gc();
                         }
                         break; // Don't retry memory errors
@@ -2092,18 +2030,13 @@ export async function createInvoiceFromFiles(
     const avgTimePerFile = processingTimeMs ? (processingTimeMs / files.length / 1000).toFixed(2) : 'N/A';
     const totalAlerts = finalResultsWithBatch.reduce((sum, r) => sum + (r.alertsCreated || 0), 0);
 
-    console.log(`Batch ${batchId} completed in ${processingTimeMs ? (processingTimeMs / 1000).toFixed(2) : 'N/A'}s (avg: ${avgTimePerFile}s/file)`);
-    console.log(`Results: ${successfulInvoices.length} successful, ${failedInvoices.length} failed, ${blockedInvoices.length} blocked, ${totalAlerts} alerts created`);
-    console.log(`Optimizations: ${providerCache.size} providers pre-cached, ${existingMaterials.length} materials pre-loaded`);
 
     const newlyCreatedInvoices = finalResultsWithBatch.filter(r => r.success && r.invoiceId && !r.message.includes("already exists"));
 
     if (newlyCreatedInvoices.length > 0) {
         revalidatePath("/facturas");
-        console.log("Revalidated /facturas path.");
         if (newlyCreatedInvoices.some(r => r.alertsCreated && r.alertsCreated > 0)) {
             revalidatePath("/alertas");
-            console.log("Revalidated /alertas path due to new alerts.");
         }
     }
 
@@ -2263,7 +2196,6 @@ export async function createManualInvoice(data: ManualInvoiceData): Promise<Crea
                                     // Manejar error de constraint único en facturas manuales
                                     if (typeof alertError === 'object' && alertError !== null && 'code' in alertError &&
                                         (alertError as { code: string }).code === 'P2002') {
-                                        console.log(`[Manual Invoice ${invoice.invoiceCode}][Material '${material.name}'] Price alert already exists (caught constraint violation). Skipping duplicate creation.`);
                                     } else {
                                         throw alertError;
                                     }
@@ -2434,7 +2366,7 @@ JSON format:
             generationConfig: {
                 responseMimeType: 'application/json',
                 responseSchema: EXTRACTED_INVOICE_SCHEMA,
-                temperature: 0.1,
+                temperature: 0.8,
                 candidateCount: 1
             }
         }
@@ -2726,7 +2658,7 @@ async function processBatchInBackground(files: File[], userId: string) {
             let created: { name: string } | undefined;
             let batchAttempts = 0;
             // Ensure we have a valid file identifier from the upload response
-            const fileIdentifier = (uploaded as { name?: string; id?: string } | undefined)?.name ?? (uploaded as { name?: string; id?: string } | undefined)?.id;
+            const fileIdentifier = (uploaded as { name?: string; id?: string } | undefined)?.name;
             if (!fileIdentifier) {
                 throw new Error('[processBatchInBackground] Gemini file upload did not return a valid file identifier (name or id)');
             }

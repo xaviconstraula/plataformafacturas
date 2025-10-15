@@ -1088,9 +1088,13 @@ export async function getSupplierAnalyticsPaginated(params: GetSupplierAnalytics
 }
 
 export async function getWorkOrderAnalytics(workOrder: string) {
+    const user = await requireAuth()
+
     const items = await prisma.invoiceItem.findMany({
         where: {
-            workOrder: { contains: processWorkOrderSearch(workOrder), mode: 'insensitive' }
+            workOrder: { contains: processWorkOrderSearch(workOrder), mode: 'insensitive' },
+            material: { userId: user.id },
+            invoice: { provider: { userId: user.id } }
         },
         include: {
             material: {

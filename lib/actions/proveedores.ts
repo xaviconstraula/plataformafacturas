@@ -87,6 +87,7 @@ export async function createSupplier(
         }
     }
 
+    const user = await requireAuth()
     const { name, type, cif, email, phone, address } = validatedFields.data
 
     try {
@@ -96,6 +97,7 @@ export async function createSupplier(
 
         const existingProvider = await prisma.provider.findFirst({
             where: {
+                userId: user.id,
                 OR: [
                     ...(cifVariants.length > 0 ? [{ cif: { in: cifVariants } }] : []),
                     ...(normalizedCif ? [{ cif: { contains: normalizedCif, mode: Prisma.QueryMode.insensitive } }] : [])
@@ -113,7 +115,10 @@ export async function createSupplier(
         // Check for duplicates using phone number if available - treat as same provider
         if (phone) {
             const duplicateByPhone = await prisma.provider.findFirst({
-                where: { phone: phone },
+                where: {
+                    userId: user.id,
+                    phone: phone
+                },
             });
 
             if (duplicateByPhone) {
@@ -134,6 +139,7 @@ export async function createSupplier(
                 email: email || null,
                 phone: phone || null,
                 address: address || null,
+                userId: user.id,
             },
         })
 
@@ -154,9 +160,14 @@ export async function deleteProviderAction(providerId: string) {
         return { success: false, message: "ID de proveedor no proporcionado." };
     }
 
+    const user = await requireAuth()
+
     try {
         await prisma.provider.delete({
-            where: { id: providerId },
+            where: {
+                id: providerId,
+                userId: user.id
+            },
         });
 
         revalidatePath("/proveedores");
@@ -188,6 +199,8 @@ export async function editProviderAction(providerId: string, data: {
         return { success: false, message: "ID de proveedor no proporcionado." };
     }
 
+    const user = await requireAuth()
+
     try {
         // Check if CIF already exists for a different provider (using robust CIF matching)
         const normalizedCif = normalizeCifForComparison(data.cif)
@@ -195,6 +208,7 @@ export async function editProviderAction(providerId: string, data: {
 
         const existingProvider = await prisma.provider.findFirst({
             where: {
+                userId: user.id,
                 id: { not: providerId }, // Exclude the current provider
                 OR: [
                     ...(cifVariants.length > 0 ? [{ cif: { in: cifVariants } }] : []),
@@ -251,6 +265,26 @@ export async function mergeProvidersAction(sourceProviderId: string, targetProvi
 
     if (sourceProviderId === targetProviderId) {
         return { success: false, message: "El proveedor origen y destino no pueden ser el mismo." }
+    }
+
+    const user = await requireAuth()
+
+    // Validate that both providers belong to the current user
+    const [sourceProvider, targetProvider] = await Promise.all([
+        prisma.provider.findFirst({
+            where: { id: sourceProviderId, userId: user.id }
+        }),
+        prisma.provider.findFirst({
+            where: { id: targetProviderId, userId: user.id }
+        })
+    ])
+
+    if (!sourceProvider) {
+        return { success: false, message: "Proveedor origen no encontrado o no tienes permisos para acceder a él." }
+    }
+
+    if (!targetProvider) {
+        return { success: false, message: "Proveedor destino no encontrado o no tienes permisos para acceder a él." }
     }
 
     try {
