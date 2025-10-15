@@ -73,6 +73,7 @@ export function useBatchProgress() {
         refetchInterval: 30 * 1000, // Poll every 30 seconds to reduce load
         refetchOnWindowFocus: false,
         refetchOnMount: true,
+        enabled: typeof window !== 'undefined', // Only run on client side
     })
 }
 
