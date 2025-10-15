@@ -131,7 +131,7 @@ export default function Sidebar() {
             ))}
           </nav>
 
-          <div className="p-4 border-t">
+          <div className="p-4 border-t" suppressHydrationWarning>
             <div className="mb-3">
               <UserMenu />
             </div>

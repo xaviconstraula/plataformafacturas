@@ -528,7 +528,14 @@ export async function exportSuppliersListDetailed(filters: ExportFilters = {}, u
         };
     });
 
-    return exportData.sort((a, b) => a['Material'].localeCompare(b['Material'], 'es', { sensitivity: 'base' }));
+    return exportData.sort((a, b) => {
+        // First sort by provider name
+        const providerCompare = a['Proveedor'].localeCompare(b['Proveedor'], 'es', { sensitivity: 'base' });
+        if (providerCompare !== 0) return providerCompare;
+
+        // Then sort by material name within each provider
+        return a['Material'].localeCompare(b['Material'], 'es', { sensitivity: 'base' });
+    });
 }
 
 export async function exportSupplierSummary(filters: ExportFilters = {}) {
