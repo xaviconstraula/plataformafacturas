@@ -103,7 +103,7 @@ async function getWorkOrdersData(params: SearchParams) {
         by: ['workOrder'],
         where: { ...baseWhere, workOrder: { in: currentWorkOrderCodes } },
         _sum: { totalPrice: true, quantity: true },
-        _count: { id: true },
+        _count: true,
         _min: { itemDate: true },
         _max: { itemDate: true },
         orderBy: sortBy === 'totalCost' ? { _sum: { totalPrice: sortOrder as 'asc' | 'desc' } }
@@ -177,7 +177,7 @@ async function getWorkOrdersData(params: SearchParams) {
             workOrder: workOrderCode,
             totalCost: (wo._sum?.totalPrice?.toNumber() || 0) * 1.21, // Add 21% IVA - now filtered by provider
             totalQuantity: wo._sum?.quantity?.toNumber() || 0,
-            itemCount: wo._count?.id || 0,
+            itemCount: wo._count || 0,
             providers: uniqueProviders,
             materials: uniqueMaterials,
             dateRange,
@@ -195,7 +195,7 @@ async function getWorkOrdersData(params: SearchParams) {
 
     // Calculate summary stats
     const totalCostSum = workOrderAggregation.reduce((sum, wo) => sum + (wo._sum?.totalPrice?.toNumber() || 0) * 1.21, 0)
-    const totalItemsSum = workOrderAggregation.reduce((sum, wo) => sum + (wo._count?.id || 0), 0)
+    const totalItemsSum = workOrderAggregation.reduce((sum, wo) => sum + (wo._count || 0), 0)
 
     return {
         workOrders: workOrdersWithDetails,
