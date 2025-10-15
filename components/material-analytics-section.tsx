@@ -61,7 +61,7 @@ export function MaterialAnalyticsSection({
     // Use server-side pagination data or fall back to client-side for backward compatibility
     const currentPage = pagination?.currentPage || parseInt(searchParams.get('page') || '1', 10)
     const totalPages = pagination?.totalPages || Math.ceil(materialAnalytics.length / 20)
-    const itemsPerPage = pagination?.pageSize || 20
+    const itemsPerPage = pagination?.pageSize || 15
     const totalItems = pagination?.totalCount || materialAnalytics.length
 
     // For server-side pagination, materials are already filtered and paginated

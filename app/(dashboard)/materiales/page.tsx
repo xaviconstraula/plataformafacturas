@@ -32,7 +32,7 @@ async function getMaterialsData(params: { [key: string]: string | string[] | und
   const sortBy = (getString("sortBy") as "quantity" | "cost" | "lastPurchase" | "name") || "quantity"
   const sortOrder = (getString("sortOrder") as "asc" | "desc") || "desc"
   const page = parseInt(getString("page") || '1', 10)
-  const pageSize = 25 // Optimized page size for better performance with large datasets
+  const pageSize = 15 // Optimized page size for better performance with large datasets
 
   const startDateStr = getString("startDate")
   const endDateStr = getString("endDate")
