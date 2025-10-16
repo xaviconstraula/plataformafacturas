@@ -2703,7 +2703,7 @@ async function processBatchInBackground(files: File[], userId: string) {
             }
 
             const remoteId: string = created?.name || 'unknown';
-            await createBatchProcessing(chunk.files.length, remoteId, userId);
+            console.log(`[processBatchInBackground] Created Gemini batch ${remoteId} for chunk ${index + 1}/${chunks.length} (${chunk.files.length} files)`);
 
             // Cleanup temp file in background (don't block loop)
             fs.promises.unlink(jsonlPath).catch(() => undefined);
