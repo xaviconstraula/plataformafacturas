@@ -9,6 +9,7 @@ import { normalizeMaterialCode, areMaterialCodesSimilar, normalizeCifForComparis
 import { requireAuth } from "@/lib/auth-utils";
 import fs from "fs";
 import path from "path";
+import os from "os";
 
 // ------------------------------
 // Upload constraints & utilities
@@ -2631,10 +2632,10 @@ async function processBatchInBackground(files: File[], userId: string) {
         });
 
         // STEP A – Build JSONL chunks
-        const tmpDir = path.join(process.cwd(), 'tmp');
+        const tmpDir = path.join(os.tmpdir(), 'facturas-batch');
         try {
             if (!fs.existsSync(tmpDir)) {
-                fs.mkdirSync(tmpDir, { recursive: true });
+                fs.mkdirSync(tmpDir, { recursive: true, mode: 0o755 });
             }
         } catch (mkdirError) {
             const errorMsg = mkdirError instanceof Error ? mkdirError.message : 'Unknown error creating tmp directory';
@@ -2722,6 +2723,27 @@ async function processBatchInBackground(files: File[], userId: string) {
                 console.error('[processBatchInBackground] Failed to update batch record with error:', updateErr);
             });
         }
+    } finally {
+        // Clean up temporary directory after processing
+        try {
+            const tmpDir = path.join(os.tmpdir(), 'facturas-batch');
+            if (fs.existsSync(tmpDir)) {
+                const files = await fs.promises.readdir(tmpDir);
+                const oneHourAgo = Date.now() - 60 * 60 * 1000;
+                for (const file of files) {
+                    try {
+                        const filePath = path.join(tmpDir, file);
+                        const stats = await fs.promises.stat(filePath);
+                        if (stats.isFile() && stats.mtime.getTime() < oneHourAgo) {
+                            await fs.promises.unlink(filePath);
+                            console.log(`[processBatchInBackground] Cleaned up old tmp file: ${file}`);
+                        }
+                    } catch { }
+                }
+            }
+        } catch (cleanupErr) {
+            console.warn('[processBatchInBackground] Failed to cleanup tmp directory:', cleanupErr);
+        }
     }
 }
 
@@ -2746,9 +2768,9 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
     if (dest && (dest.file_name || dest.fileName)) {
         const fileName: string = (dest.file_name ?? dest.fileName) as string;
         console.log(`[ingestBatchOutput] Downloading Gemini output for batch ${batchId} (file ${fileName})`);
-        const tmpDir = path.join(process.cwd(), 'tmp');
+        const tmpDir = path.join(os.tmpdir(), 'facturas-batch');
         try {
-            await fs.promises.mkdir(tmpDir, { recursive: true });
+            await fs.promises.mkdir(tmpDir, { recursive: true, mode: 0o755 });
         } catch (mkdirError) {
             const errorMsg = mkdirError instanceof Error ? mkdirError.message : 'Unknown error creating tmp directory';
             console.error(`[ingestBatchOutput] Failed to create tmp directory for batch ${batchId}:`, mkdirError);
