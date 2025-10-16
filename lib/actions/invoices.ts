@@ -43,7 +43,7 @@ function isRateLimitError(error: unknown): boolean {
     return false;
 }
 
-export function parseJsonSafe(rawInput: string): unknown {
+function parseJsonSafe(rawInput: string): unknown {
     if (!rawInput) return null;
     let raw = rawInput.trim();
     if (raw.startsWith('```')) {
@@ -52,14 +52,7 @@ export function parseJsonSafe(rawInput: string): unknown {
     raw = raw.replace(/[\uFEFF\u200B-\u200D]/g, '');
 
     // Handle double-escaped JSON from Gemini batch responses
-    // The text field contains JSON that is already escaped as a string
-    // e.g., {"text": "{\\\"key\\\": \\\"value\\\"}"}
-    // We need to unescape it carefully, handling the order correctly
     if (raw.startsWith('{\\')) {
-        // CRITICAL: Handle escape sequences in correct order!
-        // 1. First handle double-escaped backslashes (\\\\) to avoid breaking other escapes
-        // 2. Then handle escaped quotes (\\\")
-        // 3. Then handle other escape sequences
         raw = raw
             .replace(/\\\\/g, '\x00')      // Temporarily replace \\\\ with placeholder
             .replace(/\\"/g, '"')          // Unescape quotes
@@ -72,25 +65,30 @@ export function parseJsonSafe(rawInput: string): unknown {
             .replace(/\x00/g, '\\');       // Replace placeholder with actual backslash
     }
 
-    try { return JSON.parse(raw); } catch { }
+    // Replace potential comma decimals (e.g., 1,23 -> 1.23) to handle locale issues
+    raw = raw.replace(/(\d+),(\d+)/g, '$1.$2');
 
-    // Fallback: try unescaping even if the string didn't start with '{\\'
-    // Some Gemini responses are semi-escaped or inconsistently escaped.
-    // Attempt a tolerant unescape pass before giving up.
+    // New: Remove trailing commas before } or ]
+    raw = raw.replace(/,\s*([}\]])/g, '$1');
+
+    try { return JSON.parse(raw); } catch (e) {
+        console.error('[parseJsonSafe] JSON.parse failed with error:', (e as SyntaxError).message, 'Raw input preview:', raw.substring(0, 500));
+    }
+
+    // Handle case where the content itself is a JSON string literal
     try {
-        if (raw.includes('\\"') || raw.includes('\\\\') || raw.includes('\\n')) {
-            const alt = raw
-                .replace(/\\\\/g, '\x00') // Temporarily replace \\\\ with placeholder
-                .replace(/\\"/g, '"')
-                .replace(/\\\//g, '/')
-                .replace(/\\b/g, '\b')
-                .replace(/\\f/g, '\f')
-                .replace(/\\n/g, '\n')
-                .replace(/\\r/g, '\r')
-                .replace(/\\t/g, '\t')
-                .replace(/\x00/g, '\\');
-            return JSON.parse(alt);
+        if (raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')) {
+            const onceDecoded = JSON.parse(raw) as string;
+            try { return JSON.parse(onceDecoded); } catch { return onceDecoded; }
         }
+    } catch { }
+
+    // Extra robust fallback: decode escape sequences by parsing as a JSON string first,
+    // then parse the decoded result as JSON.
+    try {
+        const quoted = '"' + raw.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+        const decoded = JSON.parse(quoted) as string;
+        return JSON.parse(decoded);
     } catch { }
 
     // Fallback: try to extract JSON object if possible
@@ -100,10 +98,30 @@ export function parseJsonSafe(rawInput: string): unknown {
         const slice = raw.slice(start, end + 1);
         try { return JSON.parse(slice); } catch { }
     }
+
+    // Post-parse fix for "null" strings and other string literals (convert to appropriate types)
+    function fixNullStrings(obj: unknown): unknown {
+        if (obj === 'null') return null;
+        if (obj === 'true') return true;
+        if (obj === 'false') return false;
+        if (typeof obj === 'object' && obj !== null) {
+            const record = obj as Record<string, unknown>;
+            for (const key in record) {
+                record[key] = fixNullStrings(record[key]);
+            }
+        }
+        return obj;
+    }
+
+    try {
+        const parsed = JSON.parse(raw);
+        return fixNullStrings(parsed);
+    } catch { }
+
     return null;
 }
 
-export function isExtractedPdfData(value: unknown): value is ExtractedPdfData {
+function isExtractedPdfData(value: unknown): value is ExtractedPdfData {
     if (!value || typeof value !== 'object') return false;
     const v = value as Record<string, unknown>;
     const provider = v.provider as Record<string, unknown> | undefined;
@@ -613,10 +631,16 @@ JSON format:
 }
 
 STRICT JSON OUTPUT RULES:
+- The JSON must be minified: all on one line, no extra spaces, newlines, or formatting.
 - Return ONLY a single JSON object. No code fences, no explanations, no comments.
-- All strings must be valid JSON with escaped quotes (\") and escaped newlines (\\n). Never include raw control characters in strings.
+- All strings must be valid JSON with escaped quotes (\\") and escaped newlines (\\\\n). Never include raw control characters in strings.
 - Use null (not "null") for missing values. Do not include trailing commas.
-- Keys and strings must use double quotes. Do not add extra fields beyond the schema.`;
+- Keys and strings must use double quotes. Do not add extra fields beyond the schema.
+- Use dot (.) as decimal separator, never comma (,).
+- Never use comma (,) as decimal or thousand separator in numbers—always use dot (.) for decimals and no thousand separators (e.g., 1234.56, not 1,234.56 or 1234,56).
+- Ensure no trailing commas in objects or arrays (e.g., correct: {"key":"value"}, incorrect: {"key":"value",}).
+- The entire JSON must be valid and parsable by strict JSON parsers like JSON.parse in JavaScript.
+- Example minified output: {"invoiceCode":"ABC123","provider":{"name":"Provider","cif":"A12345678","email":null,"phone":null,"address":null},"issueDate":"2023-01-01","totalAmount":100.00,"items":[{"materialName":"Item","materialCode":null,"isMaterial":true,"quantity":1.00,"unitPrice":100.00,"totalPrice":100.00,"itemDate":null,"workOrder":null,"description":null,"lineNumber":null}]}`;
 
 
         const result = await gemini.models.generateContent({
@@ -633,10 +657,8 @@ STRICT JSON OUTPUT RULES:
             config: {
                 responseMimeType: 'application/json',
                 responseSchema: EXTRACTED_INVOICE_SCHEMA,
-                temperature: 0.2,
-                topP: 0.8,
-                topK: 40,
-                maxOutputTokens: 8192,
+                temperature: 0.8,
+                maxOutputTokens: 100000,
                 candidateCount: 1
             }
         });
@@ -2394,10 +2416,16 @@ JSON format:
 }
 
 STRICT JSON OUTPUT RULES:
+- The JSON must be minified: all on one line, no extra spaces, newlines, or formatting.
 - Return ONLY a single JSON object. No code fences, no explanations, no comments.
-- All strings must be valid JSON with escaped quotes (\") and escaped newlines (\\n). Never include raw control characters in strings.
+- All strings must be valid JSON with escaped quotes (\\") and escaped newlines (\\\\n). Never include raw control characters in strings.
 - Use null (not "null") for missing values. Do not include trailing commas.
-- Keys and strings must use double quotes. Do not add extra fields beyond the schema.`;
+- Keys and strings must use double quotes. Do not add extra fields beyond the schema.
+- Use dot (.) as decimal separator, never comma (,).
+- Never use comma (,) as decimal or thousand separator in numbers—always use dot (.) for decimals and no thousand separators (e.g., 1234.56, not 1,234.56 or 1234,56).
+- Ensure no trailing commas in objects or arrays (e.g., correct: {"key":"value"}, incorrect: {"key":"value",}).
+- The entire JSON must be valid and parsable by strict JSON parsers like JSON.parse in JavaScript.
+- Example minified output: {"invoiceCode":"ABC123","provider":{"name":"Provider","cif":"A12345678","email":null,"phone":null,"address":null},"issueDate":"2023-01-01","totalAmount":100.00,"items":[{"materialName":"Item","materialCode":null,"isMaterial":true,"quantity":1.00,"unitPrice":100.00,"totalPrice":100.00,"itemDate":null,"workOrder":null,"description":null,"lineNumber":null}]}`;
 
     // Build Gemini JSONL request line
     const jsonlObject = {
@@ -2416,6 +2444,7 @@ STRICT JSON OUTPUT RULES:
                 responseMimeType: 'application/json',
                 responseSchema: EXTRACTED_INVOICE_SCHEMA,
                 temperature: 0.8,
+                maxOutputTokens: 100000,
                 candidateCount: 1
             }
         }
@@ -2957,8 +2986,8 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
         let failed = 0;
         const errors: Array<{ lineIndex: number; error: string; context?: ErrorContext }> = [];
 
-        // Robust JSONL parsing: if a line fails with an unterminated string or unexpected end,
-        // progressively append following lines until it parses or we reach a limit
+        // Process JSONL line by line and aggressively append following lines
+        // until a valid JSON object is formed (cap to prevent infinite loops)
         let i = 0;
         while (i < lines.length) {
             const raw = lines[i];
@@ -2967,41 +2996,48 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
             let parsed: unknown;
             let combined = raw;
             let combinedToIndex = i;
+            let appended = 0;
+            const MAX_APPEND_LINES = 200; // generous cap for very long/wrapped lines
+
             for (; ;) {
                 try {
                     parsed = JSON.parse(combined);
                     break;
                 } catch (e) {
-                    // Try appending next physical line if available
-                    if (combinedToIndex + 1 < lines.length) {
+                    // Keep appending subsequent lines if available, up to a high cap
+                    if (combinedToIndex + 1 < lines.length && appended < MAX_APPEND_LINES) {
                         combinedToIndex++;
                         combined += "\n" + lines[combinedToIndex];
-                        // Also guard against extremely large concatenations (> 5 MB)
-                        if (combined.length > 5 * 1024 * 1024) {
-                            parsed = undefined;
-                            break;
-                        }
+                        appended++;
                         continue;
                     }
-                    // End of file concatenation; attempt fallback extraction of text field
+
+                    // If concatenation didn't work, attempt to extract the text field directly
                     const fallbackText = extractJsonFromTextFieldUnsafe(combined);
                     if (fallbackText) {
-                        // We will handle it below when content is missing
                         parsed = { response: { candidates: [{ content: { parts: [{ text: fallbackText }] } }] } } as unknown as Record<string, unknown>;
                         break;
                     }
+
+                    const parseError = (e as SyntaxError).message;
+                    console.error(`[ingestBatchOutput] Failed to parse JSONL at line ${i + 1} after appending ${appended} lines:`, {
+                        error: parseError,
+                        lineLength: combined.length,
+                        preview: combined.substring(0, 300)
+                    });
+
                     parsed = undefined;
                     break;
                 }
             }
 
-            // Advance the outer index to the last line we consumed for this record
+            // Advance the outer index to the last line we consumed
             i = combinedToIndex;
 
             if (!parsed) {
-                const errorMsg = 'Error processing line: Unable to parse JSON after concatenation';
+                const errorMsg = 'Unable to parse JSON after parsing attempts';
                 console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1}`);
-                errors.push({ lineIndex: i + 1, error: errorMsg, context: { rawLine: combined } });
+                errors.push({ lineIndex: i + 1, error: errorMsg, context: { rawLine: combined.substring(0, 500) } });
                 failed++;
                 i++;
                 continue;
@@ -3011,29 +3047,52 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                 // Gemini result line shape: { key, response: { candidates: [{ content: { parts: [{ text }] } }] }, error }
                 const parsedObj = parsed as Record<string, unknown>;
                 const response = parsedObj?.response as Record<string, unknown> | undefined;
-                const candidates = response?.candidates as Array<Record<string, unknown>> | undefined;
-                const contentObj = candidates?.[0]?.content as Record<string, unknown> | undefined;
-                const parts = contentObj?.parts as Array<Record<string, unknown>> | undefined;
-                const content = parts?.[0]?.text as string | undefined;
-                const key = parsedObj?.key as string | undefined;
+                // Prefer joining all parts' text if present; fallback to response.text
+                let content: string | undefined;
+                if (response) {
+                    const candidates = response?.candidates as Array<Record<string, unknown>> | undefined;
+                    const contentObj = candidates?.[0]?.content as Record<string, unknown> | undefined;
+                    const parts = contentObj?.parts as Array<Record<string, unknown>> | undefined;
+                    if (Array.isArray(parts)) {
+                        content = parts
+                            .map((p) => (typeof (p as { text?: unknown })?.text === 'string' ? ((p as { text?: string }).text) : ''))
+                            .join('');
+                    }
+                    const respText = (response as unknown as { text?: unknown }).text;
+                    if ((!content || content.length === 0) && typeof respText === 'string') {
+                        content = respText;
+                    }
+                }
+                let key = parsedObj?.key as string | undefined;
+                if (!key && typeof combined === 'string') {
+                    const match = /"key"\s*:\s*"([^"]*)"/.exec(combined);
+                    if (match && match[1]) {
+                        key = match[1];
+                    }
+                }
                 if (!content) {
                     const errorMsg = 'No content in Gemini response';
-                    console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (key: ${key ?? 'unknown'})`);
-                    errors.push({ lineIndex: i + 1, error: errorMsg, context: { custom_id: key } });
+                    const identifier = key ?? (parsedObj?.custom_id as string | undefined) ?? 'unknown';
+                    console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (id: ${identifier})`);
+                    errors.push({ lineIndex: i + 1, error: errorMsg, context: { custom_id: identifier } });
                     failed++;
                     i++;
                     continue;
                 }
 
-                const extractedUnknown = parseJsonString(content, `extracted data for ${key ?? 'unknown'}`);
+                // Log extracted content for debugging
+                console.log(`[ingestBatchOutput] Extracted raw content for line ${i + 1} (key: ${key}):`, content.substring(0, 500));
+
+                const extractedUnknown = parseJsonString(content, `extracted data for ${key ?? (parsedObj?.custom_id as string | undefined) ?? 'unknown'}`);
                 if (!extractedUnknown || !isExtractedPdfData(extractedUnknown)) {
                     const errorMsg = `Failed to parse extracted data JSON`;
-                    console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (custom_id: ${(parsedObj?.custom_id as string | undefined) ?? 'unknown'})`);
+                    const identifier = (parsedObj?.key as string | undefined) ?? (parsedObj?.custom_id as string | undefined) ?? 'unknown';
+                    console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (id: ${identifier})`);
                     console.error(`[ingestBatchOutput] Raw content: ${content.substring(0, 500)}${content.length > 500 ? '...' : ''}`);
                     errors.push({
                         lineIndex: i + 1,
                         error: errorMsg,
-                        context: { custom_id: parsedObj?.custom_id as string | undefined, rawContent: content }
+                        context: { custom_id: identifier, rawContent: content.substring(0, 500) }
                     });
                     failed++;
                     i++;
@@ -3047,11 +3106,10 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                 } else {
                     const errorMsg = `Failed to save invoice: ${result.message}`;
                     console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (key: ${key ?? 'unknown'})`);
-                    console.error(`[ingestBatchOutput] Extracted data:`, JSON.stringify(extracted, null, 2));
                     errors.push({
                         lineIndex: i + 1,
                         error: errorMsg,
-                        context: { custom_id: key, extractedData: extracted, result }
+                        context: { custom_id: key, result }
                     });
                     failed++;
                 }
@@ -3059,11 +3117,11 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                 const errorMsg = `Error processing line: ${(err as Error).message}`;
                 console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1}`);
                 const preview = combined.substring(0, 500);
-                console.error(`[ingestBatchOutput] Raw line: ${preview}${combined.length > 500 ? '...' : ''}`);
+                console.error(`[ingestBatchOutput] Raw line preview: ${preview}${combined.length > 500 ? '...' : ''}`);
                 errors.push({
                     lineIndex: i + 1,
                     error: errorMsg,
-                    context: { rawLine: combined }
+                    context: { rawLine: preview }
                 });
                 failed++;
             }
@@ -3094,7 +3152,7 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                 lineIndex,
                 error,
                 fileName: context?.custom_id || `line-${lineIndex}`,
-                errorType: context?.rawLine ? 'parsing' : context?.extractedData ? 'database' : 'unknown'
+                errorType: context?.rawLine ? 'parsing' : context?.result ? 'database' : 'unknown'
             }));
 
             await updateBatchProgress(batchId, {
