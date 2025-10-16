@@ -2,9 +2,11 @@
 
 import { useEffect, useState, useRef } from "react"
 import { Card, CardContent } from "@/components/ui/card"
-import { Loader2, FileText } from "lucide-react"
+import { Loader2, FileText, AlertCircle } from "lucide-react"
 import { useBatchProgress } from "@/hooks/use-analytics"
 import { toast } from "sonner"
+import { Button } from "@/components/ui/button"
+import { BatchErrorsDialog } from "@/components/batch-errors-dialog"
 
 export function BatchProgressBanner() {
     const { data: batches = [], isLoading } = useBatchProgress()
@@ -13,6 +15,8 @@ export function BatchProgressBanner() {
     // "batchBannerVisible" event once per visibility change.
     const bannerShownRef = useRef(false)
     const [expectedTotal, setExpectedTotal] = useState<number | null>(null)
+    const [errorDialogOpen, setErrorDialogOpen] = useState(false)
+    const [selectedBatchForErrors, setSelectedBatchForErrors] = useState<typeof batches[0] | null>(null)
 
     // Handle batch completion detection and notifications
     useEffect(() => {
@@ -41,24 +45,53 @@ export function BatchProgressBanner() {
             console.log('Batch completed detected:', {
                 batchId: completedBatch.id,
                 status: currentBatch?.status,
-                successfulFiles: currentBatch?.successfulFiles
+                successfulFiles: currentBatch?.successfulFiles,
+                failedFiles: currentBatch?.failedFiles
             });
 
             if (currentBatch?.status === 'COMPLETED') {
-                toast.success("Procesamiento completado", {
-                    description: `${currentBatch.successfulFiles} facturas procesadas exitosamente. Recargando página...`
-                })
+                const failedFiles = currentBatch?.failedFiles || 0
+                const successfulFiles = currentBatch?.successfulFiles || 0
+
+                if (failedFiles > 0) {
+                    // Batch completed with some failures
+                    toast.warning("Procesamiento completado con errores", {
+                        description: `${successfulFiles} facturas procesadas, ${failedFiles} con errores`,
+                        action: {
+                            label: "Ver errores",
+                            onClick: () => {
+                                setSelectedBatchForErrors(currentBatch)
+                                setErrorDialogOpen(true)
+                            }
+                        }
+                    })
+                } else {
+                    // All successful
+                    toast.success("Procesamiento completado", {
+                        description: `${successfulFiles} facturas procesadas exitosamente. Recargando página...`
+                    })
+                }
             } else if (currentBatch?.status === 'FAILED') {
+                const failedFiles = currentBatch?.failedFiles || currentBatch?.totalFiles || 0
                 toast.error("Procesamiento fallido", {
-                    description: "Hubo un error durante el procesamiento. Recargando página..."
+                    description: "Hubo un error durante el procesamiento",
+                    action: {
+                        label: "Ver errores",
+                        onClick: () => {
+                            setSelectedBatchForErrors(currentBatch)
+                            setErrorDialogOpen(true)
+                        }
+                    }
                 })
             }
 
-            // Reload page immediately to show the new invoices
-            setTimeout(() => {
-                console.log('Reloading page after batch completion...');
-                window.location.reload()
-            }, 1000) // Reduced from 2000ms to 1000ms
+            // Only reload if batch was fully successful (no failures)
+            if (currentBatch?.status === 'COMPLETED' && (currentBatch?.failedFiles || 0) === 0) {
+                setTimeout(() => {
+                    console.log('Reloading page after batch completion...');
+                    window.location.reload()
+                }, 1000)
+            }
         }
 
         // Only show batches that are actually active (not completed)
@@ -128,18 +161,36 @@ export function BatchProgressBanner() {
     }
 
     return (
-        <div className="mb-6">
-            <Card className="border-blue-200 bg-blue-50">
-                <CardContent className="pt-4 pb-4">
-                    <div className="flex items-center gap-3">
-                        <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
-                        <FileText className="h-5 w-5 text-blue-600" />
-                        <span className="font-medium text-base">
-                            Procesando {totalFiles} factura{totalFiles !== 1 ? 's' : ''}
-                        </span>
-                    </div>
-                </CardContent>
-            </Card>
-        </div>
+        <>
+            <div className="mb-6">
+                <Card className="border-blue-200 bg-blue-50">
+                    <CardContent className="pt-4 pb-4">
+                        <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                                <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
+                                <FileText className="h-5 w-5 text-blue-600" />
+                                <span className="font-medium text-base">
+                                    Procesando {totalFiles} factura{totalFiles !== 1 ? 's' : ''}
+                                </span>
+                            </div>
+                        </div>
+                    </CardContent>
+                </Card>
+            </div>
+
+            {selectedBatchForErrors && (
+                <BatchErrorsDialog
+                    isOpen={errorDialogOpen}
+                    onClose={() => {
+                        setErrorDialogOpen(false)
+                        setSelectedBatchForErrors(null)
+                    }}
+                    batchId={selectedBatchForErrors.id}
+                    errors={(selectedBatchForErrors.errors as string[]) || []}
+                    failedFiles={selectedBatchForErrors.failedFiles || 0}
+                    totalFiles={selectedBatchForErrors.totalFiles || 0}
+                />
+            )}
+        </>
     )
 } 

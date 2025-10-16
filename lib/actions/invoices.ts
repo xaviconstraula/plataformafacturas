@@ -260,6 +260,8 @@ export async function updateBatchProgress(
         where: { id: batchId },
         data: {
             ...updates,
+            // Ensure errors are properly stored as JSON array
+            ...(updates.errors ? { errors: updates.errors as unknown as Prisma.InputJsonValue } : {}),
             updatedAt: new Date(),
         },
     });
@@ -2619,8 +2621,13 @@ async function processBatchInBackground(files: File[], userId: string) {
     try {
         // STEP A – Build JSONL chunks
         const tmpDir = path.join(process.cwd(), 'tmp');
-        if (!fs.existsSync(tmpDir)) {
-            fs.mkdirSync(tmpDir);
+
+        // Ensure tmp directory exists with proper error handling
+        try {
+            await fs.promises.mkdir(tmpDir, { recursive: true });
+        } catch (mkdirError) {
+            console.error('[processBatchInBackground] Failed to create tmp directory:', mkdirError);
+            throw new Error(`Failed to create temporary directory for batch processing: ${mkdirError instanceof Error ? mkdirError.message : 'Unknown error'}`);
         }
 
         const chunks = await buildBatchJsonlChunks(files);
@@ -2715,7 +2722,15 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
         const fileName: string = (dest.file_name ?? dest.fileName) as string;
         console.log(`[ingestBatchOutput] Downloading Gemini output for batch ${batchId} (file ${fileName})`);
         const tmpDir = path.join(process.cwd(), 'tmp');
-        await fs.promises.mkdir(tmpDir, { recursive: true });
+
+        // Ensure tmp directory exists with proper error handling
+        try {
+            await fs.promises.mkdir(tmpDir, { recursive: true });
+        } catch (mkdirError) {
+            console.error(`[ingestBatchOutput] Failed to create tmp directory for batch ${batchId}:`, mkdirError);
+            throw new Error(`Failed to create temporary directory for batch result processing: ${mkdirError instanceof Error ? mkdirError.message : 'Unknown error'}`);
+        }
+
         let downloadedPath: string;
         try {
             downloadedPath = path.join(tmpDir, path.basename(fileName));
@@ -2886,6 +2901,18 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                 if (context) {
                     console.error(`    Context:`, context);
                 }
+            });
+
+            // Save error details to the database
+            const errorSummaries = errors.map(({ lineIndex, error, context }) => ({
+                lineIndex,
+                error,
+                fileName: context?.custom_id || `line-${lineIndex}`,
+                errorType: context?.rawLine ? 'parsing' : context?.extractedData ? 'database' : 'unknown'
+            }));
+
+            await updateBatchProgress(batchId, {
+                errors: errorSummaries.map(e => `${e.fileName}: ${e.error}`).slice(0, 100) // Keep first 100 errors
             });
         }
 

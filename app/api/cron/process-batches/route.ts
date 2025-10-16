@@ -3,6 +3,7 @@ import { headers } from "next/headers"
 import { prisma } from "@/lib/db"
 import { BatchStatus } from "@/generated/prisma"
 import { GoogleGenAI } from "@google/genai"
+import { Prisma } from "@/generated/prisma"
 
 // Gemini batch response interfaces
 interface GeminiRequestCounts { total?: number; completed?: number; failed?: number }
@@ -167,6 +168,17 @@ async function getAllActiveBatchesForCron() {
                         console.log(`[cron/process-batches] Successfully ingested results for batch ${batch.id}`)
                     } catch (ingestError) {
                         console.error(`[cron/process-batches] Failed to ingest results for batch ${batch.id}:`, ingestError)
+
+                        // Save error to batch record
+                        const errorMessage = ingestError instanceof Error ? ingestError.message : 'Unknown error during ingestion'
+                        await prisma.batchProcessing.update({
+                            where: { id: batch.id },
+                            data: {
+                                errors: [`Batch ingestion error: ${errorMessage}`] as unknown as Prisma.InputJsonValue,
+                                status: 'FAILED',
+                                completedAt: new Date(),
+                            }
+                        })
                     }
                 }
 

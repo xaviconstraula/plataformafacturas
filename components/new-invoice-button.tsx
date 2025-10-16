@@ -19,11 +19,26 @@ export function NewInvoiceButton() {
     const [isOpen, setIsOpen] = useState(false)
     const [isProcessing, setIsProcessing] = useState(false)
 
+    // Prevent tab closure while processing
+    useEffect(() => {
+        function handleBeforeUnload(event: BeforeUnloadEvent) {
+            if (isProcessing) {
+                event.preventDefault();
+                event.returnValue = '';
+                return '';
+            }
+        }
+
+        window.addEventListener('beforeunload', handleBeforeUnload);
+        return () => {
+            window.removeEventListener('beforeunload', handleBeforeUnload);
+        };
+    }, [isProcessing]);
+
     // Listen for custom event to close modal
     useEffect(() => {
         const handleCloseModal = () => {
             setIsOpen(false);
-            setIsProcessing(false);
         };
 
         window.addEventListener('closeInvoiceModal', handleCloseModal);
@@ -80,7 +95,6 @@ export function NewInvoiceButton() {
     // Called when processing starts in InvoiceDropzone
     function handleInvoiceProcessingStart() {
         setIsProcessing(true)
-        setIsOpen(false) // Close modal immediately when processing starts
     }
 
     return (
