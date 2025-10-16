@@ -2622,15 +2622,6 @@ async function processBatchInBackground(files: File[], userId: string) {
     let batchId: string | null = null;
 
     try {
-        // Create a placeholder batch record immediately so the user sees progress
-        batchId = await createBatchProcessing(files.length, undefined, userId);
-
-        // Update to PROCESSING state
-        await updateBatchProgress(batchId, {
-            status: 'PROCESSING',
-            startedAt: new Date(),
-        });
-
         // STEP A – Build JSONL chunks
         const tmpDir = path.join(os.tmpdir(), 'facturas-batch');
         try {
@@ -2647,6 +2638,8 @@ async function processBatchInBackground(files: File[], userId: string) {
         if (chunks.length === 0) {
             throw new Error('No JSONL chunks built.');
         }
+
+        let isFirstChunk = true;
 
         for (const [index, chunk] of chunks.entries()) {
             const jsonlPath = path.join(tmpDir, `gemini-batch-${Date.now()}-${index}.jsonl`);
@@ -2704,6 +2697,18 @@ async function processBatchInBackground(files: File[], userId: string) {
 
             const remoteId: string = created?.name || 'unknown';
             console.log(`[processBatchInBackground] Created Gemini batch ${remoteId} for chunk ${index + 1}/${chunks.length} (${chunk.files.length} files)`);
+
+            // On the first chunk, create the local batch record using the Gemini batch ID
+            if (isFirstChunk && remoteId !== 'unknown') {
+                batchId = await createBatchProcessing(files.length, remoteId, userId);
+                isFirstChunk = false;
+
+                // Update to PROCESSING state
+                await updateBatchProgress(batchId, {
+                    status: 'PROCESSING',
+                    startedAt: new Date(),
+                });
+            }
 
             // Cleanup temp file in background (don't block loop)
             fs.promises.unlink(jsonlPath).catch(() => undefined);
