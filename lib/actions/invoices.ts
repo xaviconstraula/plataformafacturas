@@ -43,7 +43,7 @@ function isRateLimitError(error: unknown): boolean {
     return false;
 }
 
-function parseJsonSafe(rawInput: string): unknown {
+export function parseJsonSafe(rawInput: string): unknown {
     if (!rawInput) return null;
     let raw = rawInput.trim();
     if (raw.startsWith('```')) {
@@ -74,6 +74,25 @@ function parseJsonSafe(rawInput: string): unknown {
 
     try { return JSON.parse(raw); } catch { }
 
+    // Fallback: try unescaping even if the string didn't start with '{\\'
+    // Some Gemini responses are semi-escaped or inconsistently escaped.
+    // Attempt a tolerant unescape pass before giving up.
+    try {
+        if (raw.includes('\\"') || raw.includes('\\\\') || raw.includes('\\n')) {
+            const alt = raw
+                .replace(/\\\\/g, '\x00') // Temporarily replace \\\\ with placeholder
+                .replace(/\\"/g, '"')
+                .replace(/\\\//g, '/')
+                .replace(/\\b/g, '\b')
+                .replace(/\\f/g, '\f')
+                .replace(/\\n/g, '\n')
+                .replace(/\\r/g, '\r')
+                .replace(/\\t/g, '\t')
+                .replace(/\x00/g, '\\');
+            return JSON.parse(alt);
+        }
+    } catch { }
+
     // Fallback: try to extract JSON object if possible
     const start = raw.indexOf('{');
     const end = raw.lastIndexOf('}');
@@ -84,7 +103,7 @@ function parseJsonSafe(rawInput: string): unknown {
     return null;
 }
 
-function isExtractedPdfData(value: unknown): value is ExtractedPdfData {
+export function isExtractedPdfData(value: unknown): value is ExtractedPdfData {
     if (!value || typeof value !== 'object') return false;
     const v = value as Record<string, unknown>;
     const provider = v.provider as Record<string, unknown> | undefined;
@@ -2651,7 +2670,7 @@ async function processBatchInBackground(files: File[], userId: string) {
 
     try {
         // STEP A – Build JSONL chunks
-        const tmpDir = path.join(os.tmpdir(), 'facturas-batch');
+        const tmpDir = path.join(process.env.NODE_ENV === 'development' ? path.join(process.cwd(), 'tmp') : os.tmpdir(), 'facturas-batch');
         try {
             if (!fs.existsSync(tmpDir)) {
                 fs.mkdirSync(tmpDir, { recursive: true, mode: 0o755 });
@@ -2801,7 +2820,7 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
     if (dest && (dest.file_name || dest.fileName)) {
         const fileName: string = (dest.file_name ?? dest.fileName) as string;
         console.log(`[ingestBatchOutput] Downloading Gemini output for batch ${batchId} (file ${fileName})`);
-        const tmpDir = path.join(os.tmpdir(), 'facturas-batch');
+        const tmpDir = path.join(process.env.NODE_ENV === 'development' ? path.join(process.cwd(), 'tmp') : os.tmpdir(), 'facturas-batch');
         try {
             await fs.promises.mkdir(tmpDir, { recursive: true, mode: 0o755 });
         } catch (mkdirError) {
@@ -2905,6 +2924,35 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
     }
 
     async function processOutputLines(lines: string[], parseJsonString: (rawInput: string, context?: string) => unknown): Promise<boolean> {
+        function extractJsonFromTextFieldUnsafe(jsonLike: string): string | null {
+            const textKeyIndex = jsonLike.indexOf('"text"');
+            if (textKeyIndex === -1) return null;
+            const colonIndex = jsonLike.indexOf(':', textKeyIndex);
+            if (colonIndex === -1) return null;
+            // Find opening quote of the string value
+            let i = colonIndex + 1;
+            while (i < jsonLike.length && /\s/.test(jsonLike[i]!)) i++;
+            if (jsonLike[i] !== '"') return null;
+            i++;
+            let result = '';
+            let escaped = false;
+            while (i < jsonLike.length) {
+                const ch = jsonLike[i]!;
+                if (!escaped && ch === '"') {
+                    break; // end of string
+                }
+                if (!escaped && ch === '\\') {
+                    escaped = true;
+                    result += ch;
+                    i++;
+                    continue;
+                }
+                escaped = false;
+                result += ch;
+                i++;
+            }
+            return result.length > 0 ? result : null;
+        }
         let success = 0;
         let failed = 0;
         const errors: Array<{ lineIndex: number; error: string; context?: ErrorContext }> = [];
@@ -2924,18 +2972,24 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                     parsed = JSON.parse(combined);
                     break;
                 } catch (e) {
-                    const msg = (e as Error).message || '';
-                    const isRecoverable = msg.includes('Unexpected end of JSON input') || msg.includes('Unterminated string in JSON') || msg.includes('Unexpected token') || msg.includes('EOF');
-                    if (isRecoverable && combinedToIndex + 1 < lines.length) {
+                    // Try appending next physical line if available
+                    if (combinedToIndex + 1 < lines.length) {
                         combinedToIndex++;
                         combined += "\n" + lines[combinedToIndex];
-                        // Limit how many lines we attempt to join to avoid runaway concatenation on corrupt files
-                        if (combinedToIndex - i > 10) {
+                        // Also guard against extremely large concatenations (> 5 MB)
+                        if (combined.length > 5 * 1024 * 1024) {
+                            parsed = undefined;
                             break;
                         }
                         continue;
                     }
-                    // Non-recoverable parse error or hit join limit
+                    // End of file concatenation; attempt fallback extraction of text field
+                    const fallbackText = extractJsonFromTextFieldUnsafe(combined);
+                    if (fallbackText) {
+                        // We will handle it below when content is missing
+                        parsed = { response: { candidates: [{ content: { parts: [{ text: fallbackText }] } }] } } as unknown as Record<string, unknown>;
+                        break;
+                    }
                     parsed = undefined;
                     break;
                 }
