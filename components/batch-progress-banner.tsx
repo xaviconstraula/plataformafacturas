@@ -29,11 +29,22 @@ export function BatchProgressBanner() {
         })
 
         const previousBatches = previousBatchesRef.current
+
+        // Detect newly completed or failed batches
+        // This includes:
+        // 1. Batches that transitioned from PROCESSING to COMPLETED/FAILED
+        // 2. Batches that are newly FAILED (e.g., failed during PENDING state)
         const newlyCompletedBatches = previousBatches.filter(prevBatch =>
-            prevBatch.status === 'PROCESSING' &&
+            (prevBatch.status === 'PROCESSING' || prevBatch.status === 'PENDING') &&
             batches.find(batch =>
                 batch.id === prevBatch.id &&
                 (batch.status === 'COMPLETED' || batch.status === 'FAILED')
+            )
+        ).concat(
+            // Also catch batches that are FAILED but we haven't seen before
+            batches.filter(batch =>
+                batch.status === 'FAILED' &&
+                !previousBatches.find(pb => pb.id === batch.id)
             )
         )
 

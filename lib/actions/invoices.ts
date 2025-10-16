@@ -2618,16 +2618,29 @@ export async function startInvoiceBatch(formDataWithFiles: FormData): Promise<{ 
 // ---------------------------------------------------------------------------
 
 async function processBatchInBackground(files: File[], userId: string) {
+    // Create an initial batch record that will be updated as processing happens
+    let batchId: string | null = null;
+
     try {
+        // Create a placeholder batch record immediately so the user sees progress
+        batchId = await createBatchProcessing(files.length, undefined, userId);
+
+        // Update to PROCESSING state
+        await updateBatchProgress(batchId, {
+            status: 'PROCESSING',
+            startedAt: new Date(),
+        });
+
         // STEP A – Build JSONL chunks
         const tmpDir = path.join(process.cwd(), 'tmp');
-
-        // Ensure tmp directory exists with proper error handling
         try {
-            await fs.promises.mkdir(tmpDir, { recursive: true });
+            if (!fs.existsSync(tmpDir)) {
+                fs.mkdirSync(tmpDir, { recursive: true });
+            }
         } catch (mkdirError) {
+            const errorMsg = mkdirError instanceof Error ? mkdirError.message : 'Unknown error creating tmp directory';
             console.error('[processBatchInBackground] Failed to create tmp directory:', mkdirError);
-            throw new Error(`Failed to create temporary directory for batch processing: ${mkdirError instanceof Error ? mkdirError.message : 'Unknown error'}`);
+            throw new Error(`Failed to create temporary directory: ${errorMsg}`);
         }
 
         const chunks = await buildBatchJsonlChunks(files);
@@ -2697,6 +2710,19 @@ async function processBatchInBackground(files: File[], userId: string) {
         }
     } catch (err) {
         console.error('[processBatchInBackground] Failed to enqueue batches', err);
+
+        // If we created a batch record, update it with the error so the user sees it
+        if (batchId) {
+            const errorMsg = err instanceof Error ? err.message : 'Unknown error during batch processing';
+            await updateBatchProgress(batchId, {
+                status: 'FAILED',
+                errors: [errorMsg],
+                completedAt: new Date(),
+                failedFiles: files.length,
+            }).catch((updateErr) => {
+                console.error('[processBatchInBackground] Failed to update batch record with error:', updateErr);
+            });
+        }
     }
 }
 
@@ -2722,15 +2748,18 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
         const fileName: string = (dest.file_name ?? dest.fileName) as string;
         console.log(`[ingestBatchOutput] Downloading Gemini output for batch ${batchId} (file ${fileName})`);
         const tmpDir = path.join(process.cwd(), 'tmp');
-
-        // Ensure tmp directory exists with proper error handling
         try {
             await fs.promises.mkdir(tmpDir, { recursive: true });
         } catch (mkdirError) {
+            const errorMsg = mkdirError instanceof Error ? mkdirError.message : 'Unknown error creating tmp directory';
             console.error(`[ingestBatchOutput] Failed to create tmp directory for batch ${batchId}:`, mkdirError);
-            throw new Error(`Failed to create temporary directory for batch result processing: ${mkdirError instanceof Error ? mkdirError.message : 'Unknown error'}`);
+            await updateBatchProgress(batchId, {
+                status: 'FAILED',
+                errors: [`Failed to create temporary directory: ${errorMsg}`],
+                completedAt: new Date(),
+            });
+            return;
         }
-
         let downloadedPath: string;
         try {
             downloadedPath = path.join(tmpDir, path.basename(fileName));
