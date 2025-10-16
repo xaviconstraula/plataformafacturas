@@ -50,15 +50,31 @@ function parseJsonSafe(rawInput: string): unknown {
         raw = raw.replace(/^```[a-zA-Z]*\s*/m, "").replace(/```\s*$/m, "").trim();
     }
     raw = raw.replace(/[\uFEFF\u200B-\u200D]/g, '');
+
+    // Handle double-escaped JSON from Gemini batch responses
+    // The text field contains JSON that is already escaped as a string
+    // e.g., {"text": "{\\\"key\\\": \\\"value\\\"}"}
+    // We need to unescape it carefully, handling the order correctly
     if (raw.startsWith('{\\')) {
+        // CRITICAL: Handle escape sequences in correct order!
+        // 1. First handle double-escaped backslashes (\\\\) to avoid breaking other escapes
+        // 2. Then handle escaped quotes (\\\")
+        // 3. Then handle other escape sequences
         raw = raw
-            .replace(/\\"/g, '"')
-            .replace(/\\\\/g, '\\')
-            .replace(/\\n/g, '\n')
-            .replace(/\\r/g, '\r')
-            .replace(/\\t/g, '\t');
+            .replace(/\\\\/g, '\x00')      // Temporarily replace \\\\ with placeholder
+            .replace(/\\"/g, '"')          // Unescape quotes
+            .replace(/\\\//g, '/')         // Unescape forward slashes
+            .replace(/\\b/g, '\b')         // Unescape backspace
+            .replace(/\\f/g, '\f')         // Unescape form feed
+            .replace(/\\n/g, '\n')         // Unescape newlines
+            .replace(/\\r/g, '\r')         // Unescape carriage returns
+            .replace(/\\t/g, '\t')         // Unescape tabs
+            .replace(/\x00/g, '\\');       // Replace placeholder with actual backslash
     }
+
     try { return JSON.parse(raw); } catch { }
+
+    // Fallback: try to extract JSON object if possible
     const start = raw.indexOf('{');
     const end = raw.lastIndexOf('}');
     if (start !== -1 && end !== -1 && end > start) {
