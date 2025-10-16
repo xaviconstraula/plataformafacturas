@@ -2969,4 +2969,69 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
         // Return true if no errors occurred, false otherwise
         return errors.length === 0;
     }
+}
+
+// ---------------------------------------------------------------------------
+// 🛑  Server Action: Cancel all active batches
+// ---------------------------------------------------------------------------
+
+export async function cancelAllBatches(): Promise<{ success: boolean; message: string; cancelledCount: number }> {
+    const user = await requireAuth();
+
+    try {
+        // Get all active batches for this user
+        const activeBatches = await prisma.batchProcessing.findMany({
+            where: {
+                userId: user.id,
+                status: {
+                    in: ['PENDING', 'PROCESSING']
+                }
+            }
+        });
+
+        if (activeBatches.length === 0) {
+            return {
+                success: true,
+                message: 'No active batches to cancel.',
+                cancelledCount: 0
+            };
+        }
+
+        let cancelledCount = 0;
+
+        for (const batch of activeBatches) {
+            try {
+                // Call Gemini API to cancel the batch
+                await gemini.batches.cancel({ name: batch.id });
+
+                // Update batch status in database
+                await updateBatchProgress(batch.id, {
+                    status: 'CANCELLED',
+                    completedAt: new Date(),
+                });
+
+                cancelledCount++;
+            } catch (error) {
+                console.error(`Failed to cancel batch ${batch.id}:`, error);
+                // Continue with other batches even if one fails
+            }
+        }
+
+        const message = cancelledCount === activeBatches.length
+            ? `Successfully cancelled ${cancelledCount} batch(es).`
+            : `Cancelled ${cancelledCount} out of ${activeBatches.length} batch(es). Some batches may have already completed.`;
+
+        return {
+            success: true,
+            message,
+            cancelledCount
+        };
+    } catch (error) {
+        console.error('Error cancelling batches:', error);
+        return {
+            success: false,
+            message: error instanceof Error ? error.message : 'Unknown error occurred while cancelling batches',
+            cancelledCount: 0
+        };
+    }
 } 
