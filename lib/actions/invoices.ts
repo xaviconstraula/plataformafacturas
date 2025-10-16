@@ -266,10 +266,9 @@ export async function updateBatchProgress(
         },
     });
 
-    // Revalidate paths when batch status changes
-    if (updates.status) {
-        revalidatePath("/facturas");
-    }
+    // Note: revalidatePath removed from here because this function is called
+    // from background contexts (processBatchInBackground) where revalidatePath
+    // is not allowed. Revalidation happens via TanStack Query polling instead.
 }
 
 // Get active batch processing records

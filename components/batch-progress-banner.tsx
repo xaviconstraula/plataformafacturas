@@ -71,6 +71,7 @@ export function BatchProgressBanner() {
                     // Batch completed with some failures
                     toast.warning("Procesamiento completado con errores", {
                         description: `${successfulFiles} facturas procesadas, ${failedFiles} con errores`,
+                        duration: Infinity,
                         action: {
                             label: "Ver errores",
                             onClick: () => {
@@ -88,6 +89,7 @@ export function BatchProgressBanner() {
             } else if (currentBatch.status === 'FAILED') {
                 toast.error("Procesamiento fallido", {
                     description: "Hubo un error durante el procesamiento",
+                    duration: Infinity,
                     action: {
                         label: "Ver errores",
                         onClick: () => {
@@ -188,19 +190,22 @@ export function BatchProgressBanner() {
                 </Card>
             </div>
 
-            {selectedBatchForErrors && (
-                <BatchErrorsDialog
-                    isOpen={errorDialogOpen}
-                    onClose={() => {
-                        setErrorDialogOpen(false)
-                        setSelectedBatchForErrors(null)
-                    }}
-                    batchId={selectedBatchForErrors.id}
-                    errors={(selectedBatchForErrors.errors as string[]) || []}
-                    failedFiles={selectedBatchForErrors.failedFiles || 0}
-                    totalFiles={selectedBatchForErrors.totalFiles || 0}
-                />
-            )}
+            {selectedBatchForErrors ? (
+                <>
+                    {console.log('Rendering BatchErrorsDialog with batch:', selectedBatchForErrors)}
+                    <BatchErrorsDialog
+                        isOpen={errorDialogOpen}
+                        onClose={() => {
+                            setErrorDialogOpen(false)
+                            setSelectedBatchForErrors(null)
+                        }}
+                        batchId={selectedBatchForErrors.id}
+                        errors={(selectedBatchForErrors.errors as string[]) || []}
+                        failedFiles={selectedBatchForErrors.failedFiles || 0}
+                        totalFiles={selectedBatchForErrors.totalFiles || 0}
+                    />
+                </>
+            ) : null}
         </>
     )
 } 
