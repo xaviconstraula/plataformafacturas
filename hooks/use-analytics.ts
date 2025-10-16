@@ -68,9 +68,9 @@ export function useBatchProgress() {
         queryFn: async () => {
             return await getActiveBatches()
         },
-        staleTime: 10 * 1000,
+        staleTime: 2 * 1000,
         gcTime: 5 * 60 * 1000,
-        refetchInterval: 30 * 1000, // Poll every 30 seconds to reduce load
+        refetchInterval: 5 * 1000, // Poll every 5 seconds for faster error detection (was 30s)
         refetchOnWindowFocus: false,
         refetchOnMount: true,
         enabled: typeof window !== 'undefined', // Only run on client side

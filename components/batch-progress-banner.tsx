@@ -4,15 +4,15 @@ import { useEffect, useState, useRef } from "react"
 import { Card, CardContent } from "@/components/ui/card"
 import { Loader2, FileText, AlertCircle } from "lucide-react"
 import { useBatchProgress } from "@/hooks/use-analytics"
+import { useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { BatchErrorsDialog } from "@/components/batch-errors-dialog"
 
 export function BatchProgressBanner() {
-    const { data: batches = [], isLoading } = useBatchProgress()
+    const queryClient = useQueryClient()
+    const { data: batches = [], isLoading, refetch } = useBatchProgress()
     const previousBatchesRef = useRef<typeof batches>([])
-    // Tracks if the banner is currently visible so we only emit the
-    // "batchBannerVisible" event once per visibility change.
     const bannerShownRef = useRef(false)
     const [expectedTotal, setExpectedTotal] = useState<number | null>(null)
     const [errorDialogOpen, setErrorDialogOpen] = useState(false)
@@ -22,9 +22,9 @@ export function BatchProgressBanner() {
     useEffect(() => {
         if (isLoading || batches.length === 0) return
 
-        console.log('Checking batch status and its current status:', {
+        console.log('Checking batch status:', {
             totalBatches: batches.length,
-            batchStatuses: batches.map(b => ({ id: b.id, status: b.status })),
+            batchStatuses: batches.map(b => ({ id: b.id, status: b.status, errors: b.errors?.length })),
             activeBatches: batches.filter(b => b.status === 'PENDING' || b.status === 'PROCESSING').length
         })
 
@@ -48,19 +48,22 @@ export function BatchProgressBanner() {
             )
         )
 
-        // If batches completed, show notification and reload page immediately
+        // If batches completed, show notification
         if (newlyCompletedBatches.length > 0) {
             const completedBatch = newlyCompletedBatches[0]
             const currentBatch = batches.find(b => b.id === completedBatch.id)
 
-            console.log('Batch completed detected:', {
-                batchId: completedBatch.id,
-                status: currentBatch?.status,
-                successfulFiles: currentBatch?.successfulFiles,
-                failedFiles: currentBatch?.failedFiles
-            });
+            if (!currentBatch) return
 
-            if (currentBatch?.status === 'COMPLETED') {
+            console.log('Batch completion detected:', {
+                batchId: completedBatch.id,
+                status: currentBatch.status,
+                successfulFiles: currentBatch.successfulFiles,
+                failedFiles: currentBatch.failedFiles,
+                hasErrors: currentBatch.errors && currentBatch.errors.length > 0
+            })
+
+            if (currentBatch.status === 'COMPLETED') {
                 const failedFiles = currentBatch?.failedFiles || 0
                 const successfulFiles = currentBatch?.successfulFiles || 0
 
@@ -82,8 +85,7 @@ export function BatchProgressBanner() {
                         description: `${successfulFiles} facturas procesadas exitosamente. Recargando página...`
                     })
                 }
-            } else if (currentBatch?.status === 'FAILED') {
-                const failedFiles = currentBatch?.failedFiles || currentBatch?.totalFiles || 0
+            } else if (currentBatch.status === 'FAILED') {
                 toast.error("Procesamiento fallido", {
                     description: "Hubo un error durante el procesamiento",
                     action: {
@@ -97,9 +99,9 @@ export function BatchProgressBanner() {
             }
 
             // Only reload if batch was fully successful (no failures)
-            if (currentBatch?.status === 'COMPLETED' && (currentBatch?.failedFiles || 0) === 0) {
+            if (currentBatch.status === 'COMPLETED' && (currentBatch?.failedFiles || 0) === 0) {
                 setTimeout(() => {
-                    console.log('Reloading page after batch completion...');
+                    console.log('Reloading page after batch completion...')
                     window.location.reload()
                 }, 1000)
             }
@@ -123,7 +125,7 @@ export function BatchProgressBanner() {
         previousBatchesRef.current = batches // Keep all batches for completion detection
     }, [batches, isLoading])
 
-    // Listen for custom events
+    // Listen for custom events and force refetch when needed
     useEffect(() => {
         // Listen for custom event to immediately refresh when a new batch is created
         function handleBatchCreated(e: Event) {
@@ -131,7 +133,9 @@ export function BatchProgressBanner() {
             if (detail?.totalFiles) {
                 setExpectedTotal(detail.totalFiles)
             }
-            console.log('Batch created event received, will be refreshed by TanStack Query polling...')
+            console.log('Batch created event received, forcing refetch...')
+            // Force immediate refetch to pick up new batch
+            refetch()
         }
 
         window.addEventListener('batchCreated', handleBatchCreated)
@@ -139,20 +143,18 @@ export function BatchProgressBanner() {
         return () => {
             window.removeEventListener('batchCreated', handleBatchCreated)
         }
-    }, [])
+    }, [refetch])
 
     // Filter active batches
     const activeBatches = batches.filter(batch =>
         batch.status === 'PENDING' || batch.status === 'PROCESSING'
     )
 
-    // Aggregate the total number of files across all active batches so the user
-    // only sees a single banner (e.g. "Procesando 215 facturas") incluso antes
-    // de que todos los batches estén registrados en la BD.
+    // Aggregate the total number of files across all active batches
     const aggregated = activeBatches.reduce((sum, b) => sum + (b.totalFiles ?? 0), 0)
     const totalFiles = expectedTotal && expectedTotal > aggregated ? expectedTotal : aggregated
 
-    // Emitimos evento cuando alcanzamos el total esperado
+    // Emit event when we reach the expected total
     useEffect(() => {
         if (expectedTotal && aggregated >= expectedTotal) {
             window.dispatchEvent(new CustomEvent('batchBannerReady'))
@@ -163,10 +165,7 @@ export function BatchProgressBanner() {
     // Show nothing while the very first fetch is in-flight.
     if (isLoading) return null
 
-    // If we have no active batches *and* no optimistic expectation, hide the banner.
-    // Having an `expectedTotal` means the client just queued a batch locally, so we
-    // still render the banner right away for instant feedback, even before the
-    // server has persisted the record.
+    // If we have no active batches and no optimistic expectation, hide the banner.
     if (activeBatches.length === 0 && (expectedTotal === null || expectedTotal === 0)) {
         return null
     }
