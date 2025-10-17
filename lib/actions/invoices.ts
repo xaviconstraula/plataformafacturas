@@ -115,8 +115,10 @@ function parseStructuredText(rawInput: string): ExtractedPdfData | null {
                 if (!itemPart.startsWith('ITEM@@@')) continue;
 
                 const itemFields = itemPart.substring(7).split('@@@'); // Remove "ITEM@@@" and split by @@@
-                if (itemFields.length < 10) {
-                    console.warn('[parseStructuredText] Item has fewer than 10 fields, skipping');
+
+                // Only require minimum essential fields (materialName at index 0)
+                if (itemFields.length < 1 || !itemFields[0]?.trim()) {
+                    console.warn('[parseStructuredText] Item missing materialName, skipping');
                     continue;
                 }
 
