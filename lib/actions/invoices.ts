@@ -6,6 +6,7 @@ import { Prisma, type Provider, type Material, type Invoice, type InvoiceItem, t
 import { revalidatePath } from "next/cache";
 import { GoogleGenAI } from "@google/genai";
 import { normalizeMaterialCode, areMaterialCodesSimilar, normalizeCifForComparison, buildCifVariants } from "@/lib/utils";
+import { parseJsonLinesFromFile } from "@/lib/utils/jsonl-parser";
 import { requireAuth } from "@/lib/auth-utils";
 import fs from "fs";
 import path from "path";
@@ -2899,9 +2900,8 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
             try { const stats = await fs.promises.stat(downloadedPath); if (stats.isDirectory()) { throw new Error(`Downloaded path ${downloadedPath} is a directory, not a file`); } }
             catch (statErr) { throw new Error(`Cannot access file stats for ${downloadedPath}: ${statErr instanceof Error ? statErr.message : 'Unknown error'}`); }
             console.log(`[ingestBatchOutput] Using streaming parser for ${downloadedPath}`);
-            const fileText = await fs.promises.readFile(downloadedPath, 'utf8');
-            const lines = fileText.split(/\r?\n/);
-            const processingSucceeded = await processOutputLines(lines, parseJsonString);
+            const parsedLines = await parseJsonLinesFromFile(downloadedPath);
+            const processingSucceeded = await processOutputLines(parsedLines, parseJsonString);
 
             // Only clean up the downloaded file if processing succeeded (no errors)
             if (processingSucceeded) {
@@ -2936,8 +2936,8 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
         }
     } else if (dest && (dest.inlined_responses || dest.inlinedResponses)) {
         const inlined = (dest.inlined_responses ?? dest.inlinedResponses) as Array<GeminiInlineResponse>;
-        const lines = inlined.map((r) => JSON.stringify(r));
-        await processOutputLines(lines, parseJsonString);
+        const parsedLines = inlined.map((r) => ({ ...r }));
+        await processOutputLines(parsedLines, parseJsonString);
     } else {
         console.warn(`[ingestBatchOutput] Gemini batch ${batchId} has no dest results`);
     }
@@ -2952,105 +2952,38 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
         result?: CreateInvoiceResult;
     }
 
-    async function processOutputLines(lines: string[], parseJsonString: (rawInput: string, context?: string) => unknown): Promise<boolean> {
-        function extractJsonFromTextFieldUnsafe(jsonLike: string): string | null {
-            const textKeyIndex = jsonLike.indexOf('"text"');
-            if (textKeyIndex === -1) return null;
-            const colonIndex = jsonLike.indexOf(':', textKeyIndex);
-            if (colonIndex === -1) return null;
-            // Find opening quote of the string value
-            let i = colonIndex + 1;
-            while (i < jsonLike.length && /\s/.test(jsonLike[i]!)) i++;
-            if (jsonLike[i] !== '"') return null;
-            i++;
-            let result = '';
-            let escaped = false;
-            while (i < jsonLike.length) {
-                const ch = jsonLike[i]!;
-                if (!escaped && ch === '"') {
-                    break; // end of string
-                }
-                if (!escaped && ch === '\\') {
-                    escaped = true;
-                    result += ch;
-                    i++;
-                    continue;
-                }
-                escaped = false;
-                result += ch;
-                i++;
-            }
-            return result.length > 0 ? result : null;
-        }
+    async function processOutputLines(entries: unknown[], parseJsonString: (rawInput: string, context?: string) => unknown): Promise<boolean> {
         let success = 0;
         let failed = 0;
         const errors: Array<{ lineIndex: number; error: string; context?: ErrorContext }> = [];
 
-        // Process JSONL line by line and aggressively append following lines
-        // until a valid JSON object is formed (cap to prevent infinite loops)
-        let i = 0;
-        while (i < lines.length) {
-            const raw = lines[i];
-            if (!raw.trim()) { i++; continue; }
-
-            let parsed: unknown;
-            let combined = raw;
-            let combinedToIndex = i;
-            let appended = 0;
-            const MAX_APPEND_LINES = 200; // generous cap for very long/wrapped lines
-
-            for (; ;) {
-                try {
-                    parsed = JSON.parse(combined);
-                    break;
-                } catch (e) {
-                    // Keep appending subsequent lines if available, up to a high cap
-                    if (combinedToIndex + 1 < lines.length && appended < MAX_APPEND_LINES) {
-                        combinedToIndex++;
-                        combined += "\n" + lines[combinedToIndex];
-                        appended++;
-                        continue;
-                    }
-
-                    // If concatenation didn't work, attempt to extract the text field directly
-                    const fallbackText = extractJsonFromTextFieldUnsafe(combined);
-                    if (fallbackText) {
-                        parsed = { response: { candidates: [{ content: { parts: [{ text: fallbackText }] } }] } } as unknown as Record<string, unknown>;
-                        break;
-                    }
-
-                    const parseError = (e as SyntaxError).message;
-                    console.error(`[ingestBatchOutput] Failed to parse JSONL at line ${i + 1} after appending ${appended} lines:`, {
-                        error: parseError,
-                        lineLength: combined.length,
-                        preview: combined.substring(0, 300)
-                    });
-
-                    parsed = undefined;
-                    break;
-                }
-            }
-
-            // Advance the outer index to the last line we consumed
-            i = combinedToIndex;
-
-            if (!parsed) {
-                const errorMsg = 'Unable to parse JSON after parsing attempts';
-                console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1}`);
-                errors.push({ lineIndex: i + 1, error: errorMsg, context: { rawLine: combined.substring(0, 500) } });
-                failed++;
-                i++;
-                continue;
-            }
-
+        for (let index = 0; index < entries.length; index++) {
+            const entry = entries[index];
+            const lineIndex = index + 1;
             try {
-                // Gemini result line shape: { key, response: { candidates: [{ content: { parts: [{ text }] } }] }, error }
-                const parsedObj = parsed as Record<string, unknown>;
-                const response = parsedObj?.response as Record<string, unknown> | undefined;
-                // Prefer joining all parts' text if present; fallback to response.text
+                const parsedObj = entry as Record<string, unknown> | null;
+                if (!parsedObj || typeof parsedObj !== 'object') {
+                    const errorMsg = 'Entry is not an object';
+                    console.error(`[ingestBatchOutput] ${errorMsg} at line ${lineIndex}`);
+                    errors.push({ lineIndex, error: errorMsg });
+                    failed++;
+                    continue;
+                }
+                const response = parsedObj.response as Record<string, unknown> | undefined;
+                const errorPayload = parsedObj.error as unknown;
+                const key = (parsedObj.key as string) ?? (parsedObj.custom_id as string) ?? 'unknown';
+
+                if (errorPayload) {
+                    const errorMsg = `Gemini request failed: ${JSON.stringify(errorPayload)}`;
+                    console.error(`[ingestBatchOutput] ${errorMsg} (key: ${key})`);
+                    errors.push({ lineIndex, error: errorMsg, context: { custom_id: key } });
+                    failed++;
+                    continue;
+                }
+
                 let content: string | undefined;
                 if (response) {
-                    const candidates = response?.candidates as Array<Record<string, unknown>> | undefined;
+                    const candidates = response.candidates as Array<Record<string, unknown>> | undefined;
                     const contentObj = candidates?.[0]?.content as Record<string, unknown> | undefined;
                     const parts = contentObj?.parts as Array<Record<string, unknown>> | undefined;
                     if (Array.isArray(parts)) {
@@ -3058,44 +2991,34 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                             .map((p) => (typeof (p as { text?: unknown })?.text === 'string' ? ((p as { text?: string }).text) : ''))
                             .join('');
                     }
-                    const respText = (response as unknown as { text?: unknown }).text;
+                    const respText = (response as { text?: unknown }).text;
                     if ((!content || content.length === 0) && typeof respText === 'string') {
                         content = respText;
                     }
                 }
-                let key = parsedObj?.key as string | undefined;
-                if (!key && typeof combined === 'string') {
-                    const match = /"key"\s*:\s*"([^"]*)"/.exec(combined);
-                    if (match && match[1]) {
-                        key = match[1];
-                    }
-                }
-                if (!content) {
+
+                if (!content || content.length === 0) {
                     const errorMsg = 'No content in Gemini response';
-                    const identifier = key ?? (parsedObj?.custom_id as string | undefined) ?? 'unknown';
-                    console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (id: ${identifier})`);
-                    errors.push({ lineIndex: i + 1, error: errorMsg, context: { custom_id: identifier } });
+                    console.error(`[ingestBatchOutput] ${errorMsg} for line ${lineIndex} (key: ${key})`);
+                    errors.push({ lineIndex, error: errorMsg, context: { custom_id: key } });
                     failed++;
-                    i++;
                     continue;
                 }
 
-                // Log extracted content for debugging
-                console.log(`[ingestBatchOutput] Extracted raw content for line ${i + 1} (key: ${key}):`, content.substring(0, 500));
+                console.log(`[ingestBatchOutput] Extracted raw content for line ${lineIndex} (key: ${key}):`, content.substring(0, 500));
 
-                const extractedUnknown = parseJsonString(content, `extracted data for ${key ?? (parsedObj?.custom_id as string | undefined) ?? 'unknown'}`);
+                const extractedUnknown = parseJsonString(content, `extracted data for ${key}`);
                 if (!extractedUnknown || !isExtractedPdfData(extractedUnknown)) {
                     const errorMsg = `Failed to parse extracted data JSON`;
-                    const identifier = (parsedObj?.key as string | undefined) ?? (parsedObj?.custom_id as string | undefined) ?? 'unknown';
-                    console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (id: ${identifier})`);
+                    const identifier = key ?? 'unknown';
+                    console.error(`[ingestBatchOutput] ${errorMsg} for line ${lineIndex} (id: ${identifier})`);
                     console.error(`[ingestBatchOutput] Raw content: ${content.substring(0, 500)}${content.length > 500 ? '...' : ''}`);
                     errors.push({
-                        lineIndex: i + 1,
+                        lineIndex,
                         error: errorMsg,
                         context: { custom_id: identifier, rawContent: content.substring(0, 500) }
                     });
                     failed++;
-                    i++;
                     continue;
                 }
 
@@ -3105,9 +3028,9 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                     success++;
                 } else {
                     const errorMsg = `Failed to save invoice: ${result.message}`;
-                    console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (key: ${key ?? 'unknown'})`);
+                    console.error(`[ingestBatchOutput] ${errorMsg} for line ${lineIndex} (key: ${key ?? 'unknown'})`);
                     errors.push({
-                        lineIndex: i + 1,
+                        lineIndex,
                         error: errorMsg,
                         context: { custom_id: key, result }
                     });
@@ -3115,18 +3038,14 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                 }
             } catch (err) {
                 const errorMsg = `Error processing line: ${(err as Error).message}`;
-                console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1}`);
-                const preview = combined.substring(0, 500);
-                console.error(`[ingestBatchOutput] Raw line preview: ${preview}${combined.length > 500 ? '...' : ''}`);
+                console.error(`[ingestBatchOutput] ${errorMsg} for line ${lineIndex}`);
                 errors.push({
-                    lineIndex: i + 1,
+                    lineIndex,
                     error: errorMsg,
-                    context: { rawLine: preview }
+                    context: { rawLine: JSON.stringify(entry).substring(0, 500) }
                 });
                 failed++;
             }
-
-            i++;
         }
 
         await updateBatchProgress(batchId, {
