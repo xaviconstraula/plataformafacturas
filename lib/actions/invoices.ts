@@ -2851,6 +2851,35 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
         try {
             downloadedPath = path.join(tmpDir, path.basename(fileName));
             await gemini.files.download({ file: fileName as unknown as string, downloadPath: downloadedPath });
+
+            // 🔥 FIX: Wait for file to be fully written and closed by ensuring stable file size
+            // The Gemini SDK may return before the file is fully flushed to disk
+            let previousSize = -1;
+            let stableCount = 0;
+            const maxWait = 30000; // 30 seconds max wait
+            const checkInterval = 100; // Check every 100ms
+            const startWait = Date.now();
+
+            while (stableCount < 3 && (Date.now() - startWait) < maxWait) {
+                try {
+                    const stats = await fs.promises.stat(downloadedPath);
+                    if (stats.size === previousSize && stats.size > 0) {
+                        stableCount++;
+                    } else {
+                        stableCount = 0;
+                        previousSize = stats.size;
+                    }
+                    if (stableCount < 3) {
+                        await new Promise(resolve => setTimeout(resolve, checkInterval));
+                    }
+                } catch {
+                    // File doesn't exist yet, wait and retry
+                    await new Promise(resolve => setTimeout(resolve, checkInterval));
+                }
+            }
+
+            console.log(`[ingestBatchOutput] File download completed and stable: ${downloadedPath} (${previousSize} bytes)`);
+
             if (!await fs.promises.access(downloadedPath).then(() => true).catch(() => false)) {
                 try {
                     const files = await fs.promises.readdir(tmpDir);
