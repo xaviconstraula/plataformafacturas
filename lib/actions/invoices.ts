@@ -10,6 +10,7 @@ import { requireAuth } from "@/lib/auth-utils";
 import fs from "fs";
 import path from "path";
 import os from "os";
+import { parseJsonLinesFromFile } from "@/lib/utils/jsonl-parser";
 
 // ------------------------------
 // Upload constraints & utilities
@@ -44,22 +45,8 @@ function isRateLimitError(error: unknown): boolean {
 }
 
 /**
- * Parse structured text format from AI into ExtractedPdfData
- * Format:
- * ---INVOICE_START---
- * INVOICE_CODE: ABC123
- * PROVIDER_NAME: Company Name
- * PROVIDER_CIF: A12345678
- * PROVIDER_EMAIL: email@example.com (or NULL)
- * PROVIDER_PHONE: 123456789 (or NULL)
- * PROVIDER_ADDRESS: Address (or NULL)
- * ISSUE_DATE: 2024-01-01
- * TOTAL_AMOUNT: 1000.00
- * ---ITEMS_START---
- * ITEM|Material Name|MATCODE123|true|10.00|50.00|500.00|2024-01-01|OT-123|Description|1
- * ITEM|Another Material|NULL|true|5.00|20.00|100.00|NULL|NULL|NULL|NULL
- * ---ITEMS_END---
- * ---INVOICE_END---
+ * Parse single-line delimited format from AI into ExtractedPdfData
+ * Format: INV###[code]###[name]###[cif]###[email]###[phone]###[address]###[date]###[amount]###ITEMS###ITEM@@@[fields]###ITEM@@@[fields]###END
  */
 function parseStructuredText(rawInput: string): ExtractedPdfData | null {
     if (!rawInput) return null;
@@ -89,6 +76,102 @@ function parseStructuredText(rawInput: string): ExtractedPdfData | null {
     }
 
     try {
+        // Try new single-line format first
+        if (text.startsWith('INV###') && text.includes('###END')) {
+            // Remove INV### prefix and ###END suffix
+            let content = text.substring(6); // Remove "INV###"
+            if (content.endsWith('###END')) {
+                content = content.substring(0, content.length - 6); // Remove "###END"
+            }
+
+            // Split by ### to get sections
+            const parts = content.split('###');
+
+            if (parts.length < 9) {
+                console.error('[parseStructuredText] Not enough parts in single-line format:', parts.length);
+                return null;
+            }
+
+            const invoiceCode = parts[0] || '';
+            const providerName = parts[1] || '';
+            const providerCif = parts[2] || '';
+            const providerEmail = parseValue(parts[3]);
+            const providerPhone = parseValue(parts[4]);
+            const providerAddress = parseValue(parts[5]);
+            const issueDate = parts[6] || '';
+            const totalAmount = parseNumber(parts[7]);
+
+            // Find ITEMS marker
+            const itemsIndex = parts.indexOf('ITEMS');
+            if (itemsIndex === -1) {
+                console.error('[parseStructuredText] ITEMS marker not found');
+                return null;
+            }
+
+            // Parse items (everything after ITEMS marker)
+            const items: ExtractedPdfItemData[] = [];
+            for (let i = itemsIndex + 1; i < parts.length; i++) {
+                const itemPart = parts[i];
+                if (!itemPart.startsWith('ITEM@@@')) continue;
+
+                const itemFields = itemPart.substring(7).split('@@@'); // Remove "ITEM@@@" and split by @@@
+                if (itemFields.length < 10) {
+                    console.warn('[parseStructuredText] Item has fewer than 10 fields, skipping');
+                    continue;
+                }
+
+                const materialName = itemFields[0] || '';
+                const materialCode = parseValue(itemFields[1]) || undefined;
+                const isMaterial = parseBoolean(itemFields[2] || 'true');
+                const quantity = parseNumber(itemFields[3] || '0');
+                const unitPrice = parseNumber(itemFields[4] || '0');
+                const totalPrice = parseNumber(itemFields[5] || '0');
+                const itemDate = parseValue(itemFields[6]) || undefined;
+                const workOrder = parseValue(itemFields[7]) || undefined;
+                const description = parseValue(itemFields[8]) || undefined;
+                const lineNumber = (() => {
+                    const val = itemFields[9];
+                    if (!val || val.toUpperCase() === 'NULL') return undefined;
+                    const n = Number(val.trim().replace(',', '.'));
+                    return Number.isFinite(n) ? Math.trunc(n) : undefined;
+                })();
+
+                items.push({
+                    materialName,
+                    materialCode,
+                    isMaterial,
+                    quantity,
+                    unitPrice,
+                    totalPrice,
+                    itemDate,
+                    workOrder,
+                    description,
+                    lineNumber,
+                });
+            }
+
+            // Validate required fields
+            if (!invoiceCode || !providerName || !providerCif || !issueDate) {
+                console.error('[parseStructuredText] Missing required fields:', { invoiceCode, providerName, providerCif, issueDate });
+                return null;
+            }
+
+            return {
+                invoiceCode,
+                provider: {
+                    name: providerName,
+                    cif: providerCif,
+                    email: providerEmail || undefined,
+                    phone: providerPhone || undefined,
+                    address: providerAddress || undefined,
+                },
+                issueDate,
+                totalAmount,
+                items,
+            };
+        }
+
+        // Fallback to old format for backward compatibility
         const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
 
         let invoiceCode = '';
@@ -160,19 +243,37 @@ function parseStructuredText(rawInput: string): ExtractedPdfData | null {
 
             if (inItems && line.startsWith('ITEM|')) {
                 const parts = line.substring(5).split('|');
-                // After removing "ITEM|", we expect 10 fields (indices 0-9)
                 if (parts.length >= 10) {
+                    const materialName = parts[0] || '';
+                    const materialCode = parseValue(parts[1] || '') || undefined;
+                    const isMaterial = parseBoolean(parts[2] || 'true');
+                    const quantity = parseNumber(parts[3] || '0');
+                    const unitPrice = parseNumber(parts[4] || '0');
+                    const totalPrice = parseNumber(parts[5] || '0');
+                    const itemDate = parseValue(parts[6] || '') || undefined;
+                    const workOrder = parseValue(parts[7] || '') || undefined;
+                    const lastIndex = parts.length - 1;
+                    const rawDescription = parts.slice(8, lastIndex).join('|');
+                    const description = parseValue(rawDescription || (parts[8] || '')) || undefined;
+                    const lineNumberStr = parts[lastIndex] ?? '';
+                    const lineNumber = (() => {
+                        const trimmed = (lineNumberStr || '').trim();
+                        if (!trimmed || trimmed.toUpperCase() === 'NULL') return undefined;
+                        const n = Number(trimmed.replace(',', '.'));
+                        return Number.isFinite(n) ? Math.trunc(n) : undefined;
+                    })();
+
                     items.push({
-                        materialName: parts[0] || '',
-                        materialCode: parseValue(parts[1] || '') || undefined,
-                        isMaterial: parseBoolean(parts[2] || 'true'),
-                        quantity: parseNumber(parts[3] || '0'),
-                        unitPrice: parseNumber(parts[4] || '0'),
-                        totalPrice: parseNumber(parts[5] || '0'),
-                        itemDate: parseValue(parts[6] || '') || undefined,
-                        workOrder: parseValue(parts[7] || '') || undefined,
-                        description: parseValue(parts[8] || '') || undefined,
-                        lineNumber: parts[9] ? parseNumber(parts[9]) : undefined,
+                        materialName,
+                        materialCode,
+                        isMaterial,
+                        quantity,
+                        unitPrice,
+                        totalPrice,
+                        itemDate,
+                        workOrder,
+                        description,
+                        lineNumber,
                     });
                 }
             }
@@ -513,7 +614,7 @@ async function callPdfExtractAPI(file: File): Promise<CallPdfExtractAPIResponse>
         const buffer = Buffer.from(await file.arrayBuffer());
         const base64 = buffer.toString('base64');
 
-        // Build prompt for direct PDF processing
+        // Build prompt for direct PDF processing - using SINGLE LINE format to avoid parsing issues
         const promptText = `Extract invoice data from this PDF document (consolidate all pages into a single invoice). Only extract visible data, use NULL for missing optional fields.
 
 CRITICAL NUMBER ACCURACY:
@@ -550,31 +651,24 @@ LINE ITEMS (extract ALL items from all pages and make sure it's actually a mater
 - description: Item description if available, otherwise NULL
 - lineNumber: Line number in invoice if available, otherwise NULL
 
-OUTPUT FORMAT - RETURN EXACTLY THIS STRUCTURE:
----INVOICE_START---
-INVOICE_CODE: [invoice code here]
-PROVIDER_NAME: [provider name here]
-PROVIDER_CIF: [CIF/NIF/NIE here]
-PROVIDER_EMAIL: [email here or NULL]
-PROVIDER_PHONE: [phone here or NULL]
-PROVIDER_ADDRESS: [address here or NULL]
-ISSUE_DATE: [YYYY-MM-DD]
-TOTAL_AMOUNT: [amount with dot as decimal separator]
----ITEMS_START---
-ITEM|[materialName]|[materialCode or NULL]|[true or false]|[quantity]|[unitPrice]|[totalPrice]|[itemDate or NULL]|[workOrder or NULL]|[description or NULL]|[lineNumber or NULL]
-ITEM|[materialName]|[materialCode or NULL]|[true or false]|[quantity]|[unitPrice]|[totalPrice]|[itemDate or NULL]|[workOrder or NULL]|[description or NULL]|[lineNumber or NULL]
-(one ITEM line per item)
----ITEMS_END---
----INVOICE_END---
+OUTPUT FORMAT - CRITICAL: EVERYTHING MUST BE ON A SINGLE LINE WITH NO LINE BREAKS OR NEWLINES:
 
-IMPORTANT RULES:
-- Use pipe | as delimiter for ITEM lines
+INV###[invoiceCode]###[providerName]###[providerCIF]###[providerEmail or NULL]###[providerPhone or NULL]###[providerAddress or NULL]###[issueDate YYYY-MM-DD]###[totalAmount]###ITEMS###ITEM@@@[name]@@@[code or NULL]@@@[true/false]@@@[qty]@@@[unitPrice]@@@[totalPrice]@@@[date or NULL]@@@[workOrder or NULL]@@@[desc or NULL]@@@[lineNum or NULL]###ITEM@@@[name]@@@[code or NULL]@@@[true/false]@@@[qty]@@@[unitPrice]@@@[totalPrice]@@@[date or NULL]@@@[workOrder or NULL]@@@[desc or NULL]@@@[lineNum or NULL]###END
+
+EXAMPLE:
+INV###AB123###ACME Corp###A12345678###info@acme.com###912345678###Calle Mayor 1 Madrid###2024-01-15###1000.50###ITEMS###ITEM@@@Cement Bag@@@CEM001@@@true@@@10.00@@@25.50@@@255.00@@@2024-01-15@@@OT-4077@@@High quality cement@@@1###ITEM@@@Delivery Fee@@@NULL@@@false@@@1.00@@@50.00@@@50.00@@@NULL@@@NULL@@@NULL@@@2###END
+
+CRITICAL RULES:
+- ABSOLUTELY NO LINE BREAKS OR NEWLINES ANYWHERE
+- Use ### to separate invoice header fields
+- Use @@@ to separate item fields within each ITEM
+- Use ### between items
+- Replace any ### or @@@ characters in text with spaces
 - Use NULL (all caps) for missing values
-- Use true or false (lowercase) for isMaterial field
-- Use dot (.) as decimal separator for all numbers
-- Do NOT include any explanations, comments, or extra text
-- Each ITEM line must have exactly 10 fields after ITEM| separated by pipes
-- Example ITEM line: ITEM|Cement Bag|CEM-001|true|10.00|25.50|255.00|2024-01-15|OT-4077|High quality cement|1`;
+- Use true or false (lowercase) for isMaterial
+- Use dot (.) as decimal separator
+- Start with INV### and end with ###END
+- The ENTIRE response must be ONE SINGLE LINE`;
 
 
         const result = await gemini.models.generateContent({
@@ -2285,7 +2379,7 @@ async function prepareBatchLine(file: File): Promise<string> {
     const buffer = Buffer.from(await file.arrayBuffer());
     const base64 = buffer.toString('base64');
 
-    // 2️⃣  Build prompt for direct PDF processing
+    // 2️⃣  Build prompt for direct PDF processing - using SINGLE LINE format to avoid JSONL parsing issues
     const promptText = `Extract invoice data from this PDF document (consolidate all pages into a single invoice). Only extract visible data, use NULL for missing optional fields.
 
 CRITICAL NUMBER ACCURACY:
@@ -2322,31 +2416,24 @@ LINE ITEMS (extract ALL items from all pages and make sure it's actually a mater
 - description: Item description if available, otherwise NULL
 - lineNumber: Line number in invoice if available, otherwise NULL
 
-OUTPUT FORMAT - RETURN EXACTLY THIS STRUCTURE:
----INVOICE_START---
-INVOICE_CODE: [invoice code here]
-PROVIDER_NAME: [provider name here]
-PROVIDER_CIF: [CIF/NIF/NIE here]
-PROVIDER_EMAIL: [email here or NULL]
-PROVIDER_PHONE: [phone here or NULL]
-PROVIDER_ADDRESS: [address here or NULL]
-ISSUE_DATE: [YYYY-MM-DD]
-TOTAL_AMOUNT: [amount with dot as decimal separator]
----ITEMS_START---
-ITEM|[materialName]|[materialCode or NULL]|[true or false]|[quantity]|[unitPrice]|[totalPrice]|[itemDate or NULL]|[workOrder or NULL]|[description or NULL]|[lineNumber or NULL]
-ITEM|[materialName]|[materialCode or NULL]|[true or false]|[quantity]|[unitPrice]|[totalPrice]|[itemDate or NULL]|[workOrder or NULL]|[description or NULL]|[lineNumber or NULL]
-(one ITEM line per item)
----ITEMS_END---
----INVOICE_END---
+OUTPUT FORMAT - CRITICAL: EVERYTHING MUST BE ON A SINGLE LINE WITH NO LINE BREAKS OR NEWLINES:
 
-IMPORTANT RULES:
-- Use pipe | as delimiter for ITEM lines
+INV###[invoiceCode]###[providerName]###[providerCIF]###[providerEmail or NULL]###[providerPhone or NULL]###[providerAddress or NULL]###[issueDate YYYY-MM-DD]###[totalAmount]###ITEMS###ITEM@@@[name]@@@[code or NULL]@@@[true/false]@@@[qty]@@@[unitPrice]@@@[totalPrice]@@@[date or NULL]@@@[workOrder or NULL]@@@[desc or NULL]@@@[lineNum or NULL]###ITEM@@@[name]@@@[code or NULL]@@@[true/false]@@@[qty]@@@[unitPrice]@@@[totalPrice]@@@[date or NULL]@@@[workOrder or NULL]@@@[desc or NULL]@@@[lineNum or NULL]###END
+
+EXAMPLE:
+INV###AB123###ACME Corp###A12345678###info@acme.com###912345678###Calle Mayor 1 Madrid###2024-01-15###1000.50###ITEMS###ITEM@@@Cement Bag@@@CEM001@@@true@@@10.00@@@25.50@@@255.00@@@2024-01-15@@@OT-4077@@@High quality cement@@@1###ITEM@@@Delivery Fee@@@NULL@@@false@@@1.00@@@50.00@@@50.00@@@NULL@@@NULL@@@NULL@@@2###END
+
+CRITICAL RULES:
+- ABSOLUTELY NO LINE BREAKS OR NEWLINES ANYWHERE
+- Use ### to separate invoice header fields
+- Use @@@ to separate item fields within each ITEM
+- Use ### between items
+- Replace any ### or @@@ characters in text with spaces
 - Use NULL (all caps) for missing values
-- Use true or false (lowercase) for isMaterial field
-- Use dot (.) as decimal separator for all numbers
-- Do NOT include any explanations, comments, or extra text
-- Each ITEM line must have exactly 10 fields after ITEM| separated by pipes
-- Example ITEM line: ITEM|Cement Bag|CEM-001|true|10.00|25.50|255.00|2024-01-15|OT-4077|High quality cement|1`;
+- Use true or false (lowercase) for isMaterial
+- Use dot (.) as decimal separator
+- Start with INV### and end with ###END
+- The ENTIRE response must be ONE SINGLE LINE`;
 
     // Build Gemini JSONL request line
     const jsonlObject = {
@@ -2796,13 +2883,148 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
             }
             try { const stats = await fs.promises.stat(downloadedPath); if (stats.isDirectory()) { throw new Error(`Downloaded path ${downloadedPath} is a directory, not a file`); } }
             catch (statErr) { throw new Error(`Cannot access file stats for ${downloadedPath}: ${statErr instanceof Error ? statErr.message : 'Unknown error'}`); }
-            console.log(`[ingestBatchOutput] Using streaming parser for ${downloadedPath}`);
-            const fileText = await fs.promises.readFile(downloadedPath, 'utf8');
-            const lines = fileText.split(/\r?\n/);
-            const processingSucceeded = await processOutputLines(lines);
+            console.log(`[ingestBatchOutput] Reading JSONL output from ${downloadedPath}`);
+            let processingSucceeded = false;
+            let jsonlParsingHadErrors = false;
+            try {
+                // Preferred: streaming JSONL parser (handles large files and avoids partial reads)
+                const parseResult = await parseJsonLinesFromFile(downloadedPath);
+                let lines = parseResult.objects.map(obj => JSON.stringify(obj));
+                console.log(`[ingestBatchOutput] Parsed ${lines.length} JSONL objects using streaming parser`);
+                // If the streaming parser produced no objects OR reported errors, fall back to brace-scan
+                if (lines.length === 0 || parseResult.hasErrors) {
+                    console.warn('[ingestBatchOutput] Streaming parser produced no objects or had errors, attempting brace-scan fallback');
+                    jsonlParsingHadErrors = true;
+                    // Fallback: Use brace-counting to extract complete JSON objects, handling embedded newlines
+                    const fileText = await fs.promises.readFile(downloadedPath, 'utf8');
+                    lines = [];
+                    let currentObject = '';
+                    let braceCount = 0;
+                    let inString = false;
+                    let escapeNext = false;
 
-            // Only clean up the downloaded file if processing succeeded (no errors)
-            if (processingSucceeded) {
+                    for (let i = 0; i < fileText.length; i++) {
+                        const char = fileText[i];
+
+                        if (escapeNext) {
+                            currentObject += char;
+                            escapeNext = false;
+                            continue;
+                        }
+
+                        if (char === '\\') {
+                            currentObject += char;
+                            escapeNext = true;
+                            continue;
+                        }
+
+                        if (char === '"' && !escapeNext) {
+                            inString = !inString;
+                            currentObject += char;
+                            continue;
+                        }
+
+                        if (!inString) {
+                            if (char === '{') {
+                                braceCount++;
+                            } else if (char === '}') {
+                                braceCount--;
+                            }
+                        }
+
+                        currentObject += char;
+
+                        // Complete JSON object found
+                        if (braceCount === 0 && currentObject.trim().length > 0) {
+                            const trimmed = currentObject.trim();
+                            if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+                                lines.push(trimmed);
+                                currentObject = '';
+                            }
+                        }
+                    }
+
+                    // Add any remaining content (count as parse error so it's visible in stats)
+                    const remainder = currentObject.trim();
+                    if (remainder.length > 0) {
+                        console.warn(`[ingestBatchOutput] Found incomplete JSON object at end of file (${remainder.length} chars). It will be counted as a parsing error.`);
+                        lines.push(remainder);
+                    }
+
+                    console.log(`[ingestBatchOutput] Parsed ${lines.length} JSONL objects from file (brace-scan fallback)`);
+                } else {
+                    // Pass through success case from streaming parser
+                    jsonlParsingHadErrors = parseResult.hasErrors;
+                }
+
+                processingSucceeded = await processOutputLines(lines);
+            } catch (streamErr) {
+                console.warn(`[ingestBatchOutput] Streaming JSONL parser failed, falling back to brace-scan:`, streamErr);
+                // Mark that JSONL parsing had errors - this should prevent file cleanup even if fallback succeeds
+                jsonlParsingHadErrors = true;
+
+                // Fallback: Use brace-counting to extract complete JSON objects, handling embedded newlines
+                const fileText = await fs.promises.readFile(downloadedPath, 'utf8');
+                const lines: string[] = [];
+                let currentObject = '';
+                let braceCount = 0;
+                let inString = false;
+                let escapeNext = false;
+
+                for (let i = 0; i < fileText.length; i++) {
+                    const char = fileText[i];
+
+                    if (escapeNext) {
+                        currentObject += char;
+                        escapeNext = false;
+                        continue;
+                    }
+
+                    if (char === '\\') {
+                        currentObject += char;
+                        escapeNext = true;
+                        continue;
+                    }
+
+                    if (char === '"' && !escapeNext) {
+                        inString = !inString;
+                        currentObject += char;
+                        continue;
+                    }
+
+                    if (!inString) {
+                        if (char === '{') {
+                            braceCount++;
+                        } else if (char === '}') {
+                            braceCount--;
+                        }
+                    }
+
+                    currentObject += char;
+
+                    // Complete JSON object found
+                    if (braceCount === 0 && currentObject.trim().length > 0) {
+                        const trimmed = currentObject.trim();
+                        if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+                            lines.push(trimmed);
+                            currentObject = '';
+                        }
+                    }
+                }
+
+                // Add any remaining content (count as parse error so it's visible in stats)
+                const remainder = currentObject.trim();
+                if (remainder.length > 0) {
+                    console.warn(`[ingestBatchOutput] Found incomplete JSON object at end of file (${remainder.length} chars). It will be counted as a parsing error.`);
+                    lines.push(remainder);
+                }
+
+                console.log(`[ingestBatchOutput] Parsed ${lines.length} JSONL objects from file (brace-scan fallback)`);
+                processingSucceeded = await processOutputLines(lines);
+            }
+
+            // Only clean up the downloaded file if processing succeeded (no errors) AND there were no JSONL parsing errors
+            if (processingSucceeded && !jsonlParsingHadErrors) {
                 try {
                     await fs.promises.unlink(downloadedPath);
                     console.log(`[ingestBatchOutput] Cleaned up downloaded result file: ${downloadedPath}`);
@@ -2810,7 +3032,7 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                     console.warn(`[ingestBatchOutput] Failed to clean up downloaded result file ${downloadedPath}:`, cleanupErr);
                 }
             } else {
-                console.log(`[ingestBatchOutput] Keeping failed batch result file for debugging: ${downloadedPath}`);
+                console.log(`[ingestBatchOutput] Keeping failed batch result file for debugging: ${downloadedPath}${jsonlParsingHadErrors ? ' (JSONL parsing errors detected)' : ''}`);
             }
 
             // Clean up old temporary files (older than 1 hour)
@@ -2855,53 +3077,27 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
         let failed = 0;
         const errors: Array<{ lineIndex: number; error: string; context?: ErrorContext }> = [];
 
-        // Process JSONL line by line and aggressively append following lines
-        // until a valid JSON object is formed (cap to prevent infinite loops)
-        let i = 0;
-        while (i < lines.length) {
+        // Process each JSONL object (already properly parsed by brace-matching)
+        for (let i = 0; i < lines.length; i++) {
             const raw = lines[i];
-            if (!raw.trim()) { i++; continue; }
+            if (!raw.trim()) continue;
 
             let parsed: unknown;
-            let combined = raw;
-            let combinedToIndex = i;
-            let appended = 0;
-            const MAX_APPEND_LINES = 200; // generous cap for very long/wrapped lines
-
-            for (; ;) {
-                try {
-                    parsed = JSON.parse(combined);
-                    break;
-                } catch (e) {
-                    // Keep appending subsequent lines if available, up to a high cap
-                    if (combinedToIndex + 1 < lines.length && appended < MAX_APPEND_LINES) {
-                        combinedToIndex++;
-                        combined += "\n" + lines[combinedToIndex];
-                        appended++;
-                        continue;
-                    }
-
-                    const parseError = (e as SyntaxError).message;
-                    console.error(`[ingestBatchOutput] Failed to parse JSONL at line ${i + 1} after appending ${appended} lines:`, {
-                        error: parseError,
-                        lineLength: combined.length,
-                        preview: combined.substring(0, 300)
-                    });
-
-                    parsed = undefined;
-                    break;
-                }
-            }
-
-            // Advance the outer index to the last line we consumed
-            i = combinedToIndex;
-
-            if (!parsed) {
-                const errorMsg = 'Unable to parse JSON after parsing attempts';
-                console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1}`);
-                errors.push({ lineIndex: i + 1, error: errorMsg, context: { rawLine: combined.substring(0, 500) } });
+            try {
+                parsed = JSON.parse(raw);
+            } catch (e) {
+                const parseError = (e as SyntaxError).message;
+                console.error(`[ingestBatchOutput] Failed to parse JSON object ${i + 1}:`, {
+                    error: parseError,
+                    length: raw.length,
+                    preview: raw.substring(0, 300)
+                });
+                errors.push({
+                    lineIndex: i + 1,
+                    error: `JSON parse error: ${parseError}`,
+                    context: { rawLine: raw.substring(0, 500) }
+                });
                 failed++;
-                i++;
                 continue;
             }
 
@@ -2926,8 +3122,8 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                     }
                 }
                 let key = parsedObj?.key as string | undefined;
-                if (!key && typeof combined === 'string') {
-                    const match = /"key"\s*:\s*"([^"]*)"/.exec(combined);
+                if (!key && typeof raw === 'string') {
+                    const match = /"key"\s*:\s*"([^"]*)"/.exec(raw);
                     if (match && match[1]) {
                         key = match[1];
                     }
@@ -2935,22 +3131,18 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                 if (!content) {
                     const errorMsg = 'No content in Gemini response';
                     const identifier = key ?? (parsedObj?.custom_id as string | undefined) ?? 'unknown';
-                    console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (id: ${identifier})`);
+                    console.error(`[ingestBatchOutput] ${errorMsg} for object ${i + 1} (id: ${identifier})`);
                     errors.push({ lineIndex: i + 1, error: errorMsg, context: { custom_id: identifier } });
                     failed++;
-                    i++;
                     continue;
                 }
-
-                // Log extracted content for debugging
-                console.log(`[ingestBatchOutput] Extracted raw content for line ${i + 1} (key: ${key}):`, content.substring(0, 500));
 
                 // Parse using structured text parser
                 const extracted = parseStructuredText(content);
                 if (!extracted) {
                     const errorMsg = `Failed to parse structured text response`;
                     const identifier = (parsedObj?.key as string | undefined) ?? (parsedObj?.custom_id as string | undefined) ?? 'unknown';
-                    console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (id: ${identifier})`);
+                    console.error(`[ingestBatchOutput] ${errorMsg} for object ${i + 1} (id: ${identifier})`);
                     console.error(`[ingestBatchOutput] Raw content: ${content.substring(0, 500)}${content.length > 500 ? '...' : ''}`);
                     errors.push({
                         lineIndex: i + 1,
@@ -2958,7 +3150,6 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                         context: { custom_id: identifier, rawContent: content.substring(0, 500) }
                     });
                     failed++;
-                    i++;
                     continue;
                 }
                 const result = await saveExtractedInvoice(extracted, key ?? undefined);
@@ -2966,7 +3157,7 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                     success++;
                 } else {
                     const errorMsg = `Failed to save invoice: ${result.message}`;
-                    console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (key: ${key ?? 'unknown'})`);
+                    console.error(`[ingestBatchOutput] ${errorMsg} for object ${i + 1} (key: ${key ?? 'unknown'})`);
                     errors.push({
                         lineIndex: i + 1,
                         error: errorMsg,
@@ -2975,10 +3166,10 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                     failed++;
                 }
             } catch (err) {
-                const errorMsg = `Error processing line: ${(err as Error).message}`;
-                console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1}`);
-                const preview = combined.substring(0, 500);
-                console.error(`[ingestBatchOutput] Raw line preview: ${preview}${combined.length > 500 ? '...' : ''}`);
+                const errorMsg = `Error processing object: ${(err as Error).message}`;
+                console.error(`[ingestBatchOutput] ${errorMsg} for object ${i + 1}`);
+                const preview = raw.substring(0, 500);
+                console.error(`[ingestBatchOutput] Raw object preview: ${preview}${raw.length > 500 ? '...' : ''}`);
                 errors.push({
                     lineIndex: i + 1,
                     error: errorMsg,
@@ -2986,8 +3177,6 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                 });
                 failed++;
             }
-
-            i++;
         }
 
         await updateBatchProgress(batchId, {

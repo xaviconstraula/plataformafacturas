@@ -167,9 +167,9 @@ export function BatchProgressBanner() {
     // Show nothing while the very first fetch is in-flight.
     if (isLoading) return null
 
-    // If we have no active batches and no optimistic expectation, hide the banner.
+    // If we have no active batches and no optimistic expectation, render empty div to keep polling active
     if (activeBatches.length === 0 && (expectedTotal === null || expectedTotal === 0)) {
-        return null
+        return <div style={{ display: 'none' }} aria-hidden="true" />
     }
 
     return (

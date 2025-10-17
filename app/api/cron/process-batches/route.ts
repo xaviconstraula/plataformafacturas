@@ -4,6 +4,7 @@ import { prisma } from "@/lib/db"
 import { BatchStatus } from "@/generated/prisma"
 import { GoogleGenAI } from "@google/genai"
 import { Prisma } from "@/generated/prisma"
+import { updateBatchProgress } from "@/lib/actions/invoices"
 
 // Gemini batch response interfaces
 interface GeminiRequestCounts { total?: number; completed?: number; failed?: number }
@@ -145,15 +146,13 @@ async function getAllActiveBatchesForCron() {
                 const rc = (remote?.request_counts ?? remote?.requestCounts ?? {})
 
                 // Update batch progress
-                await prisma.batchProcessing.update({
-                    where: { id: batch.id },
-                    data: {
-                        status: newStatus,
-                        processedFiles: rc.completed !== undefined || rc.failed !== undefined ? (rc.completed ?? 0) + (rc.failed ?? 0) : undefined,
-                        successfulFiles: rc.completed,
-                        failedFiles: rc.failed,
-                        updatedAt: new Date(),
-                    }
+                const isTerminalState = ['COMPLETED', 'FAILED', 'CANCELLED'].includes(newStatus)
+                await updateBatchProgress(batch.id, {
+                    status: newStatus,
+                    processedFiles: rc.completed !== undefined || rc.failed !== undefined ? (rc.completed ?? 0) + (rc.failed ?? 0) : undefined,
+                    successfulFiles: rc.completed,
+                    failedFiles: rc.failed,
+                    ...(isTerminalState && !batch.completedAt ? { completedAt: new Date() } : {}),
                 })
 
                 reconciledBatches.push({ ...batch, status: newStatus as BatchStatus, processedFiles: (rc.completed ?? 0) + (rc.failed ?? 0), successfulFiles: rc.completed ?? 0, failedFiles: rc.failed ?? 0 })
@@ -171,13 +170,10 @@ async function getAllActiveBatchesForCron() {
 
                         // Save error to batch record
                         const errorMessage = ingestError instanceof Error ? ingestError.message : 'Unknown error during ingestion'
-                        await prisma.batchProcessing.update({
-                            where: { id: batch.id },
-                            data: {
-                                errors: [`Batch ingestion error: ${errorMessage}`] as unknown as Prisma.InputJsonValue,
-                                status: 'FAILED',
-                                completedAt: new Date(),
-                            }
+                        await updateBatchProgress(batch.id, {
+                            errors: [`Batch ingestion error: ${errorMessage}`],
+                            status: 'FAILED',
+                            completedAt: new Date(),
                         })
                     }
                 }

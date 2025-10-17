@@ -1,54 +1,120 @@
 import fs from 'fs';
 import readline from 'readline';
 
-/**
- * Robust JSONL (JSON Lines) parser that handles large files with streaming
- * This prevents issues with truncated lines and memory overflow
- */
-export async function parseJsonLinesFromFile(filePath: string): Promise<unknown[]> {
-    const results: unknown[] = [];
+// Streaming parser that extracts complete JSON objects via brace matching.
+// This is robust to embedded newlines inside strings and arbitrary chunk boundaries.
+export async function parseJsonLinesFromFile(filePath: string): Promise<{ objects: unknown[]; hasErrors: boolean; errorCount: number }> {
+    // Phase 1: Try strict line-by-line JSONL parsing (fast path)
+    const lineResults: unknown[] = [];
+    let lineErrors = 0;
 
-    const fileStream = fs.createReadStream(filePath, { encoding: 'utf8' });
-    const rl = readline.createInterface({
-        input: fileStream,
-        crlfDelay: Infinity, // Treat \r\n as a single line break
-    });
+    try {
+        const fileStream = fs.createReadStream(filePath, { encoding: 'utf8' });
+        const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
+        for await (const line of rl) {
+            if (!line || !line.trim()) continue;
+            try {
+                lineResults.push(JSON.parse(line));
+            } catch (err) {
+                lineErrors++;
+                const errorMsg = err instanceof Error ? err.message : String(err);
+                console.error(`[jsonl-parser] Line-mode parse error: ${errorMsg}`);
+            }
+        }
+    } catch (e) {
+        // If line-mode itself fails (e.g., stream error), we will fall back to brace scan
+        console.warn('[jsonl-parser] Line-mode parsing failed, will attempt brace-scan fallback');
+    }
 
-    let lineNumber = 0;
-    const errors: Array<{ line: number; error: string; rawLine: string }> = [];
+    // If we got some objects and no errors, return early
+    if (lineResults.length > 0 && lineErrors === 0) {
+        console.log(`[jsonl-parser] Successfully parsed ${lineResults.length} JSONL lines (strict mode)`);
+        return { objects: lineResults, hasErrors: false, errorCount: 0 };
+    }
 
-    for await (const line of rl) {
-        lineNumber++;
+    // Phase 2: Fallback — brace-scan over the full file to recover valid objects even if lines were split
+    const braceResults: unknown[] = [];
+    const braceErrors: Array<{ position: number; error: string; raw: string }> = [];
 
-        // Skip empty lines
-        if (!line.trim()) {
+    const text = await fs.promises.readFile(filePath, 'utf8');
+
+    let i = 0;
+    let objectStart = -1;
+    let depth = 0;
+    let inString = false;
+    let escapeNext = false;
+
+    while (i < text.length) {
+        const char = text[i];
+
+        if (escapeNext) {
+            escapeNext = false;
+            i++;
             continue;
         }
 
-        try {
-            const parsed = JSON.parse(line);
-            results.push(parsed);
-        } catch (err) {
-            const errorMsg = err instanceof Error ? err.message : String(err);
-            errors.push({
-                line: lineNumber,
-                error: errorMsg,
-                rawLine: line.substring(0, 500) + (line.length > 500 ? '...' : ''),
-            });
-
-            // Log individual parse errors but continue processing
-            console.error(`[jsonl-parser] Failed to parse line ${lineNumber}: ${errorMsg}`);
-            console.error(`[jsonl-parser] Line preview: ${line.substring(0, 200)}...`);
+        if (inString) {
+            if (char === '\\') {
+                escapeNext = true;
+            } else if (char === '"') {
+                inString = false;
+            }
+            i++;
+            continue;
         }
+
+        if (char === '"') {
+            inString = true;
+            i++;
+            continue;
+        }
+
+        if (char === '{') {
+            if (depth === 0) objectStart = i;
+            depth++;
+        } else if (char === '}') {
+            if (depth > 0) depth--;
+            if (depth === 0 && objectStart !== -1) {
+                const objText = text.slice(objectStart, i + 1);
+                try {
+                    braceResults.push(JSON.parse(objText));
+                } catch (err) {
+                    const errorMsg = err instanceof Error ? err.message : String(err);
+                    braceErrors.push({ position: objectStart, error: errorMsg, raw: objText.substring(0, 500) + (objText.length > 500 ? '...' : '') });
+                    console.error(`[jsonl-parser] Brace-scan parse error at ${objectStart}: ${errorMsg}`);
+                }
+                objectStart = -1;
+            }
+        }
+        i++;
     }
 
-    if (errors.length > 0) {
-        console.warn(`[jsonl-parser] Parsed ${results.length} valid lines with ${errors.length} errors from ${filePath}`);
-    } else {
-        console.log(`[jsonl-parser] Successfully parsed ${results.length} lines from ${filePath}`);
+    // Merge results: prefer brace-scan when strict failed or returned 0
+    if (braceResults.length > 0) {
+        // Simple dedupe by JSON.stringify signature
+        const seen = new Set<string>();
+        const merged: unknown[] = [];
+        for (const obj of [...lineResults, ...braceResults]) {
+            try {
+                const key = JSON.stringify(obj);
+                if (!seen.has(key)) {
+                    seen.add(key);
+                    merged.push(obj);
+                }
+            } catch { /* ignore non-serializable (should not happen) */ }
+        }
+        const hadErrors = lineErrors > 0 || braceErrors.length > 0;
+        if (hadErrors) {
+            console.warn(`[jsonl-parser] Parsed ${merged.length} JSON objects with ${lineErrors + braceErrors.length} errors from ${filePath}`);
+        } else {
+            console.log(`[jsonl-parser] Successfully parsed ${merged.length} JSON objects from ${filePath}`);
+        }
+        return { objects: merged, hasErrors: hadErrors, errorCount: lineErrors + braceErrors.length };
     }
 
-    return results;
+    // If still nothing, report as error but don't throw
+    console.warn(`[jsonl-parser] Could not parse any JSON objects from ${filePath}`);
+    return { objects: [], hasErrors: true, errorCount: Math.max(1, lineErrors + braceErrors.length) };
 }
 
 /**
@@ -56,36 +122,13 @@ export async function parseJsonLinesFromFile(filePath: string): Promise<unknown[
  */
 export async function parseJsonLinesFromFileWithCallback(
     filePath: string,
-    callback: (parsed: unknown, lineNumber: number) => Promise<void> | void
+    callback: (parsed: unknown, index: number) => Promise<void> | void
 ): Promise<{ processed: number; errors: number }> {
-    const fileStream = fs.createReadStream(filePath, { encoding: 'utf8' });
-    const rl = readline.createInterface({
-        input: fileStream,
-        crlfDelay: Infinity,
-    });
-
-    let lineNumber = 0;
+    const { objects, errorCount } = await parseJsonLinesFromFile(filePath);
     let processed = 0;
-    let errors = 0;
-
-    for await (const line of rl) {
-        lineNumber++;
-
-        if (!line.trim()) {
-            continue;
-        }
-
-        try {
-            const parsed = JSON.parse(line);
-            await callback(parsed, lineNumber);
-            processed++;
-        } catch (err) {
-            errors++;
-            const errorMsg = err instanceof Error ? err.message : String(err);
-            console.error(`[jsonl-parser] Failed to parse line ${lineNumber}: ${errorMsg}`);
-            console.error(`[jsonl-parser] Line preview: ${line.substring(0, 200)}...`);
-        }
+    for (let i = 0; i < objects.length; i++) {
+        await callback(objects[i], i + 1);
+        processed++;
     }
-
-    return { processed, errors };
+    return { processed, errors: errorCount };
 }
