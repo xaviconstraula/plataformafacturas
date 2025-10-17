@@ -43,224 +43,169 @@ function isRateLimitError(error: unknown): boolean {
     return false;
 }
 
-function parseJsonSafe(rawInput: string): unknown {
+/**
+ * Parse structured text format from AI into ExtractedPdfData
+ * Format:
+ * ---INVOICE_START---
+ * INVOICE_CODE: ABC123
+ * PROVIDER_NAME: Company Name
+ * PROVIDER_CIF: A12345678
+ * PROVIDER_EMAIL: email@example.com (or NULL)
+ * PROVIDER_PHONE: 123456789 (or NULL)
+ * PROVIDER_ADDRESS: Address (or NULL)
+ * ISSUE_DATE: 2024-01-01
+ * TOTAL_AMOUNT: 1000.00
+ * ---ITEMS_START---
+ * ITEM|Material Name|MATCODE123|true|10.00|50.00|500.00|2024-01-01|OT-123|Description|1
+ * ITEM|Another Material|NULL|true|5.00|20.00|100.00|NULL|NULL|NULL|NULL
+ * ---ITEMS_END---
+ * ---INVOICE_END---
+ */
+function parseStructuredText(rawInput: string): ExtractedPdfData | null {
     if (!rawInput) return null;
-    let raw = rawInput.trim();
-    if (raw.startsWith('```')) {
-        raw = raw.replace(/^```[a-zA-Z]*\s*/m, "").replace(/```\s*$/m, "").trim();
-    }
-    raw = raw.replace(/[\uFEFF\u200B-\u200D]/g, '');
 
-    // Handle double-escaped JSON from Gemini batch responses
-    if (raw.startsWith('{\\')) {
-        raw = raw
-            .replace(/\\\\/g, '\x00')      // Temporarily replace \\\\ with placeholder
-            .replace(/\\"/g, '"')          // Unescape quotes
-            .replace(/\\\//g, '/')         // Unescape forward slashes
-            .replace(/\\b/g, '\b')         // Unescape backspace
-            .replace(/\\f/g, '\f')         // Unescape form feed
-            .replace(/\\n/g, '\n')         // Unescape newlines
-            .replace(/\\r/g, '\r')         // Unescape carriage returns
-            .replace(/\\t/g, '\t')         // Unescape tabs
-            .replace(/\x00/g, '\\');       // Replace placeholder with actual backslash
-    }
+    const text = rawInput.trim();
 
-    // Replace potential comma decimals (e.g., 1,23 -> 1.23) to handle locale issues
-    raw = raw.replace(/(\d+),(\d+)/g, '$1.$2');
-
-    // New: Remove trailing commas before } or ]
-    raw = raw.replace(/,\s*([}\]])/g, '$1');
-
-    try { return JSON.parse(raw); } catch (e) {
-        console.error('[parseJsonSafe] JSON.parse failed with error:', (e as SyntaxError).message, 'Raw input preview:', raw.substring(0, 500));
-    }
-
-    // Handle case where the content itself is a JSON string literal
-    try {
-        if (raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')) {
-            const onceDecoded = JSON.parse(raw) as string;
-            try { return JSON.parse(onceDecoded); } catch { return onceDecoded; }
+    // Helper function to parse value, handling NULL
+    function parseValue(value: string): string | null {
+        const trimmed = value.trim();
+        if (trimmed === 'NULL' || trimmed === 'null' || trimmed === '') {
+            return null;
         }
-    } catch { }
-
-    // Extra robust fallback: decode escape sequences by parsing as a JSON string first,
-    // then parse the decoded result as JSON.
-    try {
-        const quoted = '"' + raw.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
-        const decoded = JSON.parse(quoted) as string;
-        return JSON.parse(decoded);
-    } catch { }
-
-    // Fallback: try to extract JSON object if possible
-    const start = raw.indexOf('{');
-    const end = raw.lastIndexOf('}');
-    if (start !== -1 && end !== -1 && end > start) {
-        const slice = raw.slice(start, end + 1);
-        try { return JSON.parse(slice); } catch { }
+        return trimmed;
     }
 
-    // Post-parse fix for "null" strings and other string literals (convert to appropriate types)
-    function fixNullStrings(obj: unknown): unknown {
-        if (obj === 'null') return null;
-        if (obj === 'true') return true;
-        if (obj === 'false') return false;
-        if (typeof obj === 'object' && obj !== null) {
-            const record = obj as Record<string, unknown>;
-            for (const key in record) {
-                record[key] = fixNullStrings(record[key]);
+    // Helper to parse boolean
+    function parseBoolean(value: string): boolean {
+        const trimmed = value.trim().toLowerCase();
+        return trimmed === 'true' || trimmed === '1' || trimmed === 'yes';
+    }
+
+    // Helper to parse number
+    function parseNumber(value: string): number {
+        const trimmed = value.trim();
+        const num = parseFloat(trimmed);
+        return isNaN(num) ? 0 : num;
+    }
+
+    try {
+        const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+
+        let invoiceCode = '';
+        let providerName = '';
+        let providerCif = '';
+        let providerEmail: string | null = null;
+        let providerPhone: string | null = null;
+        let providerAddress: string | null = null;
+        let issueDate = '';
+        let totalAmount = 0;
+        const items: ExtractedPdfItemData[] = [];
+
+        let inInvoice = false;
+        let inItems = false;
+
+        for (const line of lines) {
+            if (line === '---INVOICE_START---') {
+                inInvoice = true;
+                continue;
+            }
+
+            if (line === '---INVOICE_END---') {
+                inInvoice = false;
+                continue;
+            }
+
+            if (line === '---ITEMS_START---') {
+                inItems = true;
+                continue;
+            }
+
+            if (line === '---ITEMS_END---') {
+                inItems = false;
+                continue;
+            }
+
+            if (inInvoice && !inItems && line.includes(':')) {
+                const colonIndex = line.indexOf(':');
+                const key = line.substring(0, colonIndex).trim();
+                const value = line.substring(colonIndex + 1).trim();
+
+                switch (key) {
+                    case 'INVOICE_CODE':
+                        invoiceCode = value;
+                        break;
+                    case 'PROVIDER_NAME':
+                        providerName = value;
+                        break;
+                    case 'PROVIDER_CIF':
+                        providerCif = value;
+                        break;
+                    case 'PROVIDER_EMAIL':
+                        providerEmail = parseValue(value);
+                        break;
+                    case 'PROVIDER_PHONE':
+                        providerPhone = parseValue(value);
+                        break;
+                    case 'PROVIDER_ADDRESS':
+                        providerAddress = parseValue(value);
+                        break;
+                    case 'ISSUE_DATE':
+                        issueDate = value;
+                        break;
+                    case 'TOTAL_AMOUNT':
+                        totalAmount = parseNumber(value);
+                        break;
+                }
+            }
+
+            if (inItems && line.startsWith('ITEM|')) {
+                const parts = line.substring(5).split('|');
+                // After removing "ITEM|", we expect 10 fields (indices 0-9)
+                if (parts.length >= 10) {
+                    items.push({
+                        materialName: parts[0] || '',
+                        materialCode: parseValue(parts[1] || '') || undefined,
+                        isMaterial: parseBoolean(parts[2] || 'true'),
+                        quantity: parseNumber(parts[3] || '0'),
+                        unitPrice: parseNumber(parts[4] || '0'),
+                        totalPrice: parseNumber(parts[5] || '0'),
+                        itemDate: parseValue(parts[6] || '') || undefined,
+                        workOrder: parseValue(parts[7] || '') || undefined,
+                        description: parseValue(parts[8] || '') || undefined,
+                        lineNumber: parts[9] ? parseNumber(parts[9]) : undefined,
+                    });
+                }
             }
         }
-        return obj;
-    }
 
-    try {
-        const parsed = JSON.parse(raw);
-        return fixNullStrings(parsed);
-    } catch { }
+        // Validate required fields
+        if (!invoiceCode || !providerName || !providerCif || !issueDate) {
+            console.error('[parseStructuredText] Missing required fields:', { invoiceCode, providerName, providerCif, issueDate });
+            return null;
+        }
 
-    return null;
-}
-
-function isExtractedPdfData(value: unknown): value is ExtractedPdfData {
-    if (!value || typeof value !== 'object') return false;
-    const v = value as Record<string, unknown>;
-    const provider = v.provider as Record<string, unknown> | undefined;
-    const items = v.items as unknown[] | undefined;
-    return typeof v.invoiceCode === 'string'
-        && provider !== undefined
-        && typeof provider.name === 'string'
-        && typeof v.issueDate === 'string'
-        && typeof v.totalAmount === 'number'
-        && Array.isArray(items);
-}
-
-// Represents the minimal part of the ChatCompletion response we need when
-// reading a Batch output file. Only the assistant message content is required.
-interface ChatCompletionBody {
-    choices: Array<{
-        message: {
-            content: string;
+        return {
+            invoiceCode,
+            provider: {
+                name: providerName,
+                cif: providerCif,
+                email: providerEmail || undefined,
+                phone: providerPhone || undefined,
+                address: providerAddress || undefined,
+            },
+            issueDate,
+            totalAmount,
+            items,
         };
-    }>;
+    } catch (error) {
+        console.error('[parseStructuredText] Error parsing structured text:', error);
+        return null;
+    }
 }
 
 // Gemini configuration
 const GEMINI_MODEL = "gemini-2.5-flash";
 
-// Regex helpers used to keep Gemini outputs constrained and avoid noisy payloads
-const CIF_REGEX = "^(?:ES)?[A-Z0-9][A-Z0-9\\-]{5,15}$";
-const ISO_DATE_REGEX = "^\\d{4}-\\d{2}-\\d{2}$";
-const PHONE_REGEX = "^(?:\\+?\\d{9,15})$";
-const WORK_ORDER_REGEX = "^(?:OT-)?[0-9A-Za-z]{3,12}$";
-
-
-
-// Batch Processing Types and Functions
-// JSON schema for Gemini outputs (Gemini doesn't support additionalProperties or type arrays)
-// For nullable fields, we omit them from 'required' and use single type
-const EXTRACTED_INVOICE_SCHEMA = {
-    type: 'OBJECT',
-    required: ['invoiceCode', 'provider', 'issueDate', 'totalAmount', 'items'],
-    properties: {
-        invoiceCode: {
-            type: 'STRING',
-            minLength: 1,
-            maxLength: 80
-        },
-        provider: {
-            type: 'OBJECT',
-            required: ['name', 'cif'],
-            properties: {
-                name: {
-                    type: 'STRING',
-                    minLength: 1,
-                    maxLength: 160
-                },
-                cif: {
-                    type: 'STRING',
-                    pattern: CIF_REGEX,
-                    minLength: 9,
-                    maxLength: 10
-                },
-                email: {
-                    type: 'STRING',
-                    maxLength: 160,
-                    nullable: true
-                },
-                phone: {
-                    type: 'STRING',
-                    pattern: PHONE_REGEX,
-                    maxLength: 16,
-                    nullable: true
-                },
-                address: {
-                    type: 'STRING',
-                    maxLength: 200,
-                    nullable: true
-                }
-            }
-        },
-        issueDate: {
-            type: 'STRING',
-            pattern: ISO_DATE_REGEX
-        },
-        totalAmount: {
-            type: 'NUMBER'
-        },
-        items: {
-            type: 'ARRAY',
-            minItems: 1,
-            items: {
-                type: 'OBJECT',
-                required: ['materialName', 'quantity', 'unitPrice', 'totalPrice', 'isMaterial'],
-                properties: {
-                    materialName: {
-                        type: 'STRING',
-                        minLength: 1,
-                        maxLength: 160
-                    },
-                    materialCode: {
-                        type: 'STRING',
-                        maxLength: 60,
-                        nullable: true
-                    },
-                    isMaterial: {
-                        type: 'BOOLEAN'
-                    },
-                    quantity: {
-                        type: 'NUMBER'
-                    },
-                    unitPrice: {
-                        type: 'NUMBER'
-                    },
-                    totalPrice: {
-                        type: 'NUMBER'
-                    },
-                    itemDate: {
-                        type: 'STRING',
-                        pattern: ISO_DATE_REGEX,
-                        nullable: true
-                    },
-                    workOrder: {
-                        type: 'STRING',
-                        pattern: WORK_ORDER_REGEX,
-                        maxLength: 20,
-                        nullable: true
-                    },
-                    description: {
-                        type: 'STRING',
-                        maxLength: 240,
-                        nullable: true
-                    },
-                    lineNumber: {
-                        type: 'NUMBER',
-                        nullable: true
-                    }
-                }
-            }
-        }
-    }
-} as const;
 export interface BatchProgressInfo {
     id: string;
     status: BatchStatus;
@@ -569,7 +514,7 @@ async function callPdfExtractAPI(file: File): Promise<CallPdfExtractAPIResponse>
         const base64 = buffer.toString('base64');
 
         // Build prompt for direct PDF processing
-        const promptText = `Extract invoice data from this PDF document (consolidate all pages into a single invoice). Only extract visible data, use null for missing optional fields.
+        const promptText = `Extract invoice data from this PDF document (consolidate all pages into a single invoice). Only extract visible data, use NULL for missing optional fields.
 
 CRITICAL NUMBER ACCURACY:
 - Distinguish 5 vs S (flat top vs curved), 8 vs B (complete vs open), 0 vs O vs 6 (oval vs round vs curved)
@@ -593,54 +538,43 @@ PHONE NUMBER:
 - May have +34 country code
 - Look for labels: "Tel:", "Teléfono:", "Phone:"
 
-INVOICE: Extract code, issue date (ISO), total amount
+INVOICE: Extract code, issue date (ISO format YYYY-MM-DD), total amount
 
 LINE ITEMS (extract ALL items from all pages and make sure it's actually a material, not "Albarán" or similar)
-- materialName: Use descriptive name.
-- materialCode: Extract the product reference code ONLY IF it is clearly visible and directly associated with the material name in a column like "Código", "Ref.", "Artículo", or "Referencia". It is often an alphanumeric string. If no such code is clearly present for an item, this field MUST BE NULL. Do not invent or guess a code.
+- materialName: Use descriptive name
+- materialCode: Extract the product reference code ONLY IF it is clearly visible and directly associated with the material name in a column like "Código", "Ref.", "Artículo", or "Referencia". If no such code is clearly present, use NULL.
 - isMaterial: true for physical items, false for services/fees/taxes
-- quantity, unitPrice, totalPrice (2 decimals)
-- itemDate: ISO format if different from invoice date
-- workOrder: Find simple 3-5 digit OT number (e.g., "Obra: 4077" → "OT-4077"). Avoid complex refs like "38600-OT-4077-1427". If no OT or work order is present, set this field to null. It is possible and valid for this field to be missing. If you cannot identify it clearly, set it to null, do not make it up.
-- description, lineNumber
+- quantity, unitPrice, totalPrice (2 decimals, use dot as decimal separator)
+- itemDate: ISO format YYYY-MM-DD if different from invoice date, otherwise NULL
+- workOrder: Find simple 3-5 digit OT number (e.g., "Obra: 4077" → "OT-4077"). If no OT is present, use NULL.
+- description: Item description if available, otherwise NULL
+- lineNumber: Line number in invoice if available, otherwise NULL
 
-JSON format:
-{
-  "invoiceCode": "string",
-  "provider": {
-    "name": "string",
-    "cif": "string|null",
-    "email": "string|null",
-    "phone": "string|null",
-    "address": "string|null"
-  },
-  "issueDate": "string",
-  "totalAmount": "number",
-  "items": [{
-    "materialName": "string",
-    "materialCode": "string|null",
-    "isMaterial": "boolean",
-    "quantity": "number",
-    "unitPrice": "number",
-    "totalPrice": "number",
-    "itemDate": "string|null",
-    "workOrder": "string|null",
-    "description": "string|null",
-    "lineNumber": "number|null"
-  }]
-}
+OUTPUT FORMAT - RETURN EXACTLY THIS STRUCTURE:
+---INVOICE_START---
+INVOICE_CODE: [invoice code here]
+PROVIDER_NAME: [provider name here]
+PROVIDER_CIF: [CIF/NIF/NIE here]
+PROVIDER_EMAIL: [email here or NULL]
+PROVIDER_PHONE: [phone here or NULL]
+PROVIDER_ADDRESS: [address here or NULL]
+ISSUE_DATE: [YYYY-MM-DD]
+TOTAL_AMOUNT: [amount with dot as decimal separator]
+---ITEMS_START---
+ITEM|[materialName]|[materialCode or NULL]|[true or false]|[quantity]|[unitPrice]|[totalPrice]|[itemDate or NULL]|[workOrder or NULL]|[description or NULL]|[lineNumber or NULL]
+ITEM|[materialName]|[materialCode or NULL]|[true or false]|[quantity]|[unitPrice]|[totalPrice]|[itemDate or NULL]|[workOrder or NULL]|[description or NULL]|[lineNumber or NULL]
+(one ITEM line per item)
+---ITEMS_END---
+---INVOICE_END---
 
-STRICT JSON OUTPUT RULES:
-- The JSON must be minified: all on one line, no extra spaces, newlines, or formatting.
-- Return ONLY a single JSON object. No code fences, no explanations, no comments.
-- All strings must be valid JSON with escaped quotes (\\") and escaped newlines (\\\\n). Never include raw control characters in strings.
-- Use null (not "null") for missing values. Do not include trailing commas.
-- Keys and strings must use double quotes. Do not add extra fields beyond the schema.
-- Use dot (.) as decimal separator, never comma (,).
-- Never use comma (,) as decimal or thousand separator in numbers—always use dot (.) for decimals and no thousand separators (e.g., 1234.56, not 1,234.56 or 1234,56).
-- Ensure no trailing commas in objects or arrays (e.g., correct: {"key":"value"}, incorrect: {"key":"value",}).
-- The entire JSON must be valid and parsable by strict JSON parsers like JSON.parse in JavaScript.
-- Example minified output: {"invoiceCode":"ABC123","provider":{"name":"Provider","cif":"A12345678","email":null,"phone":null,"address":null},"issueDate":"2023-01-01","totalAmount":100.00,"items":[{"materialName":"Item","materialCode":null,"isMaterial":true,"quantity":1.00,"unitPrice":100.00,"totalPrice":100.00,"itemDate":null,"workOrder":null,"description":null,"lineNumber":null}]}`;
+IMPORTANT RULES:
+- Use pipe | as delimiter for ITEM lines
+- Use NULL (all caps) for missing values
+- Use true or false (lowercase) for isMaterial field
+- Use dot (.) as decimal separator for all numbers
+- Do NOT include any explanations, comments, or extra text
+- Each ITEM line must have exactly 10 fields after ITEM| separated by pipes
+- Example ITEM line: ITEM|Cement Bag|CEM-001|true|10.00|25.50|255.00|2024-01-15|OT-4077|High quality cement|1`;
 
 
         const result = await gemini.models.generateContent({
@@ -655,8 +589,6 @@ STRICT JSON OUTPUT RULES:
                 }
             ],
             config: {
-                responseMimeType: 'application/json',
-                responseSchema: EXTRACTED_INVOICE_SCHEMA,
                 temperature: 0.8,
                 maxOutputTokens: 100000,
                 candidateCount: 1
@@ -673,12 +605,12 @@ STRICT JSON OUTPUT RULES:
         }
 
         try {
-            const parsed = parseJsonSafe(text);
-            if (!isExtractedPdfData(parsed)) {
-                console.warn(`Gemini response did not match expected schema for ${file.name}`);
+            const extractedData = parseStructuredText(text);
+            if (!extractedData) {
+                console.warn(`Failed to parse Gemini response for ${file.name}`);
+                console.warn(`Response preview: ${text.substring(0, 500)}`);
                 return { extractedData: null, error: "Invalid AI response format." };
             }
-            const extractedData = parsed as ExtractedPdfData;
 
             if (!extractedData.invoiceCode || !extractedData.provider?.cif || !extractedData.issueDate || typeof extractedData.totalAmount !== 'number') {
                 console.warn(`Response for ${file.name} missing crucial invoice-level data. Data: ${JSON.stringify(extractedData)}`);
@@ -2354,7 +2286,7 @@ async function prepareBatchLine(file: File): Promise<string> {
     const base64 = buffer.toString('base64');
 
     // 2️⃣  Build prompt for direct PDF processing
-    const promptText = `Extract invoice data from this PDF document (consolidate all pages into a single invoice). Only extract visible data, use null for missing optional fields.
+    const promptText = `Extract invoice data from this PDF document (consolidate all pages into a single invoice). Only extract visible data, use NULL for missing optional fields.
 
 CRITICAL NUMBER ACCURACY:
 - Distinguish 5 vs S (flat top vs curved), 8 vs B (complete vs open), 0 vs O vs 6 (oval vs round vs curved)
@@ -2378,54 +2310,43 @@ PHONE NUMBER:
 - May have +34 country code
 - Look for labels: "Tel:", "Teléfono:", "Phone:"
 
-INVOICE: Extract code, issue date (ISO), total amount
+INVOICE: Extract code, issue date (ISO format YYYY-MM-DD), total amount
 
 LINE ITEMS (extract ALL items from all pages and make sure it's actually a material, not "Albarán" or similar)
-- materialName: Use descriptive name.
-- materialCode: Extract the product reference code ONLY IF it is clearly visible and directly associated with the material name in a column like "Código", "Ref.", "Artículo", or "Referencia". It is often an alphanumeric string. If no such code is clearly present for an item, this field MUST BE NULL. Do not invent or guess a code.
+- materialName: Use descriptive name
+- materialCode: Extract the product reference code ONLY IF it is clearly visible and directly associated with the material name in a column like "Código", "Ref.", "Artículo", or "Referencia". If no such code is clearly present, use NULL.
 - isMaterial: true for physical items, false for services/fees/taxes
-- quantity, unitPrice, totalPrice (2 decimals)
-- itemDate: ISO format if different from invoice date
-- workOrder: Find simple 3-5 digit OT number (e.g., "Obra: 4077" → "OT-4077"). Avoid complex refs like "38600-OT-4077-1427". If no OT or work order is present, set this field to null. It is possible and valid for this field to be missing. If you cannot identify it clearly, set it to null, do not make it up.
-- description, lineNumber
+- quantity, unitPrice, totalPrice (2 decimals, use dot as decimal separator)
+- itemDate: ISO format YYYY-MM-DD if different from invoice date, otherwise NULL
+- workOrder: Find simple 3-5 digit OT number (e.g., "Obra: 4077" → "OT-4077"). If no OT is present, use NULL.
+- description: Item description if available, otherwise NULL
+- lineNumber: Line number in invoice if available, otherwise NULL
 
-JSON format:
-{
-  "invoiceCode": "string",
-  "provider": {
-    "name": "string",
-    "cif": "string|null",
-    "email": "string|null",
-    "phone": "string|null",
-    "address": "string|null"
-  },
-  "issueDate": "string",
-  "totalAmount": "number",
-  "items": [{
-    "materialName": "string",
-    "materialCode": "string|null",
-    "isMaterial": "boolean",
-    "quantity": "number",
-    "unitPrice": "number",
-    "totalPrice": "number",
-    "itemDate": "string|null",
-    "workOrder": "string|null",
-    "description": "string|null",
-    "lineNumber": "number|null"
-  }]
-}
+OUTPUT FORMAT - RETURN EXACTLY THIS STRUCTURE:
+---INVOICE_START---
+INVOICE_CODE: [invoice code here]
+PROVIDER_NAME: [provider name here]
+PROVIDER_CIF: [CIF/NIF/NIE here]
+PROVIDER_EMAIL: [email here or NULL]
+PROVIDER_PHONE: [phone here or NULL]
+PROVIDER_ADDRESS: [address here or NULL]
+ISSUE_DATE: [YYYY-MM-DD]
+TOTAL_AMOUNT: [amount with dot as decimal separator]
+---ITEMS_START---
+ITEM|[materialName]|[materialCode or NULL]|[true or false]|[quantity]|[unitPrice]|[totalPrice]|[itemDate or NULL]|[workOrder or NULL]|[description or NULL]|[lineNumber or NULL]
+ITEM|[materialName]|[materialCode or NULL]|[true or false]|[quantity]|[unitPrice]|[totalPrice]|[itemDate or NULL]|[workOrder or NULL]|[description or NULL]|[lineNumber or NULL]
+(one ITEM line per item)
+---ITEMS_END---
+---INVOICE_END---
 
-STRICT JSON OUTPUT RULES:
-- The JSON must be minified: all on one line, no extra spaces, newlines, or formatting.
-- Return ONLY a single JSON object. No code fences, no explanations, no comments.
-- All strings must be valid JSON with escaped quotes (\\") and escaped newlines (\\\\n). Never include raw control characters in strings.
-- Use null (not "null") for missing values. Do not include trailing commas.
-- Keys and strings must use double quotes. Do not add extra fields beyond the schema.
-- Use dot (.) as decimal separator, never comma (,).
-- Never use comma (,) as decimal or thousand separator in numbers—always use dot (.) for decimals and no thousand separators (e.g., 1234.56, not 1,234.56 or 1234,56).
-- Ensure no trailing commas in objects or arrays (e.g., correct: {"key":"value"}, incorrect: {"key":"value",}).
-- The entire JSON must be valid and parsable by strict JSON parsers like JSON.parse in JavaScript.
-- Example minified output: {"invoiceCode":"ABC123","provider":{"name":"Provider","cif":"A12345678","email":null,"phone":null,"address":null},"issueDate":"2023-01-01","totalAmount":100.00,"items":[{"materialName":"Item","materialCode":null,"isMaterial":true,"quantity":1.00,"unitPrice":100.00,"totalPrice":100.00,"itemDate":null,"workOrder":null,"description":null,"lineNumber":null}]}`;
+IMPORTANT RULES:
+- Use pipe | as delimiter for ITEM lines
+- Use NULL (all caps) for missing values
+- Use true or false (lowercase) for isMaterial field
+- Use dot (.) as decimal separator for all numbers
+- Do NOT include any explanations, comments, or extra text
+- Each ITEM line must have exactly 10 fields after ITEM| separated by pipes
+- Example ITEM line: ITEM|Cement Bag|CEM-001|true|10.00|25.50|255.00|2024-01-15|OT-4077|High quality cement|1`;
 
     // Build Gemini JSONL request line
     const jsonlObject = {
@@ -2441,8 +2362,6 @@ STRICT JSON OUTPUT RULES:
                 }
             ],
             generationConfig: {
-                responseMimeType: 'application/json',
-                responseSchema: EXTRACTED_INVOICE_SCHEMA,
                 temperature: 0.8,
                 maxOutputTokens: 100000,
                 candidateCount: 1
@@ -2453,19 +2372,6 @@ STRICT JSON OUTPUT RULES:
     return JSON.stringify(jsonlObject);
 }
 
-// Convenience: generate all lines in parallel with limited concurrency (4)
-async function buildBatchJsonl(files: File[]): Promise<string> {
-    const CONCURRENCY = 4;
-    const lines: string[] = [];
-
-    for (let i = 0; i < files.length; i += CONCURRENCY) {
-        const chunk = files.slice(i, i + CONCURRENCY);
-        const validChunk = chunk.filter(f => validateUploadFile(f).valid);
-        const chunkLines = await Promise.all(validChunk.map(prepareBatchLine));
-        lines.push(...chunkLines);
-    }
-    return lines.join("\n");
-}
 
 // Convenience: generate JSONL chunks whose size stays safely under the 100 MB limit imposed by the Batch API
 // Stay well below that hard limit so we never lose the entire
@@ -2836,14 +2742,6 @@ interface GeminiInlineResponse { key?: string; response?: { text?: string }; err
 type GeminiDest = { file_name?: string; fileName?: string; inlined_responses?: Array<GeminiInlineResponse>; inlinedResponses?: Array<GeminiInlineResponse> } | undefined | null;
 
 export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiDest) {
-    const parseJsonString = (rawInput: string, context?: string): unknown => {
-        const parsed = parseJsonSafe(rawInput);
-        if (!parsed && context) {
-            const trimmed = (rawInput || '').trim();
-            console.error(`[Batch ${batchId}] Failed to parse JSON in ${context}. First 200 chars:`, trimmed.substring(0, 200));
-        }
-        return parsed;
-    };
 
     // Supports file-based dest or inlined_responses
     if (dest && (dest.file_name || dest.fileName)) {
@@ -2901,7 +2799,7 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
             console.log(`[ingestBatchOutput] Using streaming parser for ${downloadedPath}`);
             const fileText = await fs.promises.readFile(downloadedPath, 'utf8');
             const lines = fileText.split(/\r?\n/);
-            const processingSucceeded = await processOutputLines(lines, parseJsonString);
+            const processingSucceeded = await processOutputLines(lines);
 
             // Only clean up the downloaded file if processing succeeded (no errors)
             if (processingSucceeded) {
@@ -2937,7 +2835,7 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
     } else if (dest && (dest.inlined_responses || dest.inlinedResponses)) {
         const inlined = (dest.inlined_responses ?? dest.inlinedResponses) as Array<GeminiInlineResponse>;
         const lines = inlined.map((r) => JSON.stringify(r));
-        await processOutputLines(lines, parseJsonString);
+        await processOutputLines(lines);
     } else {
         console.warn(`[ingestBatchOutput] Gemini batch ${batchId} has no dest results`);
     }
@@ -2952,36 +2850,7 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
         result?: CreateInvoiceResult;
     }
 
-    async function processOutputLines(lines: string[], parseJsonString: (rawInput: string, context?: string) => unknown): Promise<boolean> {
-        function extractJsonFromTextFieldUnsafe(jsonLike: string): string | null {
-            const textKeyIndex = jsonLike.indexOf('"text"');
-            if (textKeyIndex === -1) return null;
-            const colonIndex = jsonLike.indexOf(':', textKeyIndex);
-            if (colonIndex === -1) return null;
-            // Find opening quote of the string value
-            let i = colonIndex + 1;
-            while (i < jsonLike.length && /\s/.test(jsonLike[i]!)) i++;
-            if (jsonLike[i] !== '"') return null;
-            i++;
-            let result = '';
-            let escaped = false;
-            while (i < jsonLike.length) {
-                const ch = jsonLike[i]!;
-                if (!escaped && ch === '"') {
-                    break; // end of string
-                }
-                if (!escaped && ch === '\\') {
-                    escaped = true;
-                    result += ch;
-                    i++;
-                    continue;
-                }
-                escaped = false;
-                result += ch;
-                i++;
-            }
-            return result.length > 0 ? result : null;
-        }
+    async function processOutputLines(lines: string[]): Promise<boolean> {
         let success = 0;
         let failed = 0;
         const errors: Array<{ lineIndex: number; error: string; context?: ErrorContext }> = [];
@@ -3010,13 +2879,6 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                         combined += "\n" + lines[combinedToIndex];
                         appended++;
                         continue;
-                    }
-
-                    // If concatenation didn't work, attempt to extract the text field directly
-                    const fallbackText = extractJsonFromTextFieldUnsafe(combined);
-                    if (fallbackText) {
-                        parsed = { response: { candidates: [{ content: { parts: [{ text: fallbackText }] } }] } } as unknown as Record<string, unknown>;
-                        break;
                     }
 
                     const parseError = (e as SyntaxError).message;
@@ -3083,9 +2945,10 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                 // Log extracted content for debugging
                 console.log(`[ingestBatchOutput] Extracted raw content for line ${i + 1} (key: ${key}):`, content.substring(0, 500));
 
-                const extractedUnknown = parseJsonString(content, `extracted data for ${key ?? (parsedObj?.custom_id as string | undefined) ?? 'unknown'}`);
-                if (!extractedUnknown || !isExtractedPdfData(extractedUnknown)) {
-                    const errorMsg = `Failed to parse extracted data JSON`;
+                // Parse using structured text parser
+                const extracted = parseStructuredText(content);
+                if (!extracted) {
+                    const errorMsg = `Failed to parse structured text response`;
                     const identifier = (parsedObj?.key as string | undefined) ?? (parsedObj?.custom_id as string | undefined) ?? 'unknown';
                     console.error(`[ingestBatchOutput] ${errorMsg} for line ${i + 1} (id: ${identifier})`);
                     console.error(`[ingestBatchOutput] Raw content: ${content.substring(0, 500)}${content.length > 500 ? '...' : ''}`);
@@ -3098,8 +2961,6 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                     i++;
                     continue;
                 }
-
-                const extracted = extractedUnknown as ExtractedPdfData;
                 const result = await saveExtractedInvoice(extracted, key ?? undefined);
                 if (result.success) {
                     success++;
