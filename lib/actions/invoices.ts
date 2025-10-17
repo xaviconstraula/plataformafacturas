@@ -54,7 +54,8 @@ function parseStructuredText(rawInput: string): ExtractedPdfData | null {
     const text = rawInput.trim();
 
     // Helper function to parse value, handling NULL
-    function parseValue(value: string): string | null {
+    function parseValue(value: string | undefined): string | null {
+        if (!value || typeof value !== 'string') return null;
         const trimmed = value.trim();
         if (trimmed === 'NULL' || trimmed === 'null' || trimmed === '') {
             return null;
@@ -446,18 +447,35 @@ export async function getActiveBatches(): Promise<BatchProgressInfo[]> {
                 // Counts if present
                 const rc = (remote?.request_counts ?? remote?.requestCounts ?? {});
 
+                // Update batch progress and mark as completed if it's in a terminal state
+                const isTerminalState = ['COMPLETED', 'FAILED', 'CANCELLED'].includes(newStatus);
                 await updateBatchProgress(batch.id, {
                     status: newStatus,
                     processedFiles: rc.completed !== undefined || rc.failed !== undefined ? (rc.completed ?? 0) + (rc.failed ?? 0) : undefined,
                     successfulFiles: rc.completed,
                     failedFiles: rc.failed,
+                    ...(isTerminalState && !batch.completedAt ? { completedAt: new Date() } : {}),
                 });
 
                 reconciledBatches.push({ ...batch, status: newStatus, processedFiles: (rc.completed ?? 0) + (rc.failed ?? 0), successfulFiles: rc.completed ?? 0, failedFiles: rc.failed ?? 0 });
 
-                // If batch completed, ingest results
+                // If batch completed, ingest results with error handling
                 if (newStatus === 'COMPLETED' && !batch.completedAt && remote?.dest) {
-                    await ingestBatchOutputFromGemini(batch.id, remote.dest);
+                    console.log(`[getActiveBatches] Batch ${batch.id} completed, ingesting results...`);
+                    try {
+                        await ingestBatchOutputFromGemini(batch.id, remote.dest);
+                        console.log(`[getActiveBatches] Successfully ingested results for batch ${batch.id}`);
+                    } catch (ingestError) {
+                        console.error(`[getActiveBatches] Failed to ingest results for batch ${batch.id}:`, ingestError);
+
+                        // Save error to batch record and mark as failed
+                        const errorMessage = ingestError instanceof Error ? ingestError.message : 'Unknown error during ingestion';
+                        await updateBatchProgress(batch.id, {
+                            errors: [`Batch ingestion error: ${errorMessage}`],
+                            status: 'FAILED',
+                            completedAt: new Date(),
+                        });
+                    }
                 }
 
                 continue;
