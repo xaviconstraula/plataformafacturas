@@ -241,13 +241,32 @@ function parseTextBasedExtraction(text: string): ExtractedPdfData | null {
 
             const materialName = parseField(parts[1]);
             const quantity = parseNumber(parts[4]);
-            const unitPrice = parseNumber(parts[5]);
-            const totalPrice = parseNumber(parts[6]);
+            let unitPrice = parseNumber(parts[5]);
+            let totalPrice = parseNumber(parts[6]);
 
-            if (!materialName || quantity === undefined || unitPrice === undefined || totalPrice === undefined) {
+            if (!materialName || quantity === undefined) {
                 console.warn(`Missing required ITEM fields: ${trimmedLine}`);
                 continue;
             }
+
+            if ((unitPrice === undefined || isNaN(unitPrice)) && totalPrice !== undefined && !isNaN(totalPrice) && quantity !== 0) {
+                unitPrice = Number((totalPrice / quantity).toFixed(2));
+            }
+
+            if ((totalPrice === undefined || isNaN(totalPrice)) && unitPrice !== undefined && !isNaN(unitPrice)) {
+                totalPrice = Number((unitPrice * quantity).toFixed(2));
+            }
+
+            if (unitPrice === undefined || isNaN(unitPrice)) {
+                unitPrice = 0;
+            }
+
+            if (totalPrice === undefined || isNaN(totalPrice)) {
+                totalPrice = 0;
+            }
+
+            unitPrice = Number(unitPrice.toFixed(2));
+            totalPrice = Number(totalPrice.toFixed(2));
 
             items.push({
                 materialName,
@@ -862,7 +881,10 @@ LINE ITEMS (extract ALL items from all pages, only actual materials/services, no
 - materialName: Use descriptive name
 - materialCode: Extract product reference code ONLY if clearly visible in a column like "Código", "Ref.", "Artículo". If not present, use ~
 - isMaterial: true for physical items, false for services/fees/taxes
-- quantity, unitPrice, totalPrice (use dot as decimal separator, 2 decimals)
+- quantity: Number of units/items ordered
+- unitPrice: Price per unit (extract from columns labeled "Precio", "PVP", "Precio unit.", "Base", "Importe unitario", "Precio unitario", "EUROS", "€")
+- totalPrice: Total amount for this line (quantity x unitPrice, extract from columns labeled "Total", "Importe", "Subtotal", "Total línea", "Base imponible", "Importe total")
+- CRITICAL: Always extract prices as numbers with 2 decimals (e.g., 25.50, not 25,50). If you see a price, extract it - do NOT use ~ unless the column is completely missing
 - itemDate: ISO format if different from invoice date, otherwise ~
 - workOrder: Simple 3-5 digit OT number (e.g., "Obra: 4077" → "OT-4077"). If not present, use ~
 - description: Brief description, otherwise ~
@@ -883,12 +905,14 @@ ITEM|materialName|materialCode|isMaterial|quantity|unitPrice|totalPrice|itemDate
 STRICT RULES:
 - Output ONLY the structured lines, no explanations or comments
 - Each line must start with HEADER, PROVIDER, or ITEM
-- Use pipe (|) to separate fields within each line
-- Use tilde (~) for empty/null fields
-- Numbers must use dot (.) as decimal separator, never comma
+- Use pipe (|) to separate fields within each line - NO SPACES around pipes
+- Use tilde (~) for empty/null fields - NO SPACES around tildes
+- Numbers must use dot (.) as decimal separator, never comma (e.g., 1234.56 not 1,234.56)
 - No thousand separators (write 1234.56 not 1,234.56)
-- Boolean isMaterial: use "true" or "false"
+- Boolean isMaterial: use "true" or "false" (lowercase, no quotes)
+- For prices: Extract actual numeric values from the PDF. Only use ~ if no price column exists at all in the invoice table
 - Do NOT include pipes (|) or newlines in field values
+- Do NOT add extra spaces or formatting - keep output clean and minimal
 
 EXAMPLE OUTPUT:
 HEADER|FAC-2024-001|2024-01-15|1250.50
@@ -2674,7 +2698,10 @@ LINE ITEMS (extract ALL items from all pages, only actual materials/services, no
 - materialName: Use descriptive name
 - materialCode: Extract product reference code ONLY if clearly visible in a column like "Código", "Ref.", "Artículo". If not present, use ~
 - isMaterial: true for physical items, false for services/fees/taxes
-- quantity, unitPrice, totalPrice (use dot as decimal separator, 2 decimals)
+- quantity: Number of units/items ordered
+- unitPrice: Price per unit (extract from columns labeled "Precio", "PVP", "Precio unit.", "Base", "Importe unitario", "Precio unitario", "EUROS", "€")
+- totalPrice: Total amount for this line (quantity × unitPrice, extract from columns labeled "Total", "Importe", "Subtotal", "Total línea", "Base imponible", "Importe total")
+- CRITICAL: Always extract prices as numbers with 2 decimals (e.g., 25.50, not 25,50). If you see a price, extract it - do NOT use ~ unless the column is completely missing
 - itemDate: ISO format if different from invoice date, otherwise ~
 - workOrder: Simple 3-5 digit OT number (e.g., "Obra: 4077" → "OT-4077"). If not present, use ~
 - description: Brief description, otherwise ~
@@ -2695,12 +2722,14 @@ ITEM|materialName|materialCode|isMaterial|quantity|unitPrice|totalPrice|itemDate
 STRICT RULES:
 - Output ONLY the structured lines, no explanations or comments
 - Each line must start with HEADER, PROVIDER, or ITEM
-- Use pipe (|) to separate fields within each line
-- Use tilde (~) for empty/null fields
-- Numbers must use dot (.) as decimal separator, never comma
+- Use pipe (|) to separate fields within each line - NO SPACES around pipes
+- Use tilde (~) for empty/null fields - NO SPACES around tildes
+- Numbers must use dot (.) as decimal separator, never comma (e.g., 1234.56 not 1,234.56)
 - No thousand separators (write 1234.56 not 1,234.56)
-- Boolean isMaterial: use "true" or "false"
+- Boolean isMaterial: use "true" or "false" (lowercase, no quotes)
+- For prices: Extract actual numeric values from the PDF. Only use ~ if no price column exists at all in the invoice table
 - Do NOT include pipes (|) or newlines in field values
+- Do NOT add extra spaces or formatting - keep output clean and minimal
 
 EXAMPLE OUTPUT:
 HEADER|FAC-2024-001|2024-01-15|1250.50
