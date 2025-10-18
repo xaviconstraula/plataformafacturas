@@ -213,3 +213,157 @@ const failedBatches = await prisma.batchProcessing.findMany({
 4. **Error history** - Track errors over time for patterns
 5. **Smart suggestions** - Recommend fixes based on error type
 6. **Batch recovery** - Ability to re-submit failed files from previous batch
+
+## Batch Error Handling (Dialog & Persistence)
+
+### Problem: Error Dialog Not Opening for Duplicates
+
+**Issue**: When batch processing completed with duplicate invoices, clicking "Ver Detalles" in the error toast didn't open the error dialog.
+
+**Root Causes**:
+1. **Stale batch data**: The toast action captured `currentBatch` from the state, which could become stale
+2. **State management**: The dialog was conditionally rendered based on the batch object instead of using a stable reference
+3. **Duplicate counting**: Duplicate invoices were counted as "successful" even though they should be flagged as errors in the statistics
+
+### Solutions Implemented
+
+#### 1. **Batch ID Reference Pattern** (batch-progress-banner.tsx)
+Changed from storing the entire batch object to storing just the batch ID:
+
+```typescript
+// BEFORE (Stale data problem)
+const [selectedBatchForErrors, setSelectedBatchForErrors] = useState<typeof batches[0] | null>(null)
+
+// AFTER (Always fresh)
+const [selectedBatchIdForErrors, setSelectedBatchIdForErrors] = useState<string | null>(null)
+
+// Get fresh batch data from the latest batches array
+const selectedBatchForErrors = selectedBatchIdForErrors 
+    ? batches.find(b => b.id === selectedBatchIdForErrors)
+    : null
+```
+
+**Benefits**:
+- Every time the batch data is fetched from the server, the component automatically uses the latest data
+- Eliminates closure stale data issues
+- Dialog always displays the most current error information
+
+#### 2. **Proper Duplicate Invoice Counting** (lib/actions/invoices.ts)
+Duplicates are now correctly included in the failed files count for statistical purposes:
+
+```typescript
+// NEW: Track duplicates separately
+const duplicateInvoices = finalResultsWithBatch.filter(r => 
+    r.success && r.message.includes("already exists")
+);
+
+// NEW: Include duplicates in failed count for UI
+const totalFailedOrDuplicate = failedInvoices.length + duplicateInvoices.length;
+
+await updateBatchProgress(batchId, {
+    // ...
+    failedFiles: totalFailedOrDuplicate,  // Now includes duplicates
+    errors: batchErrors.length > 0 ? batchErrors : undefined,
+});
+```
+
+**Why this works**:
+- Duplicate invoices are "successful" in the sense that no error occurred
+- BUT they still represent files that didn't result in NEW invoice creation
+- By tracking them separately, the UI shows accurate statistics
+- Error details are preserved in the `errors` array (DUPLICATE_INVOICE kind)
+
+#### 3. **Error Persistence Flow**
+
+The error persistence chain works as follows:
+
+```
+1. During batch processing:
+   - pushBatchError() → adds to batchErrors[] array
+   - Each duplicate gets: kind: 'DUPLICATE_INVOICE', message, fileName, invoiceCode, timestamp
+
+2. After all processing:
+   - updateBatchProgress(batchId, { errors: batchErrors, failedFiles: N, ... })
+   - serializeBatchErrors() → converts to JSON for DB storage
+
+3. When user queries batch status:
+   - getActiveBatches() → fetches batch from DB
+   - Deserializes errors from JSON back to BatchErrorDetail[]
+
+4. When user clicks "Ver Detalles":
+   - Dialog opens with fresh batch data from the query
+   - Displays all errors organized by type (DUPLICATE_INVOICE, PARSING_ERROR, etc.)
+```
+
+### Database Schema
+
+Errors are stored as JSON in the `errors` field of the `batchProcessing` table:
+
+```json
+{
+  "errors": [
+    {
+      "kind": "DUPLICATE_INVOICE",
+      "message": "Invoice INV-001 already exists for provider ACME",
+      "fileName": "invoice_001.pdf",
+      "invoiceCode": "INV-001",
+      "timestamp": "2025-01-15T10:30:00.000Z"
+    }
+  ]
+}
+```
+
+**No schema changes required** - errors are stored as JSONB/JSON, allowing flexible error tracking.
+
+### Testing the Fix
+
+1. **Setup**: Upload PDFs with duplicate invoice codes
+2. **Expected**: Batch completes with "Procesamiento completado con duplicadas" notification
+3. **Action**: Click "Ver detalles"
+4. **Result**: Dialog opens showing:
+   - Success rate statistics
+   - "Duplicadas" section with details
+   - File names and invoice codes
+   - Timestamps
+
+### Error Types Handled
+
+- `DUPLICATE_INVOICE`: Invoice code already exists for this provider
+- `PARSING_ERROR`: Failed to parse AI response
+- `EXTRACTION_ERROR`: Failed to extract PDF data
+- `BLOCKED_PROVIDER`: Provider is in blocklist (Constraula, Sorigué)
+- `DATABASE_ERROR`: Database operation failed
+- `UNKNOWN`: Other errors
+
+### Why We Don't Need Schema Changes
+
+The current design is optimal because:
+
+1. **Flexibility**: New error types can be added without migrations
+2. **Auditing**: Complete error history is preserved in JSON
+3. **Performance**: Querying recent batches doesn't require schema changes
+4. **Simplicity**: JSON storage is standard practice for error logs
+
+### Best Practices
+
+1. **Always call `pushBatchError()`** when processing fails:
+   ```typescript
+   pushBatchError(batchErrors, {
+       kind: 'DUPLICATE_INVOICE',
+       message: `Invoice ${code} already exists`,
+       fileName: file.name,
+       invoiceCode: code,
+   });
+   ```
+
+2. **Preserve error context**: Include fileName and invoiceCode for user debugging
+
+3. **Use consistent error kinds**: Stick to the defined types in `BatchErrorDetail['kind']`
+
+4. **Update batch progress with all errors**:
+   ```typescript
+   await updateBatchProgress(batchId, {
+       // ... other updates
+       errors: batchErrors.length > 0 ? batchErrors : undefined,
+   });
+   ```

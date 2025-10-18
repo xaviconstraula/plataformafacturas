@@ -3,6 +3,7 @@ import Link from "next/link"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Overview } from "@/components/overview"
 import { PriceAlerts } from "@/components/price-alerts"
+import { BatchHistoryCard } from "@/components/batch-history-card"
 import { HelpTooltip } from "@/components/help-tooltip"
 import { helpContent } from "@/components/help-content"
 import { getDashboardStats, getOverviewData } from "@/lib/actions/dashboard"
@@ -117,6 +118,11 @@ export default function Home() {
             </CardContent>
           </Card>
         </div>
+
+        {/* Batch History Section */}
+        <ErrorBoundary>
+          <BatchHistoryCard />
+        </ErrorBoundary>
       </div>
     </DashboardPrefetchWrapper>
   )

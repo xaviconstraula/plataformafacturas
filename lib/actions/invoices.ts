@@ -11,7 +11,6 @@ import { requireAuth } from "@/lib/auth-utils";
 import fs from "fs";
 import path from "path";
 import os from "os";
-
 // ------------------------------
 // Upload constraints & utilities
 // ------------------------------
@@ -262,6 +261,40 @@ const EXTRACTED_INVOICE_SCHEMA = {
         }
     }
 } as const;
+export interface BatchErrorDetail {
+    kind: 'PARSING_ERROR' | 'DUPLICATE_INVOICE' | 'DATABASE_ERROR' | 'EXTRACTION_ERROR' | 'BLOCKED_PROVIDER' | 'UNKNOWN';
+    message: string;
+    fileName?: string;
+    invoiceCode?: string;
+    timestamp: string;
+}
+
+// Type for batch processing records from database (with JSON errors field)
+type BatchProcessingRecord = {
+    id: string;
+    status: BatchStatus;
+    totalFiles: number;
+    processedFiles: number;
+    successfulFiles: number;
+    failedFiles: number;
+    blockedFiles: number;
+    currentFile: string | null;
+    estimatedCompletion: Date | null;
+    startedAt: Date | null;
+    completedAt: Date | null;
+    createdAt: Date;
+    errors: unknown | null; // JSON field from database
+}
+
+// Type for error entries as stored in JSON
+type JsonErrorEntry = {
+    kind?: string;
+    message?: unknown;
+    fileName?: unknown;
+    invoiceCode?: unknown;
+    timestamp?: unknown;
+}
+
 export interface BatchProgressInfo {
     id: string;
     status: BatchStatus;
@@ -274,7 +307,37 @@ export interface BatchProgressInfo {
     estimatedCompletion?: Date;
     startedAt?: Date;
     completedAt?: Date;
-    errors?: string[]; // Array of error messages
+    createdAt: Date;
+    errors?: BatchErrorDetail[]; // Array of error messages with metadata
+}
+
+function pushBatchError(
+    target: BatchErrorDetail[],
+    detail: {
+        kind?: BatchErrorDetail['kind'];
+        message: string;
+        fileName?: string;
+        invoiceCode?: string;
+        timestamp?: string;
+    }
+): void {
+    target.push({
+        kind: detail.kind ?? 'UNKNOWN',
+        message: detail.message,
+        fileName: detail.fileName,
+        invoiceCode: detail.invoiceCode,
+        timestamp: detail.timestamp ?? new Date().toISOString(),
+    });
+}
+
+function serializeBatchErrors(errors: BatchErrorDetail[]): Prisma.InputJsonValue {
+    return errors.map(error => ({
+        kind: error.kind,
+        message: error.message,
+        fileName: error.fileName ?? null,
+        invoiceCode: error.invoiceCode ?? null,
+        timestamp: error.timestamp,
+    })) as Prisma.InputJsonValue;
 }
 
 // Minimal typing for Gemini batch status lookup
@@ -308,15 +371,15 @@ export async function updateBatchProgress(
         estimatedCompletion: Date;
         startedAt: Date;
         completedAt: Date;
-        errors: string[];
+        errors: BatchErrorDetail[];
     }>
 ): Promise<void> {
+    const { errors, ...rest } = updates;
     await prisma.batchProcessing.update({
         where: { id: batchId },
         data: {
-            ...updates,
-            // Ensure errors are properly stored as JSON array
-            ...(updates.errors ? { errors: updates.errors as unknown as Prisma.InputJsonValue } : {}),
+            ...rest,
+            ...(errors ? { errors: serializeBatchErrors(errors) } : {}),
             updatedAt: new Date(),
         },
     });
@@ -330,9 +393,10 @@ export async function updateBatchProgress(
 export async function getActiveBatches(): Promise<BatchProgressInfo[]> {
     const user = await requireAuth();
 
-    // Include recently completed batches (within last 2 minutes) so we can detect completion
-    const twoMinutesAgo = new Date();
-    twoMinutesAgo.setMinutes(twoMinutesAgo.getMinutes() - 2);
+    // Include recently completed batches (within last 15 minutes) so users have time to view errors
+    // Extended from 2 minutes to 15 minutes to give users sufficient time to click "Ver detalles"
+    const fifteenMinutesAgo = new Date();
+    fifteenMinutesAgo.setMinutes(fifteenMinutesAgo.getMinutes() - 15);
 
     const localBatches = await prisma.batchProcessing.findMany({
         where: {
@@ -348,7 +412,7 @@ export async function getActiveBatches(): Promise<BatchProgressInfo[]> {
                         in: ['COMPLETED', 'FAILED']
                     },
                     completedAt: {
-                        gte: twoMinutesAgo
+                        gte: fifteenMinutesAgo
                     }
                 }
             ]
@@ -410,7 +474,29 @@ export async function getActiveBatches(): Promise<BatchProgressInfo[]> {
 
                 // If batch completed, ingest results
                 if (newStatus === 'COMPLETED' && !batch.completedAt && remote?.dest) {
-                    await ingestBatchOutputFromGemini(batch.id, remote.dest);
+                    // Set completedAt BEFORE ingesting to prevent duplicate processing from concurrent polls
+                    const now = new Date();
+                    await updateBatchProgress(batch.id, {
+                        completedAt: now,
+                    });
+
+                    // Now safely ingest results - concurrent polls will skip this batch due to completedAt being set
+                    try {
+                        await ingestBatchOutputFromGemini(batch.id, remote.dest);
+                    } catch (ingestError) {
+                        console.error(`[getActiveBatches] Failed to ingest batch results for ${batch.id}:`, ingestError);
+                        // Mark batch as failed if ingestion fails
+                        await updateBatchProgress(batch.id, {
+                            status: 'FAILED',
+                            errors: [
+                                {
+                                    kind: 'DATABASE_ERROR',
+                                    message: ingestError instanceof Error ? ingestError.message : 'Failed to ingest batch results',
+                                    timestamp: new Date().toISOString(),
+                                },
+                            ],
+                        });
+                    }
                 }
 
                 continue;
@@ -436,8 +522,159 @@ export async function getActiveBatches(): Promise<BatchProgressInfo[]> {
         estimatedCompletion: batch.estimatedCompletion || undefined,
         startedAt: batch.startedAt || undefined,
         completedAt: batch.completedAt || undefined,
-        errors: batch.errors ? JSON.parse(JSON.stringify(batch.errors)) : undefined,
+        createdAt: batch.createdAt,
+        errors: Array.isArray(batch.errors)
+            ? (batch.errors as unknown as Array<Record<string, unknown>>).map((entry) => ({
+                kind: (entry.kind as BatchErrorDetail['kind']) || 'UNKNOWN',
+                message: String(entry.message ?? ''),
+                fileName: typeof entry.fileName === 'string' ? entry.fileName : undefined,
+                invoiceCode: typeof entry.invoiceCode === 'string' ? entry.invoiceCode : undefined,
+                timestamp: typeof entry.timestamp === 'string' ? entry.timestamp : new Date().toISOString(),
+            }))
+            : undefined,
     }));
+}
+
+// Get a specific batch by ID (useful for error dialog)
+export async function getBatchById(batchId: string): Promise<BatchProgressInfo | null> {
+    const user = await requireAuth();
+
+    const batch = await prisma.batchProcessing.findFirst({
+        where: {
+            id: batchId,
+            userId: user.id,
+        },
+    });
+
+    if (!batch) {
+        return null;
+    }
+
+    return {
+        id: batch.id,
+        status: batch.status,
+        totalFiles: batch.totalFiles,
+        processedFiles: batch.processedFiles,
+        successfulFiles: batch.successfulFiles,
+        failedFiles: batch.failedFiles,
+        blockedFiles: batch.blockedFiles,
+        currentFile: batch.currentFile || undefined,
+        estimatedCompletion: batch.estimatedCompletion || undefined,
+        startedAt: batch.startedAt || undefined,
+        completedAt: batch.completedAt || undefined,
+        createdAt: batch.createdAt,
+        errors: Array.isArray(batch.errors)
+            ? (batch.errors as unknown as Array<Record<string, unknown>>).map((entry) => ({
+                kind: (entry.kind as BatchErrorDetail['kind']) || 'UNKNOWN',
+                message: String(entry.message ?? ''),
+                fileName: typeof entry.fileName === 'string' ? entry.fileName : undefined,
+                invoiceCode: typeof entry.invoiceCode === 'string' ? entry.invoiceCode : undefined,
+                timestamp: typeof entry.timestamp === 'string' ? entry.timestamp : new Date().toISOString(),
+            }))
+            : undefined,
+    };
+}
+
+// Helper function to safely convert JSON error entry to BatchErrorDetail
+function jsonErrorToBatchErrorDetail(entry: JsonErrorEntry): BatchErrorDetail {
+    return {
+        kind: (entry.kind as BatchErrorDetail['kind']) || 'UNKNOWN',
+        message: String(entry.message ?? ''),
+        fileName: typeof entry.fileName === 'string' ? entry.fileName : undefined,
+        invoiceCode: typeof entry.invoiceCode === 'string' ? entry.invoiceCode : undefined,
+        timestamp: typeof entry.timestamp === 'string' ? entry.timestamp : new Date().toISOString(),
+    };
+}
+
+// Group batches that were created within a short time window (5 minutes) as they likely represent one upload session
+function groupBatchesByTimeWindow(batches: BatchProcessingRecord[]): BatchProgressInfo[] {
+    if (batches.length === 0) return [];
+
+    // Sort by creation time (newest first)
+    const sortedBatches = [...batches].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+
+    const groupedSessions: BatchProgressInfo[] = [];
+    const TIME_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+
+    for (const batch of sortedBatches) {
+        // Find if this batch belongs to an existing session
+        const existingSession = groupedSessions.find(session => {
+            const timeDiff = Math.abs(session.createdAt.getTime() - batch.createdAt.getTime());
+            return timeDiff <= TIME_WINDOW_MS;
+        });
+
+        if (existingSession) {
+            // Merge this batch into the existing session
+            existingSession.totalFiles += batch.totalFiles;
+            existingSession.processedFiles += batch.processedFiles;
+            existingSession.successfulFiles += batch.successfulFiles;
+            existingSession.failedFiles += batch.failedFiles;
+            existingSession.blockedFiles += batch.blockedFiles;
+
+            // Update status logic: if any batch is still processing/pending, session is processing
+            // If all are completed but some failed, session is failed
+            // If all completed successfully, session is completed
+            if (batch.status === 'PROCESSING' || batch.status === 'PENDING') {
+                existingSession.status = 'PROCESSING';
+            } else if (batch.status === 'FAILED' && existingSession.status !== 'PROCESSING') {
+                existingSession.status = 'FAILED';
+            } else if (batch.status === 'COMPLETED' && existingSession.status !== 'PROCESSING' && existingSession.status !== 'FAILED') {
+                existingSession.status = 'COMPLETED';
+            }
+
+            // Update timestamps
+            if (!existingSession.startedAt || (batch.startedAt && batch.startedAt < existingSession.startedAt)) {
+                existingSession.startedAt = batch.startedAt ?? undefined;
+            }
+            if (!existingSession.completedAt || (batch.completedAt && batch.completedAt > existingSession.completedAt)) {
+                existingSession.completedAt = batch.completedAt ?? undefined;
+            }
+
+            // Merge errors
+            if (batch.errors && Array.isArray(batch.errors)) {
+                if (!existingSession.errors) existingSession.errors = [];
+                existingSession.errors.push(...batch.errors.map((entry: unknown) => jsonErrorToBatchErrorDetail(entry as JsonErrorEntry)));
+            }
+        } else {
+            // Create new session
+            groupedSessions.push({
+                id: `session-${batch.createdAt.getTime()}`, // Generate a unique ID for the session
+                status: batch.status,
+                totalFiles: batch.totalFiles,
+                processedFiles: batch.processedFiles,
+                successfulFiles: batch.successfulFiles,
+                failedFiles: batch.failedFiles,
+                blockedFiles: batch.blockedFiles,
+                currentFile: batch.currentFile ?? undefined,
+                estimatedCompletion: batch.estimatedCompletion ?? undefined,
+                startedAt: batch.startedAt ?? undefined,
+                completedAt: batch.completedAt ?? undefined,
+                createdAt: batch.createdAt,
+                errors: Array.isArray(batch.errors)
+                    ? batch.errors.map((entry: unknown) => jsonErrorToBatchErrorDetail(entry as JsonErrorEntry))
+                    : undefined,
+            });
+        }
+    }
+
+    return groupedSessions.slice(0, 10); // Return last 10 sessions
+}
+
+// Get batch history for dashboard display (grouped by upload sessions)
+export async function getBatchHistory(): Promise<BatchProgressInfo[]> {
+    const user = await requireAuth();
+
+    const batches = await prisma.batchProcessing.findMany({
+        where: {
+            userId: user.id,
+        },
+        orderBy: {
+            createdAt: 'desc'
+        },
+        take: 50, // Get more batches to allow for grouping
+    });
+
+    return groupBatchesByTimeWindow(batches);
 }
 
 // Clean up old batch processing records (older than 7 days)
@@ -559,7 +796,7 @@ function isBlockedProvider(providerName: string): boolean {
 }
 
 
-async function callPdfExtractAPI(file: File): Promise<CallPdfExtractAPIResponse> {
+async function callPdfExtractAPI(file: File, batchErrors: BatchErrorDetail[]): Promise<CallPdfExtractAPIResponse> {
     try {
         const validation = validateUploadFile(file);
         if (!validation.valid) {
@@ -570,7 +807,7 @@ async function callPdfExtractAPI(file: File): Promise<CallPdfExtractAPIResponse>
         const base64 = buffer.toString('base64');
 
         // Build prompt for direct PDF processing
-        const promptText = `Extract invoice data from this PDF document (consolidate all pages into a single invoice). Only extract visible data, use null for missing optional fields.
+        const promptText = `Extract invoice data from this PDF document (consolidate all pages into a single invoice). Only extract visible data, use null for missing optional fields. The client of this purchase invoice is Sorigue or Constraula, do not ever think that they are the provider.
 
 CRITICAL NUMBER ACCURACY:
 - Distinguish 5 vs S (flat top vs curved), 8 vs B (complete vs open), 0 vs O vs 6 (oval vs round vs curved)
@@ -670,13 +907,24 @@ STRICT JSON OUTPUT RULES:
 
         if (!text) {
             console.error(`No content in Gemini response for ${file.name}`);
-            return { extractedData: null, error: "No content from Gemini." };
+            const errorMessage = "No content from Gemini.";
+            pushBatchError(batchErrors, {
+                kind: 'EXTRACTION_ERROR',
+                message: errorMessage,
+                fileName: file.name,
+            });
+            return { extractedData: null, error: errorMessage };
         }
 
         try {
             const parsed = parseJsonSafe(text);
             if (!isExtractedPdfData(parsed)) {
                 console.warn(`Gemini response did not match expected schema for ${file.name}`);
+                pushBatchError(batchErrors, {
+                    kind: 'PARSING_ERROR',
+                    message: 'Invalid AI response format.',
+                    fileName: file.name,
+                });
                 return { extractedData: null, error: "Invalid AI response format." };
             }
             const extractedData = parsed as ExtractedPdfData;
@@ -692,12 +940,22 @@ STRICT JSON OUTPUT RULES:
 
         } catch (parseError) {
             console.error(`Error parsing Gemini response for ${file.name}:`, parseError);
+            pushBatchError(batchErrors, {
+                kind: 'EXTRACTION_ERROR',
+                message: `Error parsing Gemini response: ${(parseError as Error).message}`,
+                fileName: file.name,
+            });
             return { extractedData: null, error: "Error parsing Gemini response." };
         }
 
     } catch (error) {
         console.error(`Error extracting data from PDF ${file.name}:`, error);
         const errorMessage = error instanceof Error ? error.message : "Unknown error during PDF extraction.";
+        pushBatchError(batchErrors, {
+            kind: 'EXTRACTION_ERROR',
+            message: errorMessage,
+            fileName: file.name,
+        });
         return { extractedData: null, error: errorMessage };
     }
 }
@@ -1339,12 +1597,12 @@ async function processInvoiceItemTx(
 }
 
 // Enhanced rate limit handling with exponential backoff
-async function callPdfExtractAPIWithRetry(file: File, maxRetries: number = 3): Promise<CallPdfExtractAPIResponse> {
+async function callPdfExtractAPIWithRetry(file: File, batchErrors: BatchErrorDetail[], maxRetries: number = 3): Promise<CallPdfExtractAPIResponse> {
     let lastError: unknown = null;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
-            const result = await callPdfExtractAPI(file);
+            const result = await callPdfExtractAPI(file, batchErrors);
             return result;
 
         } catch (error) {
@@ -1436,7 +1694,7 @@ export async function createInvoiceFromFiles(
     // For very large batches (100+ files), add periodic memory cleanup
     const isVeryLargeBatch = files.length >= 100;
 
-    const batchErrors: string[] = [];
+    const batchErrors: BatchErrorDetail[] = [];
 
     for (let i = 0; i < files.length; i += CONCURRENCY_LIMIT) {
         const fileChunk = files.slice(i, i + CONCURRENCY_LIMIT);
@@ -1495,7 +1753,7 @@ export async function createInvoiceFromFiles(
 
             try {
                 // Use the retry wrapper function
-                const { extractedData, error: extractionError } = await callPdfExtractAPIWithRetry(file, 3);
+                const { extractedData, error: extractionError } = await callPdfExtractAPIWithRetry(file, batchErrors, 3);
 
                 if (extractionError) {
                     return { file, extractedData, error: extractionError, fileName: file.name };
@@ -1559,6 +1817,12 @@ export async function createInvoiceFromFiles(
 
     for (const item of extractionResults) {
         if (item.error) {
+            pushBatchError(batchErrors, {
+                kind: 'EXTRACTION_ERROR',
+                message: item.error,
+                fileName: item.fileName,
+                invoiceCode: item.extractedData?.invoiceCode,
+            });
             finalResults.push({
                 success: false,
                 message: item.error,
@@ -1728,9 +1992,15 @@ export async function createInvoiceFromFiles(
                         });
 
                         if (existingInvoice) {
+                            pushBatchError(batchErrors, {
+                                kind: 'DUPLICATE_INVOICE',
+                                message: `${fileName}: La factura ${extractedData.invoiceCode} ya existe para el proveedor ${provider.name}. Esta factura ya fue procesada anteriormente.`,
+                                fileName,
+                                invoiceCode: extractedData.invoiceCode,
+                            });
                             return {
                                 success: true,
-                                message: `Invoice ${extractedData.invoiceCode} from provider ${provider.name} already exists.`,
+                                message: `La factura ${extractedData.invoiceCode} del proveedor ${provider.name} ya existe.`,
                                 invoiceId: existingInvoice.id,
                                 alertsCreated: 0,
                                 isExisting: true
@@ -2068,6 +2338,7 @@ export async function createInvoiceFromFiles(
 
     // Calculate final batch statistics
     const successfulInvoices = finalResultsWithBatch.filter(r => r.success && !r.message.includes("already exists"));
+    const duplicateInvoices = finalResultsWithBatch.filter(r => r.success && r.message.includes("already exists"));
     const failedInvoices = finalResultsWithBatch.filter(r => !r.success && !r.isBlockedProvider);
     const blockedInvoices = finalResultsWithBatch.filter(r => r.isBlockedProvider);
 
@@ -2076,11 +2347,15 @@ export async function createInvoiceFromFiles(
     const finalStatus: BatchStatus = circuitBreakerTripped ? 'FAILED' :
         overallSuccess ? 'COMPLETED' : 'COMPLETED'; // Still completed even with some failures
 
+    // For statistical purposes, treat duplicates as separate category but ensure errors are saved
+    // Duplicates are "successful" (no error occurred) but still need to be tracked
+    const totalFailedOrDuplicate = failedInvoices.length + duplicateInvoices.length;
+
     await updateBatchProgress(batchId, {
         status: finalStatus,
         processedFiles: files.length,
         successfulFiles: successfulInvoices.length,
-        failedFiles: failedInvoices.length,
+        failedFiles: totalFailedOrDuplicate,
         blockedFiles: blockedInvoices.length,
         completedAt: new Date(),
         errors: batchErrors.length > 0 ? batchErrors : undefined,
@@ -2558,7 +2833,7 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
                 console.warn(`[saveExtractedInvoice] Invoice ${extractedData.invoiceCode} already exists for provider ${provider.name} (file: ${fileName ?? "unknown"})`);
                 return {
                     success: false,
-                    message: `Invoice ${extractedData.invoiceCode} already exists for provider ${provider.name}`,
+                    message: `${fileName ?? 'Archivo desconocido'}: La factura ${extractedData.invoiceCode} ya existe para el proveedor ${provider.name}. Esta factura ya fue procesada anteriormente.`,
                     invoiceId: existingInvoice.id,
                 };
             }
@@ -2623,7 +2898,6 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
                 }
             }
 
-            console.log(`[saveExtractedInvoice] Successfully processed invoice ${invoice.invoiceCode}: ${itemsProcessed} items processed, ${itemsSkipped} items skipped, ${alertsCreated} alerts created`);
 
             return {
                 success: true,
@@ -2798,7 +3072,13 @@ async function processBatchInBackground(files: File[], userId: string) {
             const errorMsg = err instanceof Error ? err.message : 'Unknown error during batch processing';
             await updateBatchProgress(batchId, {
                 status: 'FAILED',
-                errors: [errorMsg],
+                errors: [
+                    {
+                        kind: 'DATABASE_ERROR',
+                        message: errorMsg,
+                        timestamp: new Date().toISOString(),
+                    },
+                ],
                 completedAt: new Date(),
                 failedFiles: files.length,
             }).catch((updateErr) => {
@@ -2858,7 +3138,13 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
             console.error(`[ingestBatchOutput] Failed to create tmp directory for batch ${batchId}:`, mkdirError);
             await updateBatchProgress(batchId, {
                 status: 'FAILED',
-                errors: [`Failed to create temporary directory: ${errorMsg}`],
+                errors: [
+                    {
+                        kind: 'DATABASE_ERROR',
+                        message: `Failed to create temporary directory: ${errorMsg}`,
+                        timestamp: new Date().toISOString(),
+                    },
+                ],
                 completedAt: new Date(),
             });
             return;
@@ -2867,6 +3153,42 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
         try {
             downloadedPath = path.join(tmpDir, path.basename(fileName));
             await gemini.files.download({ file: fileName as unknown as string, downloadPath: downloadedPath });
+
+            // Wait for the file to be fully downloaded with retry logic
+            const maxWaitTime = 60000; // 60 seconds max wait
+            const checkInterval = 500; // Check every 500ms
+            const startTime = Date.now();
+            let fileReady = false;
+            let lastSize = -1;
+            let stableSizeCount = 0;
+
+            while (Date.now() - startTime < maxWaitTime) {
+                try {
+                    const stats = await fs.promises.stat(downloadedPath);
+                    if (stats.isFile()) {
+                        // Check if file size is stable (hasn't changed for 2 consecutive checks)
+                        if (stats.size === lastSize && stats.size > 0) {
+                            stableSizeCount++;
+                            if (stableSizeCount >= 2) {
+                                fileReady = true;
+                                console.log(`[ingestBatchOutput] File download verified: ${downloadedPath} (${stats.size} bytes)`);
+                                break;
+                            }
+                        } else {
+                            stableSizeCount = 0;
+                        }
+                        lastSize = stats.size;
+                    }
+                } catch (err) {
+                    // File doesn't exist yet, continue waiting
+                }
+                await new Promise(resolve => setTimeout(resolve, checkInterval));
+            }
+
+            if (!fileReady) {
+                console.warn(`[ingestBatchOutput] File download timeout or unstable for ${downloadedPath}, attempting to proceed anyway`);
+            }
+
             if (!await fs.promises.access(downloadedPath).then(() => true).catch(() => false)) {
                 try {
                     const files = await fs.promises.readdir(tmpDir);
@@ -2901,18 +3223,19 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
             catch (statErr) { throw new Error(`Cannot access file stats for ${downloadedPath}: ${statErr instanceof Error ? statErr.message : 'Unknown error'}`); }
             console.log(`[ingestBatchOutput] Using streaming parser for ${downloadedPath}`);
             const parsedLines = await parseJsonLinesFromFile(downloadedPath);
-            const processingSucceeded = await processOutputLines(parsedLines, parseJsonString);
+            const processingResult = await processOutputLines(parsedLines, parseJsonString);
 
-            // Only clean up the downloaded file if processing succeeded (no errors)
-            if (processingSucceeded) {
+            // Clean up the downloaded file only if there are no actual errors (i.e., only duplicates or complete success)
+            // Keep the file if there are actual errors for debugging
+            if (!processingResult.hasActualErrors) {
                 try {
                     await fs.promises.unlink(downloadedPath);
-                    console.log(`[ingestBatchOutput] Cleaned up downloaded result file: ${downloadedPath}`);
+                    console.log(`[ingestBatchOutput] Cleaned up downloaded result file: ${downloadedPath} (${processingResult.hasOnlyDuplicates ? 'only duplicates' : 'no errors'})`);
                 } catch (cleanupErr) {
                     console.warn(`[ingestBatchOutput] Failed to clean up downloaded result file ${downloadedPath}:`, cleanupErr);
                 }
             } else {
-                console.log(`[ingestBatchOutput] Keeping failed batch result file for debugging: ${downloadedPath}`);
+                console.log(`[ingestBatchOutput] Keeping failed batch result file for debugging: ${downloadedPath} (${processingResult.successCount} success, ${processingResult.failedCount} failed with actual errors)`);
             }
 
             // Clean up old temporary files (older than 1 hour)
@@ -2937,6 +3260,7 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
     } else if (dest && (dest.inlined_responses || dest.inlinedResponses)) {
         const inlined = (dest.inlined_responses ?? dest.inlinedResponses) as Array<GeminiInlineResponse>;
         const parsedLines = inlined.map((r) => ({ ...r }));
+        // For inlined responses, we don't have a file to clean up, so we don't need the result
         await processOutputLines(parsedLines, parseJsonString);
     } else {
         console.warn(`[ingestBatchOutput] Gemini batch ${batchId} has no dest results`);
@@ -2952,10 +3276,12 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
         result?: CreateInvoiceResult;
     }
 
-    async function processOutputLines(entries: unknown[], parseJsonString: (rawInput: string, context?: string) => unknown): Promise<boolean> {
+    async function processOutputLines(entries: unknown[], parseJsonString: (rawInput: string, context?: string) => unknown): Promise<{ hasActualErrors: boolean; hasOnlyDuplicates: boolean; totalProcessed: number; successCount: number; failedCount: number }> {
         let success = 0;
         let failed = 0;
         const errors: Array<{ lineIndex: number; error: string; context?: ErrorContext }> = [];
+        let duplicateErrors = 0;
+        let actualErrors = 0;
 
         for (let index = 0; index < entries.length; index++) {
             const entry = entries[index];
@@ -2967,6 +3293,7 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                     console.error(`[ingestBatchOutput] ${errorMsg} at line ${lineIndex}`);
                     errors.push({ lineIndex, error: errorMsg });
                     failed++;
+                    actualErrors++;
                     continue;
                 }
                 const response = parsedObj.response as Record<string, unknown> | undefined;
@@ -2978,6 +3305,7 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                     console.error(`[ingestBatchOutput] ${errorMsg} (key: ${key})`);
                     errors.push({ lineIndex, error: errorMsg, context: { custom_id: key } });
                     failed++;
+                    actualErrors++;
                     continue;
                 }
 
@@ -3002,10 +3330,10 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                     console.error(`[ingestBatchOutput] ${errorMsg} for line ${lineIndex} (key: ${key})`);
                     errors.push({ lineIndex, error: errorMsg, context: { custom_id: key } });
                     failed++;
+                    actualErrors++;
                     continue;
                 }
 
-                console.log(`[ingestBatchOutput] Extracted raw content for line ${lineIndex} (key: ${key}):`, content.substring(0, 500));
 
                 const extractedUnknown = parseJsonString(content, `extracted data for ${key}`);
                 if (!extractedUnknown || !isExtractedPdfData(extractedUnknown)) {
@@ -3019,6 +3347,7 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                         context: { custom_id: identifier, rawContent: content.substring(0, 500) }
                     });
                     failed++;
+                    actualErrors++;
                     continue;
                 }
 
@@ -3027,7 +3356,7 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                 if (result.success) {
                     success++;
                 } else {
-                    const errorMsg = `Failed to save invoice: ${result.message}`;
+                    const errorMsg = `Error al guardar la factura: ${result.message}`;
                     console.error(`[ingestBatchOutput] ${errorMsg} for line ${lineIndex} (key: ${key ?? 'unknown'})`);
                     errors.push({
                         lineIndex,
@@ -3035,9 +3364,16 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                         context: { custom_id: key, result }
                     });
                     failed++;
+
+                    // Check if this is a duplicate invoice error
+                    if (result.message && result.message.includes('already exists')) {
+                        duplicateErrors++;
+                    } else {
+                        actualErrors++;
+                    }
                 }
             } catch (err) {
-                const errorMsg = `Error processing line: ${(err as Error).message}`;
+                const errorMsg = `Error al procesar la línea: ${(err as Error).message}`;
                 console.error(`[ingestBatchOutput] ${errorMsg} for line ${lineIndex}`);
                 errors.push({
                     lineIndex,
@@ -3045,6 +3381,7 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                     context: { rawLine: JSON.stringify(entry).substring(0, 500) }
                 });
                 failed++;
+                actualErrors++;
             }
         }
 
@@ -3066,21 +3403,47 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                 }
             });
 
-            // Save error details to the database
-            const errorSummaries = errors.map(({ lineIndex, error, context }) => ({
-                lineIndex,
-                error,
-                fileName: context?.custom_id || `line-${lineIndex}`,
-                errorType: context?.rawLine ? 'parsing' : context?.result ? 'database' : 'unknown'
-            }));
+            const structuredErrors = errors.map(({ lineIndex, error, context }) => {
+                const fileName = context?.custom_id || `line-${lineIndex}`;
+                const maybeResult = context?.result as CreateInvoiceResult | undefined;
+                const invoiceCodeFromResult = maybeResult?.message && maybeResult.message.includes('Invoice')
+                    ? maybeResult.message.match(/Invoice\s([^\s]+)\s/)
+                    : null;
+
+                const invoiceCode = context?.extractedData && typeof context.extractedData === 'object'
+                    ? (context.extractedData as ExtractedPdfData).invoiceCode
+                    : invoiceCodeFromResult?.[1];
+
+                const kind: BatchErrorDetail['kind'] = context?.rawLine
+                    ? 'PARSING_ERROR'
+                    : maybeResult?.message?.includes('already exists')
+                        ? 'DUPLICATE_INVOICE'
+                        : maybeResult
+                            ? 'DATABASE_ERROR'
+                            : 'UNKNOWN';
+
+                return {
+                    kind,
+                    message: `${fileName}: ${error}`,
+                    fileName,
+                    invoiceCode,
+                    timestamp: new Date().toISOString(),
+                } satisfies BatchErrorDetail;
+            }).slice(0, 100);
 
             await updateBatchProgress(batchId, {
-                errors: errorSummaries.map(e => `${e.fileName}: ${e.error}`).slice(0, 100) // Keep first 100 errors
+                errors: structuredErrors,
             });
         }
 
-        // Return true if no errors occurred, false otherwise
-        return errors.length === 0;
+        // Return detailed error information for cleanup decision
+        return {
+            hasActualErrors: actualErrors > 0,
+            hasOnlyDuplicates: errors.length > 0 && actualErrors === 0 && duplicateErrors > 0,
+            totalProcessed: entries.length,
+            successCount: success,
+            failedCount: failed
+        };
     }
 }
 

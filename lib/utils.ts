@@ -28,6 +28,16 @@ export function formatDate(date: Date | string): string {
     day: 'numeric'
   }).format(dateObj)
 }
+export function formatDateTime(date: Date | string): string {
+  const dateObj = typeof date === 'string' ? new Date(date) : date
+  return new Intl.DateTimeFormat('es-ES', {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit'
+  }).format(dateObj)
+}
 
 export function getQuarterFromMonth(month: number): number {
   return Math.ceil(month / 3)
