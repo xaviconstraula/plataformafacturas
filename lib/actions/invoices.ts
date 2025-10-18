@@ -3,6 +3,7 @@
 import { prisma } from "@/lib/db";
 import { type ExtractedPdfData, type ExtractedPdfItemData } from "@/lib/types/pdf";
 import { Prisma, type Provider, type Material, type Invoice, type InvoiceItem, type PriceAlert, type MaterialProvider, BatchStatus } from "@/generated/prisma";
+import { groupBatchesByTimeWindow as groupBatchesUtil } from "@/lib/utils/batch-grouping";
 import { revalidatePath } from "next/cache";
 import { GoogleGenAI } from "@google/genai";
 import { normalizeMaterialCode, areMaterialCodesSimilar, normalizeCifForComparison, buildCifVariants } from "@/lib/utils";
@@ -657,7 +658,8 @@ function groupBatchesByTimeWindow(batches: BatchProcessingRecord[]): BatchProgre
         }
     }
 
-    return groupedSessions.slice(0, 10); // Return last 10 sessions
+    // Align behavior with util (also caps to 10)
+    return groupBatchesUtil(groupedSessions, { maxGroups: 10 });
 }
 
 // Get batch history for dashboard display (grouped by upload sessions)

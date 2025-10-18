@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button"
 import { BatchErrorsDialog } from "@/components/batch-errors-dialog"
 import { getBatchById } from "@/lib/actions/invoices"
 import type { BatchProgressInfo } from "@/lib/actions/invoices"
+import { groupBatchesByTimeWindow } from "@/lib/utils/batch-grouping"
 
 function areAllErrorsDuplicates(errors?: { kind: string }[]): boolean {
     if (!errors || errors.length === 0) return false
@@ -140,40 +141,52 @@ export function BatchProgressBanner() {
             )
         )
 
-        // If batches completed, show notification
+        // If batches completed, show aggregated notification(s) per session
         if (newlyCompletedBatches.length > 0) {
-            const completedBatch = newlyCompletedBatches[0]
-            const currentBatch = batches.find(b => b.id === completedBatch.id)
+            // Map to current batch objects (latest data)
+            const completedNow = newlyCompletedBatches
+                .map(nb => batches.find(b => b.id === nb.id))
+                .filter((b): b is BatchProgressInfo => Boolean(b))
 
-            if (!currentBatch) return
+            // Only consider those with errors
+            const withErrors = completedNow.filter(b => (b.failedFiles || 0) > 0 || (b.errors?.length || 0) > 0)
 
-            const failedFiles = currentBatch?.failedFiles || 0
-            const successfulFiles = currentBatch?.successfulFiles || 0
+            // Group into sessions by time window
+            const sessions = groupBatchesByTimeWindow(withErrors, { timeWindowMs: 5 * 60 * 1000 })
 
-            if (failedFiles > 0 || (currentBatch.errors?.length ?? 0) > 0) {
-                const areAllDuplicates = areAllErrorsDuplicates(currentBatch.errors)
+            sessions.forEach(session => {
+                if (shownNotificationsRef.current.has(session.id)) return
+
+                const failedFiles = session.failedFiles || 0
+                const successfulFiles = session.successfulFiles || 0
+                const areAllDuplicates = areAllErrorsDuplicates(session.errors)
                 const toastTitle = areAllDuplicates ? "Procesamiento completado con duplicadas" : "Procesamiento completado con errores"
 
                 toast.warning(toastTitle, {
-                    description: getErrorDescription(successfulFiles, failedFiles, currentBatch.errors),
+                    description: getErrorDescription(successfulFiles, failedFiles, session.errors),
                     duration: Infinity,
                     action: {
                         label: "Ver detalles",
                         onClick: () => {
-                            console.log('[Toast Action] Ver detalles clicked for batch:', currentBatch.id)
-                            console.log('[Toast Action] Current batch has errors:', currentBatch.errors?.length ?? 0)
-                            console.log('[Toast Action] Setting state - batchId:', currentBatch.id, 'dialogOpen: true')
-                            // Use batch ID instead of the batch object to always get fresh data
-                            setSelectedBatchIdForErrors(currentBatch.id)
+                            // Open dialog with aggregated session data
+                            setFetchedBatch(session)
+                            setSelectedBatchIdForErrors(session.id)
                             setErrorDialogOpen(true)
-                            console.log('[Toast Action] State updated')
                         }
                     }
                 })
-                shownNotificationsRef.current.add(currentBatch.id)
-            } else {
+
+                // Mark the session as notified, and also mark the underlying batch ids
+                shownNotificationsRef.current.add(session.id)
+                completedNow.forEach(b => shownNotificationsRef.current.add(b.id))
+            })
+
+            // For sessions without errors, show a success toast once
+            const successOnly = completedNow.filter(b => (b.failedFiles || 0) === 0 && (b.errors?.length || 0) === 0)
+            if (successOnly.length > 0) {
+                const totalSuccess = successOnly.reduce((sum, b) => sum + (b.successfulFiles || 0), 0)
                 toast.success("Procesamiento completado", {
-                    description: `${successfulFiles} facturas procesadas exitosamente. Recargando página...`
+                    description: `${totalSuccess} facturas procesadas exitosamente. Recargando página...`
                 })
                 setTimeout(() => {
                     window.location.reload()
@@ -186,35 +199,34 @@ export function BatchProgressBanner() {
             const isRecentlyCompleted = (batch.status === 'COMPLETED' || batch.status === 'FAILED') && batch.completedAt &&
                 (new Date().getTime() - new Date(batch.completedAt).getTime()) < (5 * 60 * 1000)
             const hasErrors = (batch.errors && batch.errors.length > 0) || (batch.failedFiles && batch.failedFiles > 0)
-            const notNotified = !shownNotificationsRef.current.has(batch.id)
-            return isRecentlyCompleted && hasErrors && notNotified
+            return isRecentlyCompleted && hasErrors
         })
 
-        recentCompletedBatches.forEach(batch => {
-            const failedFiles = batch.failedFiles || 0
-            const successfulFiles = batch.successfulFiles || 0
+        // Aggregate recent completed into sessions and show one toast per session
+        const recentSessions = groupBatchesByTimeWindow(recentCompletedBatches, { timeWindowMs: 5 * 60 * 1000 })
+        recentSessions.forEach(session => {
+            if (shownNotificationsRef.current.has(session.id)) return
 
-            const areAllDuplicates = areAllErrorsDuplicates(batch.errors)
+            const failedFiles = session.failedFiles || 0
+            const successfulFiles = session.successfulFiles || 0
+
+            const areAllDuplicates = areAllErrorsDuplicates(session.errors)
             const toastTitle = areAllDuplicates ? "Procesamiento completado con duplicadas" : "Procesamiento completado con errores"
 
             toast.warning(toastTitle, {
-                description: getErrorDescription(successfulFiles, failedFiles, batch.errors),
+                description: getErrorDescription(successfulFiles, failedFiles, session.errors),
                 duration: Infinity,
                 action: {
                     label: "Ver detalles",
                     onClick: () => {
-                        console.log('[Toast Action - Recent] Ver detalles clicked for batch:', batch.id)
-                        console.log('[Toast Action - Recent] Batch has errors:', batch.errors?.length ?? 0)
-                        console.log('[Toast Action - Recent] Setting state - batchId:', batch.id, 'dialogOpen: true')
-                        // Use batch ID instead of the batch object to always get fresh data
-                        setSelectedBatchIdForErrors(batch.id)
+                        setFetchedBatch(session)
+                        setSelectedBatchIdForErrors(session.id)
                         setErrorDialogOpen(true)
-                        console.log('[Toast Action - Recent] State updated')
                     }
                 }
             })
 
-            shownNotificationsRef.current.add(batch.id)
+            shownNotificationsRef.current.add(session.id)
         })
 
         // Only show batches that are actually active (not completed)
