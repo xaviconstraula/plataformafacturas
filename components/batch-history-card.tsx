@@ -29,13 +29,12 @@ function BatchHistoryItem({
     const [isExpanded, setIsExpanded] = useState(false)
     const config = statusConfig[batch.status]
     const StatusIcon = config.icon
-    const hasErrors = (batch.errors?.length ?? 0) > 0 || (batch.failedFiles ?? 0) > 0
 
-    // Categorize errors
-    const duplicateErrors = batch.errors?.filter(error => error.kind === 'DUPLICATE_INVOICE') ?? []
-    const otherErrors = batch.errors?.filter(error => error.kind !== 'DUPLICATE_INVOICE') ?? []
-    const duplicateCount = duplicateErrors.length
-    const otherErrorCount = otherErrors.length + (batch.failedFiles ?? 0) - duplicateCount
+    // Count duplicates vs actual errors
+    const duplicateCount = batch.errors?.filter(e => e.kind === 'DUPLICATE_INVOICE').length ?? 0
+    const actualErrorCount = batch.errors?.filter(e => e.kind !== 'DUPLICATE_INVOICE').length ?? 0
+    const hasErrors = actualErrorCount > 0 || (batch.failedFiles ?? 0) > 0
+    const hasDuplicates = duplicateCount > 0
 
     return (
         <div className="border rounded-lg p-4 space-y-3">
@@ -51,18 +50,14 @@ function BatchHistoryItem({
                                 {config.label}
                             </Badge>
                             {hasErrors && (
-                                <div className="flex gap-1">
-                                    {otherErrorCount > 0 && (
-                                        <Badge variant="outline" className="text-xs text-red-600 border-red-200">
-                                            {otherErrorCount} error{otherErrorCount !== 1 ? 'es' : ''}
-                                        </Badge>
-                                    )}
-                                    {duplicateCount > 0 && (
-                                        <Badge variant="outline" className="text-xs text-orange-600 border-orange-200">
-                                            {duplicateCount} duplicada{duplicateCount !== 1 ? 's' : ''}
-                                        </Badge>
-                                    )}
-                                </div>
+                                <Badge variant="outline" className="text-xs text-red-600 border-red-200">
+                                    {actualErrorCount} errores
+                                </Badge>
+                            )}
+                            {hasDuplicates && (
+                                <Badge variant="outline" className="text-xs text-orange-600 border-orange-200">
+                                    {duplicateCount} duplicadas
+                                </Badge>
                             )}
                         </div>
                         <div className="text-xs text-muted-foreground mt-3">
@@ -101,12 +96,9 @@ function BatchHistoryItem({
 
             {isExpanded && (batch.status === 'COMPLETED' || batch.status === 'FAILED') && (
                 <div className="pt-2 border-t space-y-2">
-                    <div className="grid grid-cols-3 gap-2 text-xs">
+                    <div className="grid grid-cols-2 gap-2 text-xs">
                         <div className="text-green-600">
                             ✓ {batch.successfulFiles ?? 0} exitosos
-                        </div>
-                        <div className="text-red-600">
-                            ✗ {batch.failedFiles ?? 0} fallidos
                         </div>
                         <div className="text-blue-600">
                             {batch.totalFiles && batch.totalFiles > 0
@@ -114,6 +106,20 @@ function BatchHistoryItem({
                                 : 0}% éxito
                         </div>
                     </div>
+                    {(hasErrors || hasDuplicates) && (
+                        <div className="grid grid-cols-2 gap-2 text-xs">
+                            {hasErrors && (
+                                <div className="text-red-600">
+                                    ✗ {actualErrorCount} errores
+                                </div>
+                            )}
+                            {hasDuplicates && (
+                                <div className="text-orange-600">
+                                    ◉ {duplicateCount} duplicadas
+                                </div>
+                            )}
+                        </div>
+                    )}
                     {batch.completedAt && (
                         <div className="text-xs text-muted-foreground">
                             Completado: {formatDateTime(batch.completedAt)}

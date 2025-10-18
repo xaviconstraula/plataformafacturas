@@ -783,6 +783,7 @@ export interface CreateInvoiceResult {
     fileName?: string;
     isBlockedProvider?: boolean;
     batchId?: string; // Add batch ID to results
+    isDuplicate?: boolean; // Flag to indicate if this is a duplicate invoice
 }
 
 // Type for items after initial extraction and validation, before sorting
@@ -2134,16 +2135,17 @@ export async function createInvoiceFromFiles(
                         if (existingInvoice) {
                             pushBatchError(batchErrors, {
                                 kind: 'DUPLICATE_INVOICE',
-                                message: `${fileName}: La factura ${extractedData.invoiceCode} ya existe para el proveedor ${provider.name}. Esta factura ya fue procesada anteriormente.`,
+                                message: `Factura Duplicada - ${extractedData.invoiceCode} - ${fileName}`,
                                 fileName,
                                 invoiceCode: extractedData.invoiceCode,
                             });
                             return {
                                 success: true,
-                                message: `La factura ${extractedData.invoiceCode} del proveedor ${provider.name} ya existe.`,
+                                message: `Factura Duplicada - ${extractedData.invoiceCode} - ${fileName}`,
                                 invoiceId: existingInvoice.id,
                                 alertsCreated: 0,
-                                isExisting: true
+                                isExisting: true,
+                                isDuplicate: true
                             };
                         }
 
@@ -2900,8 +2902,9 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
                 console.warn(`[saveExtractedInvoice] Invoice ${extractedData.invoiceCode} already exists for provider ${provider.name} (file: ${fileName ?? "unknown"})`);
                 return {
                     success: false,
-                    message: `${fileName ?? 'Archivo desconocido'}: La factura ${extractedData.invoiceCode} ya existe para el proveedor ${provider.name}. Esta factura ya fue procesada anteriormente.`,
+                    message: `Factura Duplicada - ${extractedData.invoiceCode} - ${fileName ?? 'Archivo desconocido'}`,
                     invoiceId: existingInvoice.id,
+                    isDuplicate: true,
                 };
             }
 
@@ -3446,7 +3449,17 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                 if (result.success) {
                     success++;
                 } else {
-                    const errorMsg = `Error al guardar la factura: ${result.message}`;
+                    // Check if this is a duplicate invoice error (check message content for backward compatibility with old results)
+                    const isDuplicateError = result.isDuplicate ||
+                        result.message?.includes('Factura Duplicada') ||
+                        result.message?.includes('already exists') ||
+                        result.message?.includes('ya existe');
+
+                    // For duplicates, use the message as-is; for other errors, add descriptive prefix
+                    const errorMsg = isDuplicateError
+                        ? result.message
+                        : `Error al guardar la factura: ${result.message}`;
+
                     console.error(`[ingestBatchOutput] ${errorMsg} for line ${lineIndex} (key: ${key ?? 'unknown'})`);
                     errors.push({
                         lineIndex,
@@ -3455,8 +3468,7 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                     });
                     failed++;
 
-                    // Check if this is a duplicate invoice error
-                    if (result.message && result.message.includes('already exists')) {
+                    if (isDuplicateError) {
                         duplicateErrors++;
                     } else {
                         actualErrors++;
@@ -3496,25 +3508,70 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
             const structuredErrors = errors.map(({ lineIndex, error, context }) => {
                 const fileName = context?.custom_id || `line-${lineIndex}`;
                 const maybeResult = context?.result as CreateInvoiceResult | undefined;
-                const invoiceCodeFromResult = maybeResult?.message && maybeResult.message.includes('Invoice')
-                    ? maybeResult.message.match(/Invoice\s([^\s]+)\s/)
-                    : null;
 
-                const invoiceCode = context?.extractedData && typeof context.extractedData === 'object'
-                    ? (context.extractedData as ExtractedPdfData).invoiceCode
-                    : invoiceCodeFromResult?.[1];
+                // Detect if this is a duplicate error
+                const isDuplicateError = maybeResult?.isDuplicate ||
+                    maybeResult?.message?.includes('Factura Duplicada') ||
+                    maybeResult?.message?.includes('already exists') ||
+                    maybeResult?.message?.includes('ya existe');
+
+                // Extract invoice code from various message formats
+                let invoiceCode: string | undefined;
+
+                // First try to get from extracted data
+                if (context?.extractedData && typeof context.extractedData === 'object') {
+                    invoiceCode = (context.extractedData as ExtractedPdfData).invoiceCode;
+                }
+
+                // For old format duplicates: "filename.pdf: La factura INVOICECODE ya existe para el proveedor..."
+                if (!invoiceCode && isDuplicateError && maybeResult?.message) {
+                    const oldFormatMatch = maybeResult.message.match(/La factura ([^y]+) ya existe/);
+                    if (oldFormatMatch) {
+                        invoiceCode = oldFormatMatch[1].trim();
+                    }
+                }
+
+                // For new format duplicates: "Factura Duplicada - INVOICECODE - filename"
+                if (!invoiceCode && maybeResult?.message?.includes('Factura Duplicada')) {
+                    const newFormatMatch = maybeResult.message.match(/^Factura Duplicada - (.+?) - /);
+                    if (newFormatMatch) {
+                        invoiceCode = newFormatMatch[1];
+                    }
+                }
+
+                // Fallback: try to extract from generic invoice messages
+                if (!invoiceCode && maybeResult?.message?.includes('Invoice')) {
+                    const invoiceMatch = maybeResult.message.match(/Invoice\s+([^\s]+)/);
+                    if (invoiceMatch) {
+                        invoiceCode = invoiceMatch[1];
+                    }
+                }
 
                 const kind: BatchErrorDetail['kind'] = context?.rawLine
                     ? 'PARSING_ERROR'
-                    : maybeResult?.message?.includes('already exists')
+                    : isDuplicateError
                         ? 'DUPLICATE_INVOICE'
                         : maybeResult
                             ? 'DATABASE_ERROR'
                             : 'UNKNOWN';
 
+                // Format message: for duplicates, use clean format; for others, use error as-is
+                let finalMessage: string;
+                if (isDuplicateError) {
+                    // If already in new format, use as-is; otherwise convert old format to new format
+                    if (maybeResult?.message?.includes('Factura Duplicada')) {
+                        finalMessage = maybeResult.message;
+                    } else {
+                        // Convert old format to new format
+                        finalMessage = `Factura Duplicada - ${invoiceCode || 'Desconocido'} - ${fileName}`;
+                    }
+                } else {
+                    finalMessage = error;
+                }
+
                 return {
                     kind,
-                    message: `${fileName}: ${error}`,
+                    message: finalMessage,
                     fileName,
                     invoiceCode,
                     timestamp: new Date().toISOString(),

@@ -39,19 +39,6 @@ export function BatchErrorsDialog({
         setExpandedErrors(newExpanded)
     }
 
-    const formatErrorMessage = (error: BatchErrorDetail): string => {
-        if (error.kind === 'DUPLICATE_INVOICE') {
-            // Extract invoice code and filename from the error message
-            // Pattern: "La factura [CODE] ya existe" - we want to capture CODE
-            const invoiceMatch = error.message.match(/La factura\s+(\S+)/)
-            const invoiceCode = invoiceMatch ? invoiceMatch[1] : 'Desconocido'
-            const fileName = error.fileName || 'Archivo desconocido'
-
-            return `Factura Duplicada - ${invoiceCode} - ${fileName}`
-        }
-        return error.message
-    }
-
     const copyErrorToClipboard = (error: string) => {
         navigator.clipboard.writeText(error)
         toast.success("Error copied to clipboard")
@@ -67,6 +54,9 @@ export function BatchErrorsDialog({
     const blockedProviders = errors.filter(error => error.kind === 'BLOCKED_PROVIDER')
     const otherErrors = errors.filter(error => !['DUPLICATE_INVOICE', 'PARSING_ERROR', 'EXTRACTION_ERROR', 'BLOCKED_PROVIDER'].includes(error.kind))
 
+    const duplicateCount = duplicates.length
+    const actualErrorCount = parsingErrors.length + blockedProviders.length + otherErrors.length
+
     const sections = [
         { title: 'Errores críticos', items: otherErrors, badgeVariant: 'destructive' as const },
         { title: 'Errores de lectura', items: parsingErrors, badgeVariant: 'secondary' as const },
@@ -75,6 +65,19 @@ export function BatchErrorsDialog({
     ].filter(section => section.items.length > 0)
 
     const areAllDuplicates = errors.length > 0 && duplicates.length === errors.length
+
+    // Helper to extract invoice code and filename from formatted message "Factura Duplicada - INVOICENUM - FILENAME"
+    function parseErrorMessageForDuplicate(message: string): { invoiceCode?: string; fileName?: string; displayMessage: string } {
+        const match = message.match(/^Factura Duplicada - (.+?) - (.+)$/);
+        if (match) {
+            return {
+                invoiceCode: match[1],
+                fileName: match[2],
+                displayMessage: message
+            };
+        }
+        return { displayMessage: message };
+    }
 
     return (
         <Dialog open={isOpen} onOpenChange={onClose}>
@@ -117,11 +120,11 @@ export function BatchErrorsDialog({
                             </div>
                             <div className="bg-red-50 p-3 rounded-lg">
                                 <p className="text-sm text-gray-600">Fallidos</p>
-                                <p className="text-2xl font-bold text-red-600">{failedFiles}</p>
+                                <p className="text-2xl font-bold text-red-600">{actualErrorCount}</p>
                             </div>
-                            <div className="bg-blue-50 p-3 rounded-lg">
-                                <p className="text-sm text-gray-600">Tasa de éxito</p>
-                                <p className="text-2xl font-bold text-blue-600">{successRate}%</p>
+                            <div className="bg-orange-50 p-3 rounded-lg">
+                                <p className="text-sm text-gray-600">Duplicadas</p>
+                                <p className="text-2xl font-bold text-orange-600">{duplicateCount}</p>
                             </div>
                         </div>
 
@@ -141,6 +144,12 @@ export function BatchErrorsDialog({
                                                         .slice(0, sectionIndex)
                                                         .reduce((acc, curr) => acc + curr.items.length, 0) + index
 
+                                                    // For duplicates, extract and format the message nicely
+                                                    const isDuplicate = error.kind === 'DUPLICATE_INVOICE'
+                                                    const { invoiceCode: parsedCode, fileName: parsedFileName } = isDuplicate ? parseErrorMessageForDuplicate(error.message) : {}
+                                                    const displayInvoiceCode = parsedCode || error.invoiceCode
+                                                    const displayFileName = parsedFileName || error.fileName
+
                                                     return (
                                                         <div
                                                             key={`${section.title}-${index}`}
@@ -156,17 +165,17 @@ export function BatchErrorsDialog({
                                                                     </span>
                                                                     <div className="flex flex-col flex-1 min-w-0">
                                                                         <p className="text-sm font-medium text-gray-700 truncate">
-                                                                            {formatErrorMessage(error)}
+                                                                            {isDuplicate ? `Factura Duplicada - ${displayInvoiceCode}` : error.message}
                                                                         </p>
                                                                         <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-500">
-                                                                            {error.fileName ? (
+                                                                            {displayFileName ? (
                                                                                 <span className="font-mono bg-white px-2 py-0.5 rounded border">
-                                                                                    {error.fileName}
+                                                                                    {displayFileName}
                                                                                 </span>
                                                                             ) : null}
-                                                                            {error.invoiceCode ? (
+                                                                            {displayInvoiceCode ? (
                                                                                 <span className="font-mono bg-white px-2 py-0.5 rounded border border-dashed">
-                                                                                    Factura: {error.invoiceCode}
+                                                                                    Factura: {displayInvoiceCode}
                                                                                 </span>
                                                                             ) : null}
                                                                             <span>

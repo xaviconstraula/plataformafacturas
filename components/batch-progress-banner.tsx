@@ -18,9 +18,25 @@ function areAllErrorsDuplicates(errors?: { kind: string }[]): boolean {
 }
 
 function getErrorDescription(successfulFiles: number, failedFiles: number, errors?: { kind: string }[]): string {
-    const areAllDuplicates = areAllErrorsDuplicates(errors)
-    const errorType = areAllDuplicates ? 'duplicadas' : 'errores'
-    return `${successfulFiles} facturas procesadas, ${failedFiles} ${errorType}`
+    if (!errors || errors.length === 0) {
+        return `${successfulFiles} facturas procesadas, ${failedFiles} errores`
+    }
+
+    const duplicateCount = errors.filter(error => error.kind === 'DUPLICATE_INVOICE').length
+    const actualErrorCount = errors.filter(error => error.kind !== 'DUPLICATE_INVOICE').length
+
+    const parts = []
+    parts.push(`${successfulFiles} facturas procesadas`)
+
+    if (actualErrorCount > 0) {
+        parts.push(`${actualErrorCount} errores`)
+    }
+
+    if (duplicateCount > 0) {
+        parts.push(`${duplicateCount} duplicadas`)
+    }
+
+    return parts.join(', ')
 }
 
 export function BatchProgressBanner() {
@@ -160,7 +176,17 @@ export function BatchProgressBanner() {
                 const failedFiles = session.failedFiles || 0
                 const successfulFiles = session.successfulFiles || 0
                 const areAllDuplicates = areAllErrorsDuplicates(session.errors)
-                const toastTitle = areAllDuplicates ? "Procesamiento completado con duplicadas" : "Procesamiento completado con errores"
+                const hasDuplicates = session.errors?.some(e => e.kind === 'DUPLICATE_INVOICE') || false
+                const hasActualErrors = session.errors?.some(e => e.kind !== 'DUPLICATE_INVOICE') || false
+
+                let toastTitle = "Procesamiento completado"
+                if (hasActualErrors && hasDuplicates) {
+                    toastTitle = "Procesamiento completado con errores y duplicadas"
+                } else if (hasActualErrors) {
+                    toastTitle = "Procesamiento completado con errores"
+                } else if (hasDuplicates || areAllDuplicates) {
+                    toastTitle = "Procesamiento completado con duplicadas"
+                }
 
                 toast.warning(toastTitle, {
                     description: getErrorDescription(successfulFiles, failedFiles, session.errors),
@@ -211,7 +237,17 @@ export function BatchProgressBanner() {
             const successfulFiles = session.successfulFiles || 0
 
             const areAllDuplicates = areAllErrorsDuplicates(session.errors)
-            const toastTitle = areAllDuplicates ? "Procesamiento completado con duplicadas" : "Procesamiento completado con errores"
+            const hasDuplicates = session.errors?.some(e => e.kind === 'DUPLICATE_INVOICE') || false
+            const hasActualErrors = session.errors?.some(e => e.kind !== 'DUPLICATE_INVOICE') || false
+
+            let toastTitle = "Procesamiento completado"
+            if (hasActualErrors && hasDuplicates) {
+                toastTitle = "Procesamiento completado con errores y duplicadas"
+            } else if (hasActualErrors) {
+                toastTitle = "Procesamiento completado con errores"
+            } else if (hasDuplicates || areAllDuplicates) {
+                toastTitle = "Procesamiento completado con duplicadas"
+            }
 
             toast.warning(toastTitle, {
                 description: getErrorDescription(successfulFiles, failedFiles, session.errors),
