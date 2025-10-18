@@ -31,6 +31,12 @@ function BatchHistoryItem({
     const StatusIcon = config.icon
     const hasErrors = (batch.errors?.length ?? 0) > 0 || (batch.failedFiles ?? 0) > 0
 
+    // Categorize errors
+    const duplicateErrors = batch.errors?.filter(error => error.kind === 'DUPLICATE_INVOICE') ?? []
+    const otherErrors = batch.errors?.filter(error => error.kind !== 'DUPLICATE_INVOICE') ?? []
+    const duplicateCount = duplicateErrors.length
+    const otherErrorCount = otherErrors.length + (batch.failedFiles ?? 0) - duplicateCount
+
     return (
         <div className="border rounded-lg p-4 space-y-3">
             <div className="flex items-center justify-between">
@@ -45,9 +51,18 @@ function BatchHistoryItem({
                                 {config.label}
                             </Badge>
                             {hasErrors && (
-                                <Badge variant="outline" className="text-xs text-red-600 border-red-200">
-                                    {batch.failedFiles ?? 0} errores
-                                </Badge>
+                                <div className="flex gap-1">
+                                    {otherErrorCount > 0 && (
+                                        <Badge variant="outline" className="text-xs text-red-600 border-red-200">
+                                            {otherErrorCount} error{otherErrorCount !== 1 ? 'es' : ''}
+                                        </Badge>
+                                    )}
+                                    {duplicateCount > 0 && (
+                                        <Badge variant="outline" className="text-xs text-orange-600 border-orange-200">
+                                            {duplicateCount} duplicada{duplicateCount !== 1 ? 's' : ''}
+                                        </Badge>
+                                    )}
+                                </div>
                             )}
                         </div>
                         <div className="text-xs text-muted-foreground mt-3">

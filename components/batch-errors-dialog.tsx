@@ -39,6 +39,19 @@ export function BatchErrorsDialog({
         setExpandedErrors(newExpanded)
     }
 
+    const formatErrorMessage = (error: BatchErrorDetail): string => {
+        if (error.kind === 'DUPLICATE_INVOICE') {
+            // Extract invoice code and filename from the error message
+            // Pattern: "La factura [CODE] ya existe" - we want to capture CODE
+            const invoiceMatch = error.message.match(/La factura\s+(\S+)/)
+            const invoiceCode = invoiceMatch ? invoiceMatch[1] : 'Desconocido'
+            const fileName = error.fileName || 'Archivo desconocido'
+
+            return `Factura Duplicada - ${invoiceCode} - ${fileName}`
+        }
+        return error.message
+    }
+
     const copyErrorToClipboard = (error: string) => {
         navigator.clipboard.writeText(error)
         toast.success("Error copied to clipboard")
@@ -143,7 +156,7 @@ export function BatchErrorsDialog({
                                                                     </span>
                                                                     <div className="flex flex-col flex-1 min-w-0">
                                                                         <p className="text-sm font-medium text-gray-700 truncate">
-                                                                            {error.message}
+                                                                            {formatErrorMessage(error)}
                                                                         </p>
                                                                         <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-500">
                                                                             {error.fileName ? (

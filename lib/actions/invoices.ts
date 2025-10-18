@@ -177,7 +177,8 @@ const TEXT_FORMAT_NESTED_DELIMITER = ';';
  * ITEM|Cemento Portland|CEM001|true|10.00|25.50|255.00|~|OT-4077|Cemento gris 50kg|1
  * ITEM|Transporte|~|false|1.00|995.50|995.50|2024-01-15|~|Envío especial|2
  */
-function parseTextBasedExtraction(text: string): ExtractedPdfData | null {
+function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: boolean }): ExtractedPdfData | null {
+    const suppressWarnings = options?.suppressWarnings ?? false;
     const lines = text.trim().split('\n');
 
     let invoiceCode: string | undefined = undefined;
@@ -187,11 +188,13 @@ function parseTextBasedExtraction(text: string): ExtractedPdfData | null {
     const items: ExtractedPdfItemData[] = [];
 
     const parseField = (value: string): string | undefined => {
+        if (value === undefined || value === null) return undefined;
         const trimmed = value.trim();
         return trimmed === '~' || trimmed === '' ? undefined : trimmed;
     };
 
     const parseNumber = (value: string): number | undefined => {
+        if (value === undefined || value === null) return undefined;
         const trimmed = value.trim();
         if (trimmed === '~' || trimmed === '') return undefined;
         const num = parseFloat(trimmed);
@@ -213,7 +216,7 @@ function parseTextBasedExtraction(text: string): ExtractedPdfData | null {
         if (recordType === 'HEADER') {
             // HEADER|invoiceCode|issueDate|totalAmount
             if (parts.length < 4) {
-                console.warn(`Invalid HEADER line: ${trimmedLine}`);
+                if (!suppressWarnings) console.warn(`Invalid HEADER line: ${trimmedLine}`);
                 continue;
             }
             invoiceCode = parseField(parts[1]);
@@ -222,7 +225,7 @@ function parseTextBasedExtraction(text: string): ExtractedPdfData | null {
         } else if (recordType === 'PROVIDER') {
             // PROVIDER|name|cif|email|phone|address
             if (parts.length < 6) {
-                console.warn(`Invalid PROVIDER line: ${trimmedLine}`);
+                if (!suppressWarnings) console.warn(`Invalid PROVIDER line: ${trimmedLine}`);
                 continue;
             }
             provider = {
@@ -234,22 +237,32 @@ function parseTextBasedExtraction(text: string): ExtractedPdfData | null {
             };
         } else if (recordType === 'ITEM') {
             // ITEM|materialName|materialCode|isMaterial|quantity|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber
-            if (parts.length < 7) {
-                console.warn(`Invalid ITEM line: ${trimmedLine}`);
+            // Need 11 parts total (ITEM + 10 fields)
+            if (parts.length < 11) {
+                if (!suppressWarnings) {
+                    console.warn(`Malformed ITEM line (expected 11 parts, got ${parts.length}): ${trimmedLine}`);
+                    console.warn(`This likely indicates Gemini's response was truncated. Consider processing this invoice manually.`);
+                }
                 continue;
             }
 
             const materialName = parseField(parts[1]);
-            const quantity = parseNumber(parts[4]);
+            let quantity = parseNumber(parts[4]);
             let unitPrice = parseNumber(parts[5]);
             let totalPrice = parseNumber(parts[6]);
 
-            if (!materialName || quantity === undefined) {
-                console.warn(`Missing required ITEM fields: ${trimmedLine}`);
+            if (!materialName) {
+                if (!suppressWarnings) console.warn(`Missing required ITEM fields: ${trimmedLine}`);
                 continue;
             }
 
-            if ((unitPrice === undefined || isNaN(unitPrice)) && totalPrice !== undefined && !isNaN(totalPrice) && quantity !== 0) {
+            // Default quantity to 1 if missing (common in service items or single units)
+            if (quantity === undefined || quantity === 0) {
+                quantity = 1;
+                if (!suppressWarnings) console.warn(`Defaulting quantity to 1 for item: ${materialName}`);
+            }
+
+            if ((unitPrice === undefined || isNaN(unitPrice)) && totalPrice !== undefined && !isNaN(totalPrice) && quantity > 0) {
                 unitPrice = Number((totalPrice / quantity).toFixed(2));
             }
 
@@ -285,12 +298,13 @@ function parseTextBasedExtraction(text: string): ExtractedPdfData | null {
 
     // Validate required fields
     if (!invoiceCode || !provider || !issueDate || totalAmount === undefined || items.length === 0) {
-        console.error('Missing required fields in text extraction', {
+        console.error('Missing required fields in text extraction (possibly truncated Gemini response)', {
             hasInvoiceCode: !!invoiceCode,
             hasProvider: !!provider,
             hasIssueDate: !!issueDate,
             hasTotalAmount: totalAmount !== undefined,
-            itemCount: items.length
+            itemCount: items.length,
+            note: items.length === 0 ? 'No items extracted - likely output truncation' : undefined
         });
         return null;
     }
@@ -840,18 +854,13 @@ function isBlockedProvider(providerName: string): boolean {
 }
 
 
-async function callPdfExtractAPI(file: File, batchErrors: BatchErrorDetail[]): Promise<CallPdfExtractAPIResponse> {
-    try {
-        const validation = validateUploadFile(file);
-        if (!validation.valid) {
-            console.warn(`Validation failed for ${file.name}: ${validation.error}`);
-            return { extractedData: null, error: validation.error };
-        }
-        const buffer = Buffer.from(await file.arrayBuffer());
-        const base64 = buffer.toString('base64');
+// Helper to build the extraction prompt
+function buildExtractionPrompt(startFromItemNumber?: number): string {
+    const itemStartInstruction = startFromItemNumber
+        ? `\n\nIMPORTANT: Start extracting items from line item #${startFromItemNumber} onwards. Do NOT re-extract items before #${startFromItemNumber}. The HEADER and PROVIDER lines should be omitted - only output ITEM lines.`
+        : '';
 
-        // Build prompt for direct PDF processing with text-based output
-        const promptText = `Extract invoice data from this PDF document (consolidate all pages into a single invoice). Only extract visible data.
+    return `Extract invoice data from this PDF document (consolidate all pages into a single invoice). Only extract visible data.${itemStartInstruction}
 
 CRITICAL NUMBER ACCURACY:
 - Distinguish 5 vs S (flat top vs curved), 8 vs B (complete vs open), 0 vs O vs 6 (oval vs round vs curved)
@@ -878,13 +887,16 @@ PHONE NUMBER:
 INVOICE: Extract code, issue date (ISO format YYYY-MM-DD), total amount
 
 LINE ITEMS (extract ALL items from all pages, only actual materials/services, not labels like "Albarán"):
+CRITICAL: Process every visible line item you can find. If uncertain about any field, use reasonable defaults rather than omitting the item.
 - materialName: Use descriptive name
 - materialCode: Extract product reference code ONLY if clearly visible in a column like "Código", "Ref.", "Artículo". If not present, use ~
 - isMaterial: true for physical items, false for services/fees/taxes
-- quantity: Number of units/items ordered
+- quantity: Number of units/items ordered (default to 1.00 if not clearly visible in the PDF)
 - unitPrice: Price per unit (extract from columns labeled "Precio", "PVP", "Precio unit.", "Base", "Importe unitario", "Precio unitario", "EUROS", "€")
 - totalPrice: Total amount for this line (quantity x unitPrice, extract from columns labeled "Total", "Importe", "Subtotal", "Total línea", "Base imponible", "Importe total")
 - CRITICAL: Always extract prices as numbers with 2 decimals (e.g., 25.50, not 25,50). If you see a price, extract it - do NOT use ~ unless the column is completely missing
+- CRITICAL: For quantity, if not visible in the PDF, use 1.00 (most items are single units)
+- CRITICAL: Ensure ALL 11 fields are present for every ITEM line - never omit fields
 - itemDate: ISO format if different from invoice date, otherwise ~
 - workOrder: Simple 3-5 digit OT number (e.g., "Obra: 4077" → "OT-4077"). If not present, use ~
 - description: Brief description, otherwise ~
@@ -893,18 +905,23 @@ LINE ITEMS (extract ALL items from all pages, only actual materials/services, no
 OUTPUT FORMAT - Use pipe (|) as delimiter:
 For missing/null values, use: ~
 
-Line 1 - HEADER:
+IMPORTANT: Each line type must have EXACTLY the specified number of fields!
+
+Line 1 - HEADER (exactly 4 fields):
 HEADER|invoiceCode|issueDate|totalAmount
 
-Line 2 - PROVIDER:
+Line 2 - PROVIDER (exactly 6 fields):
 PROVIDER|name|cif|email|phone|address
 
-Lines 3+ - ITEMS (one per line):
+Lines 3+ - ITEMS (exactly 11 fields per line):
 ITEM|materialName|materialCode|isMaterial|quantity|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber
 
-STRICT RULES:
+CRITICAL FORMATTING REQUIREMENTS:
 - Output ONLY the structured lines, no explanations or comments
 - Each line must start with HEADER, PROVIDER, or ITEM
+- HEADER line: exactly 4 fields (HEADER|invoiceCode|issueDate|totalAmount)
+- PROVIDER line: exactly 6 fields (PROVIDER|name|cif|email|phone|address)
+- ITEM line: exactly 11 fields (ITEM|materialName|materialCode|isMaterial|quantity|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber)
 - Use pipe (|) to separate fields within each line - NO SPACES around pipes
 - Use tilde (~) for empty/null fields - NO SPACES around tildes
 - Numbers must use dot (.) as decimal separator, never comma (e.g., 1234.56 not 1,234.56)
@@ -913,13 +930,30 @@ STRICT RULES:
 - For prices: Extract actual numeric values from the PDF. Only use ~ if no price column exists at all in the invoice table
 - Do NOT include pipes (|) or newlines in field values
 - Do NOT add extra spaces or formatting - keep output clean and minimal
+- NEVER output incomplete lines - all fields must be present for each record type
+- FAILURE TO FOLLOW EXACT FIELD COUNTS WILL RESULT IN PROCESSING ERRORS
 
 EXAMPLE OUTPUT:
 HEADER|FAC-2024-001|2024-01-15|1250.50
 PROVIDER|ACME S.L.|A12345678|info@acme.com|+34912345678|Calle Principal 123, Madrid
 ITEM|Cemento Portland|CEM001|true|10.00|25.50|255.00|~|OT-4077|Cemento gris 50kg|1
-ITEM|Transporte|~|false|1.00|995.50|995.50|2024-01-15|~|Envío especial|2`;
+ITEM|Transporte|~|false|1.00|995.50|995.50|2024-01-15|~|Envío especial|2
 
+REMEMBER: Every ITEM line must have exactly 11 pipe-separated fields. Use defaults when uncertain.`;
+}
+
+async function callPdfExtractAPI(file: File, batchErrors: BatchErrorDetail[]): Promise<CallPdfExtractAPIResponse> {
+    try {
+        const validation = validateUploadFile(file);
+        if (!validation.valid) {
+            console.warn(`Validation failed for ${file.name}: ${validation.error}`);
+            return { extractedData: null, error: validation.error };
+        }
+        const buffer = Buffer.from(await file.arrayBuffer());
+        const base64 = buffer.toString('base64');
+
+        // Build prompt for direct PDF processing with text-based output
+        const promptText = buildExtractionPrompt();
 
         const result = await gemini.models.generateContent({
             model: GEMINI_MODEL,
@@ -934,12 +968,12 @@ ITEM|Transporte|~|false|1.00|995.50|995.50|2024-01-15|~|Envío especial|2`;
             ],
             config: {
                 temperature: 0.8,
-                maxOutputTokens: 100000000,
+                maxOutputTokens: 65536,
                 candidateCount: 1
             }
         });
 
-        const text = (
+        let text = (
             result.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text ?? "").join("") ?? ""
         );
 
@@ -954,17 +988,85 @@ ITEM|Transporte|~|false|1.00|995.50|995.50|2024-01-15|~|Envío especial|2`;
             return { extractedData: null, error: errorMessage };
         }
 
+        // Check for MAX_TOKENS truncation
+        const finishReason = result.candidates?.[0]?.finishReason as string | undefined;
+        if (finishReason === 'MAX_TOKENS') {
+            console.warn(`[${file.name}] Response truncated due to MAX_TOKENS. Attempting to extract remaining items...`);
+
+            // Parse what we have so far to identify the last successfully extracted item
+            const partialData = parseTextBasedExtraction(text);
+            if (partialData && partialData.items && partialData.items.length > 0) {
+                const lastItemNumber = partialData.items[partialData.items.length - 1].lineNumber || partialData.items.length;
+                console.log(`[${file.name}] Last extracted item: #${lastItemNumber}. Requesting remaining items...`);
+
+                try {
+                    // Make follow-up call for remaining items
+                    const followUpPrompt = buildExtractionPrompt(Number(lastItemNumber) + 1);
+                    const followUpResult = await gemini.models.generateContent({
+                        model: GEMINI_MODEL,
+                        contents: [
+                            {
+                                role: 'user',
+                                parts: [
+                                    { text: followUpPrompt },
+                                    { inlineData: { mimeType: 'application/pdf', data: base64 } }
+                                ]
+                            }
+                        ],
+                        config: {
+                            temperature: 0.8,
+                            maxOutputTokens: 65536,
+                            candidateCount: 1
+                        }
+                    });
+
+                    const followUpText = (
+                        followUpResult.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text ?? "").join("") ?? ""
+                    );
+
+                    if (followUpText && followUpText.includes('ITEM|')) {
+                        // Extract only ITEM lines from follow-up
+                        const followUpItems = followUpText.split('\n')
+                            .filter(line => line.trim().startsWith('ITEM|'))
+                            .join('\n');
+
+                        // Merge: original text (with HEADER, PROVIDER, and initial items) + follow-up items
+                        text = text + '\n' + followUpItems;
+                        console.log(`[${file.name}] Successfully merged follow-up extraction. Added ${followUpItems.split('\n').length} additional items.`);
+                    } else {
+                        console.warn(`[${file.name}] Follow-up extraction returned no items. Using partial data.`);
+                    }
+                } catch (followUpError) {
+                    console.error(`[${file.name}] Follow-up extraction failed:`, followUpError);
+                    // Continue with partial data - better than nothing
+                }
+            } else {
+                console.warn(`[${file.name}] Could not parse partial data to determine last item. Using truncated response as-is.`);
+            }
+        }
+
         try {
             const extractedData = parseTextBasedExtraction(text);
 
             if (!extractedData) {
-                console.warn(`Failed to parse text-based response for ${file.name}`);
+                // Check if response looks truncated (ends mid-line or has incomplete items)
+                const looksLikeTruncation = text.includes('ITEM|') &&
+                    (text.split('\n').some(line => {
+                        const trimmed = line.trim();
+                        return trimmed.startsWith('ITEM|') && trimmed.split('|').length < 11;
+                    }) || !text.trim().endsWith('}'));
+
+                const errorMsg = looksLikeTruncation
+                    ? 'AI response appears truncated (incomplete items). The invoice may have too many items. Try processing manually or splitting into smaller invoices.'
+                    : 'Invalid AI response format.';
+
+                console.warn(`Failed to parse text-based response for ${file.name}: ${errorMsg}`);
                 pushBatchError(batchErrors, {
-                    kind: 'PARSING_ERROR',
-                    message: 'Invalid AI response format.',
+                    kind: looksLikeTruncation ? 'EXTRACTION_ERROR' : 'PARSING_ERROR',
+                    message: errorMsg,
                     fileName: file.name,
                 });
-                return { extractedData: null, error: "Invalid AI response format." };
+                return { extractedData: null, error: errorMsg };
             }
 
             if (!extractedData.invoiceCode || !extractedData.provider?.cif || !extractedData.issueDate || typeof extractedData.totalAmount !== 'number') {
@@ -2668,74 +2770,7 @@ async function prepareBatchLine(file: File): Promise<string> {
     const base64 = buffer.toString('base64');
 
     // 2️⃣  Build prompt for direct PDF processing with text-based output
-    const promptText = `Extract invoice data from this PDF document (consolidate all pages into a single invoice). Only extract visible data.
-
-CRITICAL NUMBER ACCURACY:
-- Distinguish 5 vs S (flat top vs curved), 8 vs B (complete vs open), 0 vs O vs 6 (oval vs round vs curved)
-- Double-check all digit sequences, especially CIF/NIF numbers
-- Verify quantities and codes character by character
-
-PROVIDER (Invoice Issuer - NOT the client):
-- Find company at TOP of invoice, labeled "Vendedor/Proveedor/Emisor"
-- Extract: name, tax ID, email, phone, address
-- Constraula or Sorigué are NEVER the provider (they are the client)
-
-TAX ID (CIF/NIF/NIE) - EXTREMELY IMPORTANT:
-- CIF format: Letter + exactly 8 digits (e.g., A12345678)
-- NIF format: exactly 8 digits + Letter (e.g., 12345678A)
-- NIE format: X/Y/Z + exactly 7 digits + Letter (e.g., X1234567A)
-- Look for labels: "CIF:", "NIF:", "Cód. Fiscal:", "Tax ID:", "RFC:"
-- VERIFY digit count is correct (8 for CIF/NIF, 7 for NIE)
-
-PHONE NUMBER:
-- Spanish format: 6/7/8/9 + 8 more digits (9 total)
-- May have +34 country code
-- Look for labels: "Tel:", "Teléfono:", "Phone:"
-
-INVOICE: Extract code, issue date (ISO format YYYY-MM-DD), total amount
-
-LINE ITEMS (extract ALL items from all pages, only actual materials/services, not labels like "Albarán"):
-- materialName: Use descriptive name
-- materialCode: Extract product reference code ONLY if clearly visible in a column like "Código", "Ref.", "Artículo". If not present, use ~
-- isMaterial: true for physical items, false for services/fees/taxes
-- quantity: Number of units/items ordered
-- unitPrice: Price per unit (extract from columns labeled "Precio", "PVP", "Precio unit.", "Base", "Importe unitario", "Precio unitario", "EUROS", "€")
-- totalPrice: Total amount for this line (quantity × unitPrice, extract from columns labeled "Total", "Importe", "Subtotal", "Total línea", "Base imponible", "Importe total")
-- CRITICAL: Always extract prices as numbers with 2 decimals (e.g., 25.50, not 25,50). If you see a price, extract it - do NOT use ~ unless the column is completely missing
-- itemDate: ISO format if different from invoice date, otherwise ~
-- workOrder: Simple 3-5 digit OT number (e.g., "Obra: 4077" → "OT-4077"). If not present, use ~
-- description: Brief description, otherwise ~
-- lineNumber: Line number if visible, otherwise ~
-
-OUTPUT FORMAT - Use pipe (|) as delimiter:
-For missing/null values, use: ~
-
-Line 1 - HEADER:
-HEADER|invoiceCode|issueDate|totalAmount
-
-Line 2 - PROVIDER:
-PROVIDER|name|cif|email|phone|address
-
-Lines 3+ - ITEMS (one per line):
-ITEM|materialName|materialCode|isMaterial|quantity|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber
-
-STRICT RULES:
-- Output ONLY the structured lines, no explanations or comments
-- Each line must start with HEADER, PROVIDER, or ITEM
-- Use pipe (|) to separate fields within each line - NO SPACES around pipes
-- Use tilde (~) for empty/null fields - NO SPACES around tildes
-- Numbers must use dot (.) as decimal separator, never comma (e.g., 1234.56 not 1,234.56)
-- No thousand separators (write 1234.56 not 1,234.56)
-- Boolean isMaterial: use "true" or "false" (lowercase, no quotes)
-- For prices: Extract actual numeric values from the PDF. Only use ~ if no price column exists at all in the invoice table
-- Do NOT include pipes (|) or newlines in field values
-- Do NOT add extra spaces or formatting - keep output clean and minimal
-
-EXAMPLE OUTPUT:
-HEADER|FAC-2024-001|2024-01-15|1250.50
-PROVIDER|ACME S.L.|A12345678|info@acme.com|+34912345678|Calle Principal 123, Madrid
-ITEM|Cemento Portland|CEM001|true|10.00|25.50|255.00|~|OT-4077|Cemento gris 50kg|1
-ITEM|Transporte|~|false|1.00|995.50|995.50|2024-01-15|~|Envío especial|2`;
+    const promptText = buildExtractionPrompt();
 
     // Build Gemini JSONL request line
     const jsonlObject = {
@@ -2752,7 +2787,7 @@ ITEM|Transporte|~|false|1.00|995.50|995.50|2024-01-15|~|Envío especial|2`;
             ],
             generationConfig: {
                 temperature: 0.8,
-                maxOutputTokens: 100000000,
+                maxOutputTokens: 65536,
                 candidateCount: 1
             }
         }
@@ -3297,6 +3332,7 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
         rawLine?: string;
         extractedData?: ExtractedPdfData;
         result?: CreateInvoiceResult;
+        itemsExtracted?: number;
     }
 
     async function processOutputLines(entries: unknown[]): Promise<{ hasActualErrors: boolean; hasOnlyDuplicates: boolean; totalProcessed: number; successCount: number; failedCount: number }> {
@@ -3333,9 +3369,13 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                 }
 
                 let content: string | undefined;
+                let finishReason: string | undefined;
                 if (response) {
                     const candidates = response.candidates as Array<Record<string, unknown>> | undefined;
-                    const contentObj = candidates?.[0]?.content as Record<string, unknown> | undefined;
+                    const firstCandidate = candidates?.[0];
+                    finishReason = firstCandidate?.finishReason as string | undefined;
+
+                    const contentObj = firstCandidate?.content as Record<string, unknown> | undefined;
                     const parts = contentObj?.parts as Array<Record<string, unknown>> | undefined;
                     if (Array.isArray(parts)) {
                         content = parts
@@ -3349,7 +3389,9 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                 }
 
                 if (!content || content.length === 0) {
-                    const errorMsg = 'No content in Gemini response';
+                    const errorMsg = finishReason === 'MAX_TOKENS'
+                        ? 'Response truncated due to MAX_TOKENS and no content extracted'
+                        : 'No content in Gemini response';
                     console.error(`[ingestBatchOutput] ${errorMsg} for line ${lineIndex} (key: ${key})`);
                     errors.push({ lineIndex, error: errorMsg, context: { custom_id: key } });
                     failed++;
@@ -3357,6 +3399,32 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                     continue;
                 }
 
+                // Check for MAX_TOKENS truncation in batch responses
+                // In batch mode, we CANNOT recover (no access to original PDF)
+                // We MUST reject truncated responses to prevent incomplete data
+                if (finishReason === 'MAX_TOKENS') {
+                    console.error(`[ingestBatchOutput] ${key}: Response truncated due to MAX_TOKENS. Invoice CANNOT be processed in batch mode.`);
+
+                    // Try to parse partial data to report how many items we got before truncation
+                    let itemsBeforeTruncation = 0;
+                    try {
+                        const partialData = parseTextBasedExtraction(content, { suppressWarnings: true });
+                        itemsBeforeTruncation = partialData?.items?.length || 0;
+                    } catch { }
+
+                    const errorMsg = itemsBeforeTruncation > 0
+                        ? `Invoice truncated due to MAX_TOKENS (extracted ${itemsBeforeTruncation} items, but more exist). This invoice has too many line items for batch processing. Please upload this specific PDF manually for automatic recovery.`
+                        : `Invoice truncated due to MAX_TOKENS. Please upload this PDF manually for automatic recovery.`;
+
+                    errors.push({
+                        lineIndex,
+                        error: errorMsg,
+                        context: { custom_id: key, itemsExtracted: itemsBeforeTruncation }
+                    });
+                    failed++;
+                    actualErrors++;
+                    continue; // Skip processing this invoice entirely
+                }
 
                 const extractedData = parseTextBasedExtraction(content);
                 if (!extractedData) {
