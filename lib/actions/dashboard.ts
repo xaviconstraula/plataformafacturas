@@ -54,43 +54,42 @@ export async function getOverviewData() {
     const user = await requireAuth()
 
     try {
-        const sixMonthsAgo = new Date()
-        sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6)
+        // Compute range: last 6 complete months including current month
+        const now = new Date()
+        const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 5, 1)
 
-        const invoices = await prisma.invoice.findMany({
-            where: {
-                issueDate: {
-                    gte: sixMonthsAgo
-                },
-                provider: {
-                    userId: user.id
-                }
-            },
-            select: {
-                issueDate: true,
-                totalAmount: true
-            },
-            orderBy: {
-                issueDate: 'asc'
-            }
-        })
+        // Aggregate by month in the database for efficiency
+        // Returns rows like: { ym: '2025-05-01', total: '1234.56' }
+        const rows: Array<{ ym: Date; total: string | number }> = await prisma.$queryRaw`
+            SELECT date_trunc('month', i."issueDate") AS ym,
+                   SUM(i."totalAmount") AS total
+            FROM "Invoice" i
+            INNER JOIN "Provider" p ON p."id" = i."providerId"
+            WHERE p."userId" = ${user.id}
+              AND i."issueDate" >= ${sixMonthsAgo}
+            GROUP BY ym
+            ORDER BY ym ASC
+        `
 
-        // Group by month and calculate total
-        const monthlyData = invoices.reduce((acc, invoice) => {
-            const month = invoice.issueDate.toLocaleString('default', { month: 'long' })
-            if (!acc[month]) {
-                acc[month] = 0
-            }
-            // Sum total amount per month
-            acc[month] += invoice.totalAmount.toNumber()
-            return acc
-        }, {} as Record<string, number>)
+        // Build a map of YYYY-MM to totals
+        const totalsByMonth = new Map<string, number>()
+        for (const r of rows) {
+            const d = r.ym instanceof Date ? r.ym : new Date(String(r.ym))
+            const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+            const value = typeof r.total === 'number' ? r.total : parseFloat(r.total)
+            totalsByMonth.set(key, value || 0)
+        }
 
-        // Convert to array format expected by the chart
-        return Object.entries(monthlyData).map(([name, total]) => ({
-            name,
-            total // Remove division by 1000
-        }))
+        // Generate the last 6 months keys in chronological order and fill zeros
+        const series: { name: string; total: number }[] = []
+        for (let i = 0; i < 6; i++) {
+            const dt = new Date(sixMonthsAgo.getFullYear(), sixMonthsAgo.getMonth() + i, 1)
+            const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`
+            const monthName = new Intl.DateTimeFormat(undefined, { month: 'long' }).format(dt)
+            series.push({ name: monthName, total: totalsByMonth.get(key) ?? 0 })
+        }
+
+        return series
     } catch (error) {
         console.error('Database Error:', error)
         throw new Error('Failed to fetch overview data.')

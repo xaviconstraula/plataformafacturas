@@ -898,7 +898,7 @@ STRICT JSON OUTPUT RULES:
                 responseMimeType: 'application/json',
                 responseSchema: EXTRACTED_INVOICE_SCHEMA,
                 temperature: 0.8,
-                maxOutputTokens: 100000,
+                maxOutputTokens: 100000000,
                 candidateCount: 1
             }
         });
@@ -2722,7 +2722,7 @@ STRICT JSON OUTPUT RULES:
                 responseMimeType: 'application/json',
                 responseSchema: EXTRACTED_INVOICE_SCHEMA,
                 temperature: 0.8,
-                maxOutputTokens: 100000,
+                maxOutputTokens: 100000000,
                 candidateCount: 1
             }
         }
