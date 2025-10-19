@@ -58,26 +58,32 @@ export async function getOverviewData() {
         const now = new Date()
         const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 5, 1)
 
-        // Aggregate by month in the database for efficiency
-        // Returns rows like: { ym: '2025-05-01', total: '1234.56' }
-        const rows: Array<{ ym: Date; total: string | number }> = await prisma.$queryRaw`
-            SELECT date_trunc('month', i."issueDate") AS ym,
-                   SUM(i."totalAmount") AS total
-            FROM "Invoice" i
-            INNER JOIN "Provider" p ON p."id" = i."providerId"
-            WHERE p."userId" = ${user.id}
-              AND i."issueDate" >= ${sixMonthsAgo}
-            GROUP BY ym
-            ORDER BY ym ASC
-        `
+        // Fetch all invoices for the user within the date range using Prisma
+        const invoices = await prisma.invoice.findMany({
+            where: {
+                provider: {
+                    userId: user.id
+                },
+                createdAt: {
+                    gte: sixMonthsAgo
+                }
+            },
+            select: {
+                createdAt: true,
+                totalAmount: true
+            }
+        })
 
-        // Build a map of YYYY-MM to totals
+        // Build a map of YYYY-MM to totals by aggregating in memory
         const totalsByMonth = new Map<string, number>()
-        for (const r of rows) {
-            const d = r.ym instanceof Date ? r.ym : new Date(String(r.ym))
-            const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
-            const value = typeof r.total === 'number' ? r.total : parseFloat(r.total)
-            totalsByMonth.set(key, value || 0)
+        for (const invoice of invoices) {
+            const date = new Date(invoice.createdAt)
+            const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+            const currentTotal = totalsByMonth.get(key) ?? 0
+            const amount = typeof invoice.totalAmount === 'number'
+                ? invoice.totalAmount
+                : parseFloat(invoice.totalAmount.toString())
+            totalsByMonth.set(key, currentTotal + amount)
         }
 
         // Generate the last 6 months keys in chronological order and fill zeros
