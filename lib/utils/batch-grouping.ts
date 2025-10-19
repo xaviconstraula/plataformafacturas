@@ -16,15 +16,15 @@ export function groupBatchesByTimeWindow(
     if (!Array.isArray(batches) || batches.length === 0) return []
 
     const sorted = [...batches].sort((a, b) => {
-        const aTime = (a as any).createdAt ? new Date((a as any).createdAt).getTime() : new Date().getTime()
-        const bTime = (b as any).createdAt ? new Date((b as any).createdAt).getTime() : new Date().getTime()
+        const aTime = (a).createdAt ? new Date((a).createdAt).getTime() : new Date().getTime()
+        const bTime = (b).createdAt ? new Date((b).createdAt).getTime() : new Date().getTime()
         return bTime - aTime
     })
 
     const sessions: BatchProgressInfo[] = []
 
     for (const batch of sorted) {
-        const createdAt: Date = (batch as any).createdAt ?? new Date()
+        const createdAt: Date = (batch).createdAt ?? new Date()
 
         const existing = sessions.find(s => Math.abs(s.createdAt.getTime() - createdAt.getTime()) <= TIME_WINDOW_MS)
 
