@@ -54,7 +54,14 @@ export async function POST(request: NextRequest) {
             activeBatches: batches.filter(b => b.status === 'PENDING' || b.status === 'PROCESSING').length,
             completedBatches: batches.filter(b => b.status === 'COMPLETED').length,
             failedBatches: batches.filter(b => b.status === 'FAILED').length,
-            batchesProcessed: batches.filter(b => b.status === 'COMPLETED' && b.completedAt).length,
+            batchesIngested: batches.filter(b => b.status === 'COMPLETED' && b.completedAt).length,
+            batchDetails: batches.map(b => ({
+                id: b.id,
+                status: b.status,
+                completedAt: b.completedAt,
+                successfulFiles: b.successfulFiles,
+                failedFiles: b.failedFiles
+            })),
             timestamp: new Date().toISOString()
         }
 
@@ -104,12 +111,14 @@ async function getAllActiveBatchesForCron() {
         return []
     }
 
-    console.log(`[cron/process-batches] Found ${localBatches.length} active batches`)
+    console.log(`[cron/process-batches] Found ${localBatches.length} active batches:`,
+        localBatches.map(b => ({ id: b.id, status: b.status, totalFiles: b.totalFiles, userId: b.userId })))
 
     const reconciledBatches: typeof localBatches = []
 
     for (const batch of localBatches) {
         if (['PENDING', 'PROCESSING'].includes(batch.status)) {
+            console.log(`[cron/process-batches] Checking status for batch ${batch.id} (current status: ${batch.status})`)
             try {
                 // Retry logic for batch status check
                 let remote
@@ -141,6 +150,8 @@ async function getAllActiveBatchesForCron() {
                 }
                 const newStatus = state ? (statusMap[state] as BatchStatus) ?? batch.status : batch.status
 
+                console.log(`[cron/process-batches] Batch ${batch.id} remote status: ${state} -> ${newStatus}`)
+
                 // Counts if present
                 const rc = (remote?.request_counts ?? remote?.requestCounts ?? {})
 
@@ -161,6 +172,17 @@ async function getAllActiveBatchesForCron() {
                 // If batch completed, ingest results
                 if (newStatus === 'COMPLETED' && !batch.completedAt && remote?.dest) {
                     console.log(`[cron/process-batches] Batch ${batch.id} completed, ingesting results...`)
+
+                    // Set completedAt BEFORE ingesting to prevent duplicate processing from concurrent runs
+                    const now = new Date();
+                    await prisma.batchProcessing.update({
+                        where: { id: batch.id },
+                        data: {
+                            completedAt: now,
+                        }
+                    });
+
+                    // Now safely ingest results - concurrent runs will skip this batch due to completedAt being set
                     try {
                         // Import the ingest function dynamically to avoid circular imports
                         const { ingestBatchOutputFromGemini } = await import("@/lib/actions/invoices")
@@ -169,14 +191,17 @@ async function getAllActiveBatchesForCron() {
                     } catch (ingestError) {
                         console.error(`[cron/process-batches] Failed to ingest results for batch ${batch.id}:`, ingestError)
 
-                        // Save error to batch record
+                        // Mark batch as failed if ingestion fails
                         const errorMessage = ingestError instanceof Error ? ingestError.message : 'Unknown error during ingestion'
                         await prisma.batchProcessing.update({
                             where: { id: batch.id },
                             data: {
-                                errors: [`Batch ingestion error: ${errorMessage}`] as unknown as Prisma.InputJsonValue,
+                                errors: [{
+                                    kind: 'DATABASE_ERROR',
+                                    message: errorMessage,
+                                    timestamp: new Date().toISOString(),
+                                }] as unknown as Prisma.InputJsonValue,
                                 status: 'FAILED',
-                                completedAt: new Date(),
                             }
                         })
                     }
