@@ -59,18 +59,19 @@ model Provider {
 // Modelo para Facturas
 
 model Invoice {
-  id          String        @id @default(cuid())
-  invoiceCode String // Código de factura (único por proveedor)
-  providerId  String
-  provider    Provider      @relation(fields: [providerId], references: [id], onDelete: Cascade)
-  issueDate   DateTime
-  totalAmount Decimal       @db.Decimal(10, 2)
-  pdfUrl      String? // URL al archivo PDF almacenado
-  status      String        @default("PENDING") // PENDING, PROCESSED, APPROVED, etc.
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
-  items       InvoiceItem[]
-  alerts      PriceAlert[]
+  id               String        @id @default(cuid())
+  invoiceCode      String // Código de factura (único por proveedor)
+  providerId       String
+  provider         Provider      @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  issueDate        DateTime
+  totalAmount      Decimal       @db.Decimal(10, 2)
+  pdfUrl           String? // URL al archivo PDF almacenado
+  originalFileName String? // Nombre del archivo original que creó esta factura
+  status           String        @default("PENDING") // PENDING, PROCESSED, APPROVED, etc.
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  items            InvoiceItem[]
+  alerts           PriceAlert[]
 
   // Código único por proveedor
   // Composite indexes for supplier analytics performance

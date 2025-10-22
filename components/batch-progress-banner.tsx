@@ -60,6 +60,12 @@ export function BatchProgressBanner() {
     // Fetch batch from database if not in current list
     useEffect(() => {
         if (selectedBatchIdForErrors && !batches.find(b => b.id === selectedBatchIdForErrors)) {
+            // Don't try to fetch session IDs (aggregated batches) from DB
+            if (selectedBatchIdForErrors.startsWith('session-')) {
+                console.log('[BatchProgressBanner] Skipping DB fetch for session ID:', selectedBatchIdForErrors)
+                return
+            }
+
             console.log('[BatchProgressBanner] Batch not in current list, fetching from DB:', selectedBatchIdForErrors)
             getBatchById(selectedBatchIdForErrors).then(batch => {
                 if (batch) {

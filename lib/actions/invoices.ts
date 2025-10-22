@@ -296,24 +296,35 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
         }
     }
 
-    // Validate required fields
-    if (!invoiceCode || !provider || !issueDate || totalAmount === undefined || items.length === 0) {
-        console.error('Missing required fields in text extraction (possibly truncated Gemini response)', {
-            hasInvoiceCode: !!invoiceCode,
-            hasProvider: !!provider,
-            hasIssueDate: !!issueDate,
-            hasTotalAmount: totalAmount !== undefined,
-            itemCount: items.length,
-            note: items.length === 0 ? 'No items extracted - likely output truncation' : undefined
-        });
+    // Validate required fields - be more descriptive about what's missing
+    const validationErrors: string[] = [];
+    if (!invoiceCode) validationErrors.push('invoiceCode missing');
+    if (!provider) validationErrors.push('PROVIDER line missing');
+    if (!issueDate) validationErrors.push('issueDate missing');
+    if (totalAmount === undefined) validationErrors.push('totalAmount missing');
+    if (items.length === 0) validationErrors.push('No ITEM lines found');
+
+    if (validationErrors.length > 0) {
+        if (!suppressWarnings) {
+            console.error('Missing required fields in text extraction (possibly truncated Gemini response)', {
+                hasInvoiceCode: !!invoiceCode,
+                hasProvider: !!provider,
+                hasIssueDate: !!issueDate,
+                hasTotalAmount: totalAmount !== undefined,
+                itemCount: items.length,
+                errors: validationErrors,
+                note: items.length === 0 ? 'No items extracted - likely output truncation' : undefined
+            });
+        }
         return null;
     }
 
+    // At this point, all required fields are validated
     return {
-        invoiceCode,
-        provider,
-        issueDate,
-        totalAmount,
+        invoiceCode: invoiceCode!,
+        provider: provider!,
+        issueDate: issueDate!,
+        totalAmount: totalAmount!,
         items
     };
 }
@@ -487,23 +498,10 @@ export async function getActiveBatches(): Promise<BatchProgressInfo[]> {
     for (const batch of localBatches) {
         if (['PENDING', 'PROCESSING'].includes(batch.status)) {
             try {
-                // Retry logic for batch status check
-                let remote;
-                let attempts = 0;
-                while (attempts < 3) {
-                    try {
-                        remote = await gemini.batches.get({ name: batch.id }) as GeminiBatchStatus;
-                        break;
-                    } catch (error: unknown) {
-                        attempts++;
-                        if (attempts >= 3) throw error;
-                        if (isRateLimitError(error)) {
-                            await new Promise(resolve => setTimeout(resolve, 3000));
-                        } else {
-                            throw error;
-                        }
-                    }
-                }
+                // Retry logic for batch status check with timeout handling
+                const remote = await retryGeminiOperation(async () => {
+                    return await gemini.batches.get({ name: batch.id }) as GeminiBatchStatus;
+                }, 3, 2000); // 3 retries with 2 second initial delay
 
                 // Map Gemini state → local BatchStatus
                 const state = remote?.state as string | undefined;
@@ -541,24 +539,40 @@ export async function getActiveBatches(): Promise<BatchProgressInfo[]> {
                     try {
                         await ingestBatchOutputFromGemini(batch.id, remote.dest);
                     } catch (ingestError) {
-                        console.error(`[getActiveBatches] Failed to ingest batch results for ${batch.id}:`, ingestError);
-                        // Mark batch as failed if ingestion fails
-                        await updateBatchProgress(batch.id, {
-                            status: 'FAILED',
-                            errors: [
-                                {
-                                    kind: 'DATABASE_ERROR',
-                                    message: ingestError instanceof Error ? ingestError.message : 'Failed to ingest batch results',
-                                    timestamp: new Date().toISOString(),
-                                },
-                            ],
-                        });
+                        const errorMessage = ingestError instanceof Error ? ingestError.message : 'Failed to ingest batch results';
+
+                        if (isGeminiTimeoutError(ingestError)) {
+                            console.warn(`[getActiveBatches] Timeout ingesting batch results for ${batch.id}, marking for retry`);
+                            // Reset completedAt so it can be retried on next poll - use direct Prisma update
+                            await prisma.batchProcessing.update({
+                                where: { id: batch.id },
+                                data: { completedAt: null, updatedAt: new Date() },
+                            });
+                        } else {
+                            console.error(`[getActiveBatches] Failed to ingest batch results for ${batch.id}:`, ingestError);
+                            // Mark batch as failed for non-timeout errors
+                            await updateBatchProgress(batch.id, {
+                                status: 'FAILED',
+                                errors: [
+                                    {
+                                        kind: 'DATABASE_ERROR',
+                                        message: errorMessage,
+                                        timestamp: new Date().toISOString(),
+                                    },
+                                ],
+                            });
+                        }
                     }
                 }
 
                 continue;
             } catch (err) {
-                console.error('[getActiveBatches] Failed to retrieve Gemini batch', batch.id, err);
+                // Log error but don't fail the entire operation
+                if (isGeminiTimeoutError(err)) {
+                    console.warn(`[getActiveBatches] Timeout retrieving Gemini batch ${batch.id}, will retry on next poll`);
+                } else {
+                    console.error('[getActiveBatches] Failed to retrieve Gemini batch', batch.id, err);
+                }
             }
         }
 
@@ -863,76 +877,71 @@ function buildExtractionPrompt(startFromItemNumber?: number): string {
 
     return `Extract invoice data from this PDF document (consolidate all pages into a single invoice). Only extract visible data.${itemStartInstruction}
 
-CRITICAL NUMBER ACCURACY:
-- Distinguish 5 vs S (flat top vs curved), 8 vs B (complete vs open), 0 vs O vs 6 (oval vs round vs curved)
-- Double-check all digit sequences, especially CIF/NIF numbers
-- Verify quantities and codes character by character
+CRITICAL REQUIREMENTS - READ CAREFULLY:
+- ALWAYS extract the PROVIDER information first - this is MANDATORY
+- PROVIDER is the invoice issuer (company at top), NOT the client/customer
+- If you cannot find provider info, use reasonable defaults but NEVER omit the PROVIDER line
+- Process ALL line items you can find, even if uncertain about some fields
 
-PROVIDER (Invoice Issuer - NOT the client):
-- Find company at TOP of invoice, labeled "Vendedor/Proveedor/Emisor"
-- Extract: name, tax ID, email, phone, address
-- Constraula or Sorigué are NEVER the provider (they are the client)
+PROVIDER (MANDATORY - Invoice Issuer):
+- Company name at TOP of invoice, labeled "Vendedor/Proveedor/Emisor/Emitido por"
+- NEVER use client/customer names like "Constraula" or "Sorigué" as provider
+- Extract: name, tax ID (CIF/NIF/NIE), email, phone, address
+- If any field is missing, use ~ but ALWAYS include the PROVIDER line
 
-TAX ID (CIF/NIF/NIE) - EXTREMELY IMPORTANT:
-- CIF format: Letter + exactly 8 digits (e.g., A12345678)
-- NIF format: exactly 8 digits + Letter (e.g., 12345678A)
-- NIE format: X/Y/Z + exactly 7 digits + Letter (e.g., X1234567A)
-- Look for labels: "CIF:", "NIF:", "Cód. Fiscal:", "Tax ID:", "RFC:"
-- VERIFY digit count is correct (8 for CIF/NIF, 7 for NIE)
+TAX ID (CIF/NIF/NIE) - CRITICAL for provider identification:
+- CIF: Letter + 8 digits (A12345678)
+- NIF: 8 digits + Letter (12345678A)  
+- NIE: X/Y/Z + 7 digits + Letter (X1234567A)
+- Look for: "CIF:", "NIF:", "Cód. Fiscal:", "Tax ID:", "RFC:"
+- VERIFY digit count matches format exactly
 
 PHONE NUMBER:
-- Spanish format: 6/7/8/9 + 8 more digits (9 total)
-- May have +34 country code
-- Look for labels: "Tel:", "Teléfono:", "Phone:"
+- Spanish format: 6/7/8/9 + 8 digits total (9 digits)
+- May have +34 prefix
+- Look for: "Tel:", "Teléfono:", "Phone:", "Tlf:"
 
-INVOICE: Extract code, issue date (ISO format YYYY-MM-DD), total amount
+INVOICE HEADER:
+- Invoice code/number (from top of document)
+- Issue date in YYYY-MM-DD format
+- Total amount (sum of all line items)
 
-LINE ITEMS (extract ALL items from all pages, only actual materials/services, not labels like "Albarán"):
-CRITICAL: Process every visible line item you can find. If uncertain about any field, use reasonable defaults rather than omitting the item.
-- materialName: Use descriptive name
-- materialCode: Extract product reference code ONLY if clearly visible in a column like "Código", "Ref.", "Artículo". If not present, use ~
-- isMaterial: true for physical items, false for services/fees/taxes
-- quantity: Number of units/items ordered (default to 1.00 if not clearly visible in the PDF)
-- unitPrice: Price per unit (extract from columns labeled "Precio", "PVP", "Precio unit.", "Base", "Importe unitario", "Precio unitario", "EUROS", "€")
-- totalPrice: Total amount for this line (quantity x unitPrice, extract from columns labeled "Total", "Importe", "Subtotal", "Total línea", "Base imponible", "Importe total")
-- CRITICAL: Always extract prices as numbers with 2 decimals (e.g., 25.50, not 25,50). If you see a price, extract it - do NOT use ~ unless the column is completely missing
-- CRITICAL: For quantity, if not visible in the PDF, use 1.00 (most items are single units)
-- CRITICAL: Ensure ALL 11 fields are present for every ITEM line - never omit fields
-- itemDate: ISO format if different from invoice date, otherwise ~
-- workOrder: Simple 3-5 digit OT number (e.g., "Obra: 4077" → "OT-4077"). If not present, use ~
-- description: Brief description, otherwise ~
-- lineNumber: Line number if visible, otherwise ~
+LINE ITEMS (extract ALL visible items):
+- materialName: Descriptive product/service name
+- materialCode: Reference code from "Código/Ref/Artículo" column, use ~ if missing
+- isMaterial: true for physical goods, false for services/fees
+- quantity: Units ordered (default 1.00 if not visible)
+- unitPrice: Price per unit from "Precio/PVP/€" columns
+- totalPrice: Line total from "Total/Importe/Subtotal" columns
+- itemDate: YYYY-MM-DD if different from invoice date, otherwise ~
+- workOrder: "OT-xxxx" format from "Obra:" references, otherwise ~
+- description: Brief notes, otherwise ~
+- lineNumber: Visible line number, otherwise ~
 
-OUTPUT FORMAT - Use pipe (|) as delimiter:
-For missing/null values, use: ~
+CRITICAL NUMBER ACCURACY:
+- Distinguish: 5 vs S, 8 vs B, 0 vs O vs 6
+- Double-check CIF/NIF digit sequences
+- Prices: use dot as decimal (1234.56 not 1,234.56)
+- Always extract prices as numbers with 2 decimals
 
-IMPORTANT: Each line type must have EXACTLY the specified number of fields!
+OUTPUT FORMAT - STRICT REQUIREMENTS:
+Use pipe (|) as delimiter, tilde (~) for missing values.
 
-Line 1 - HEADER (exactly 4 fields):
-HEADER|invoiceCode|issueDate|totalAmount
+MANDATORY STRUCTURE (NEVER omit any line type):
+Line 1 - HEADER (exactly 4 fields): HEADER|invoiceCode|issueDate|totalAmount
+Line 2 - PROVIDER (exactly 6 fields): PROVIDER|name|cif|email|phone|address  
+Lines 3+ - ITEMS (exactly 11 fields each): ITEM|materialName|materialCode|isMaterial|quantity|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber
 
-Line 2 - PROVIDER (exactly 6 fields):
-PROVIDER|name|cif|email|phone|address
-
-Lines 3+ - ITEMS (exactly 11 fields per line):
-ITEM|materialName|materialCode|isMaterial|quantity|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber
-
-CRITICAL FORMATTING REQUIREMENTS:
-- Output ONLY the structured lines, no explanations or comments
-- Each line must start with HEADER, PROVIDER, or ITEM
-- HEADER line: exactly 4 fields (HEADER|invoiceCode|issueDate|totalAmount)
-- PROVIDER line: exactly 6 fields (PROVIDER|name|cif|email|phone|address)
-- ITEM line: exactly 11 fields (ITEM|materialName|materialCode|isMaterial|quantity|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber)
-- Use pipe (|) to separate fields within each line - NO SPACES around pipes
-- Use tilde (~) for empty/null fields - NO SPACES around tildes
-- Numbers must use dot (.) as decimal separator, never comma (e.g., 1234.56 not 1,234.56)
-- No thousand separators (write 1234.56 not 1,234.56)
-- Boolean isMaterial: use "true" or "false" (lowercase, no quotes)
-- For prices: Extract actual numeric values from the PDF. Only use ~ if no price column exists at all in the invoice table
-- Do NOT include pipes (|) or newlines in field values
-- Do NOT add extra spaces or formatting - keep output clean and minimal
-- NEVER output incomplete lines - all fields must be present for each record type
-- FAILURE TO FOLLOW EXACT FIELD COUNTS WILL RESULT IN PROCESSING ERRORS
+FORMATTING RULES:
+- Output ONLY the structured lines, no explanations
+- Each line starts with HEADER, PROVIDER, or ITEM
+- EXACTLY the specified field counts (4 for HEADER, 6 for PROVIDER, 11 for ITEM)
+- Use | between fields (no spaces around pipes)
+- Use ~ for missing fields (no spaces around tildes)
+- No thousand separators, no commas as decimals
+- Boolean isMaterial: "true" or "false" (lowercase, no quotes)
+- NEVER include | or newlines within field values
+- NEVER output incomplete lines - all fields required
 
 EXAMPLE OUTPUT:
 HEADER|FAC-2024-001|2024-01-15|1250.50
@@ -940,7 +949,7 @@ PROVIDER|ACME S.L.|A12345678|info@acme.com|+34912345678|Calle Principal 123, Mad
 ITEM|Cemento Portland|CEM001|true|10.00|25.50|255.00|~|OT-4077|Cemento gris 50kg|1
 ITEM|Transporte|~|false|1.00|995.50|995.50|2024-01-15|~|Envío especial|2
 
-REMEMBER: Every ITEM line must have exactly 11 pipe-separated fields. Use defaults when uncertain.`;
+REMEMBER: PROVIDER line is MANDATORY - always include it even with partial data.`;
 }
 
 async function callPdfExtractAPI(file: File, batchErrors: BatchErrorDetail[]): Promise<CallPdfExtractAPIResponse> {
@@ -969,8 +978,10 @@ async function callPdfExtractAPI(file: File, batchErrors: BatchErrorDetail[]): P
             ],
             config: {
                 temperature: 0.8,
-                maxOutputTokens: 65536,
-                candidateCount: 1
+                candidateCount: 1,
+                thinkingConfig: {
+                    thinkingBudget: 0
+                },
             }
         });
 
@@ -1016,8 +1027,10 @@ async function callPdfExtractAPI(file: File, batchErrors: BatchErrorDetail[]): P
                         ],
                         config: {
                             temperature: 0.8,
-                            maxOutputTokens: 65536,
-                            candidateCount: 1
+                            candidateCount: 1,
+                            thinkingConfig: {
+                                thinkingBudget: 0
+                            },
                         }
                     });
 
@@ -1286,68 +1299,42 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
             // Another transaction might have created a provider with this CIF or a similar one
             // Do a comprehensive search to find the existing provider
 
-            // 1. Try exact CIF match first (scoped by user if userId provided)
-            const cifFilter = userId ? { cif, userId } : { cif };
-            let existingProvider = await tx.provider.findFirst({
-                where: cifFilter,
-            });
-
-            if (existingProvider) {
-                return existingProvider;
-            }
-
-            // 2. If not found by CIF, search by name (scoped by user if userId provided)
-            const nameFilter = userId ? {
-                userId,
-                name: {
-                    equals: name,
-                    mode: 'insensitive' as const
-                }
-            } : {
-                name: {
-                    equals: name,
-                    mode: 'insensitive' as const
-                }
-            };
-
-            existingProvider = await tx.provider.findFirst({
-                where: nameFilter,
-            });
-
-            if (existingProvider) {
-                // Update the existing provider with the new CIF if needed
-                const updatedProvider = await tx.provider.update({
-                    where: { id: existingProvider.id },
-                    data: {
-                        cif, // Update with the CIF from current transaction
-                        email: email || existingProvider.email,
-                        phone: phone || existingProvider.phone,
-                        address: address || existingProvider.address,
-                        type: providerType,
-                    }
-                });
-                return updatedProvider;
-            }
-
-            // 3. Search by phone if available (scoped by user if userId provided)
-            if (phone) {
-                const phoneFilter = userId ? {
-                    userId,
-                    phone: phone
-                } : {
-                    phone: phone
-                };
-
-                existingProvider = await tx.provider.findFirst({
-                    where: phoneFilter,
+            // Important: Use a try-catch for each query to prevent transaction abortion cascade
+            try {
+                // 1. Try exact CIF match first (scoped by user if userId provided)
+                const cifFilter = userId ? { cif, userId } : { cif };
+                let existingProvider = await tx.provider.findFirst({
+                    where: cifFilter,
                 });
 
                 if (existingProvider) {
+                    return existingProvider;
+                }
+
+                // 2. If not found by CIF, search by name (scoped by user if userId provided)
+                const nameFilter = userId ? {
+                    userId,
+                    name: {
+                        equals: name,
+                        mode: 'insensitive' as const
+                    }
+                } : {
+                    name: {
+                        equals: name,
+                        mode: 'insensitive' as const
+                    }
+                };
+
+                existingProvider = await tx.provider.findFirst({
+                    where: nameFilter,
+                });
+
+                if (existingProvider) {
+                    // Update the existing provider with the new CIF if needed
                     const updatedProvider = await tx.provider.update({
                         where: { id: existingProvider.id },
                         data: {
-                            cif,
-                            name,
+                            cif, // Update with the CIF from current transaction
                             email: email || existingProvider.email,
                             phone: phone || existingProvider.phone,
                             address: address || existingProvider.address,
@@ -1356,32 +1343,64 @@ async function findOrCreateProviderTx(tx: Prisma.TransactionClient, providerData
                     });
                     return updatedProvider;
                 }
-            }
 
-            // 4. Search by similar name as last resort (scoped by user if provided)
-            const allProviders = await tx.provider.findMany({
-                where: userId ? { userId } : undefined
-            });
-            for (const candidate of allProviders) {
-                if (areProviderNamesSimilar(name, candidate.name)) {
-                    const updatedProvider = await tx.provider.update({
-                        where: { id: candidate.id },
-                        data: {
-                            cif,
-                            name,
-                            email: email || candidate.email,
-                            phone: phone || candidate.phone,
-                            address: address || candidate.address,
-                            type: providerType,
-                        }
+                // 3. Search by phone if available (scoped by user if userId provided)
+                if (phone) {
+                    const phoneFilter = userId ? {
+                        userId,
+                        phone: phone
+                    } : {
+                        phone: phone
+                    };
+
+                    existingProvider = await tx.provider.findFirst({
+                        where: phoneFilter,
                     });
-                    return updatedProvider;
+
+                    if (existingProvider) {
+                        const updatedProvider = await tx.provider.update({
+                            where: { id: existingProvider.id },
+                            data: {
+                                cif,
+                                name,
+                                email: email || existingProvider.email,
+                                phone: phone || existingProvider.phone,
+                                address: address || existingProvider.address,
+                                type: providerType,
+                            }
+                        });
+                        return updatedProvider;
+                    }
                 }
+
+                // 4. Search by similar name as last resort (scoped by user if provided)
+                const allProviders = await tx.provider.findMany({
+                    where: userId ? { userId } : undefined
+                });
+                for (const candidate of allProviders) {
+                    if (areProviderNamesSimilar(name, candidate.name)) {
+                        const updatedProvider = await tx.provider.update({
+                            where: { id: candidate.id },
+                            data: {
+                                cif,
+                                name,
+                                email: email || candidate.email,
+                                phone: phone || candidate.phone,
+                                address: address || candidate.address,
+                                type: providerType,
+                            }
+                        });
+                        return updatedProvider;
+                    }
+                }
+            } catch (recoveryError) {
+                // If recovery queries fail (e.g., transaction is aborted), log and re-throw original error
+                console.error('[findOrCreateProviderTx] Failed to recover from P2002 error:', recoveryError);
+                throw error; // Re-throw original P2002 error
             }
 
-            // If we still haven't found anything, the race condition might have resolved
-            // Try one more time to create the provider
-            throw error; // Re-throw to let the caller handle it
+            // If we still haven't found anything after all recovery attempts, re-throw
+            throw error;
         }
 
         // Re-throw other errors
@@ -2111,37 +2130,48 @@ export async function createInvoiceFromFiles(
                         let provider;
                         const cachedProviderId = extractedData.provider.cif ? providerCache.get(extractedData.provider.cif) : undefined;
 
-                        if (cachedProviderId) {
-                            provider = await tx.provider.findUnique({
-                                where: { id: cachedProviderId }
-                            });
+                        try {
+                            if (cachedProviderId) {
+                                provider = await tx.provider.findUnique({
+                                    where: { id: cachedProviderId }
+                                });
 
-                            // Either the provider disappeared (unlikely) or it belongs to
-                            // another user. Fallback to a scoped lookup.
-                            if (!provider || provider.userId !== user.id) {
+                                // Either the provider disappeared (unlikely) or it belongs to
+                                // another user. Fallback to a scoped lookup.
+                                if (!provider || provider.userId !== user.id) {
+                                    provider = await findOrCreateProviderTx(tx, extractedData.provider, user.id);
+                                }
+                            } else {
                                 provider = await findOrCreateProviderTx(tx, extractedData.provider, user.id);
                             }
-                        } else {
-                            provider = await findOrCreateProviderTx(tx, extractedData.provider, user.id);
+                        } catch (providerError) {
+                            // If provider lookup/creation fails, throw immediately to prevent transaction abortion
+                            const errorMsg = providerError instanceof Error ? providerError.message : 'Failed to process provider';
+                            console.error(`[batch processing] Provider error for invoice ${extractedData.invoiceCode}:`, errorMsg);
+                            throw providerError; // Re-throw to trigger clean transaction rollback
                         }
 
                         const existingInvoice = await tx.invoice.findFirst({
                             where: {
                                 invoiceCode: extractedData.invoiceCode,
                                 providerId: provider.id
-                            }
+                            },
+                            select: { id: true, originalFileName: true }
                         });
 
                         if (existingInvoice) {
+                            const originalFile = existingInvoice.originalFileName ?? 'Archivo desconocido';
+                            const currentFile = fileName;
+                            const duplicateMessage = `Factura Duplicada - ${extractedData.invoiceCode} - Archivo original: ${originalFile}, Archivo duplicado: ${currentFile}`;
                             pushBatchError(batchErrors, {
                                 kind: 'DUPLICATE_INVOICE',
-                                message: `Factura Duplicada - ${extractedData.invoiceCode} - ${fileName}`,
+                                message: duplicateMessage,
                                 fileName,
                                 invoiceCode: extractedData.invoiceCode,
                             });
                             return {
                                 success: true,
-                                message: `Factura Duplicada - ${extractedData.invoiceCode} - ${fileName}`,
+                                message: duplicateMessage,
                                 invoiceId: existingInvoice.id,
                                 alertsCreated: 0,
                                 isExisting: true,
@@ -2155,6 +2185,7 @@ export async function createInvoiceFromFiles(
                                 providerId: provider.id,
                                 issueDate: new Date(extractedData.issueDate),
                                 totalAmount: new Prisma.Decimal(extractedData.totalAmount.toFixed(2)),
+                                originalFileName: fileName,
                                 status: "PROCESSED",
                             },
                         });
@@ -2789,8 +2820,10 @@ async function prepareBatchLine(file: File): Promise<string> {
             ],
             generationConfig: {
                 temperature: 0.8,
-                maxOutputTokens: 65536,
-                candidateCount: 1
+                candidateCount: 1,
+                thinkingConfig: {
+                    thinkingBudget: 0
+                }
             }
         }
     };
@@ -2891,18 +2924,43 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
 
     try {
         const result = await prisma.$transaction(async (tx) => {
-            // ✅ Provider
-            const provider = await findOrCreateProviderTx(tx, extractedData.provider, user.id);
+            // ✅ Provider - wrap in try-catch to prevent transaction abortion
+            let provider: Provider;
+            try {
+                provider = await findOrCreateProviderTx(tx, extractedData.provider, user.id);
+            } catch (providerError) {
+                // If provider creation/lookup fails, throw immediately to rollback transaction cleanly
+                const errorMsg = providerError instanceof Error ? providerError.message : 'Failed to process provider';
+                console.error(`[saveExtractedInvoice] Provider error for invoice ${extractedData.invoiceCode} (file: ${fileName ?? "unknown"}):`, errorMsg);
+                throw providerError; // Re-throw to trigger transaction rollback
+            }
 
-            // ❌  Duplicate check
+            // ❌  Duplicate check - Only flag as duplicate if the SAME file was uploaded before
+            // Skip duplicate check if this is the first time we're seeing this specific file
             const existingInvoice = await tx.invoice.findFirst({
                 where: { invoiceCode: extractedData.invoiceCode, providerId: provider.id },
+                select: { id: true, originalFileName: true }
             });
             if (existingInvoice) {
-                console.warn(`[saveExtractedInvoice] Invoice ${extractedData.invoiceCode} already exists for provider ${provider.name} (file: ${fileName ?? "unknown"})`);
+                const originalFile = existingInvoice.originalFileName ?? 'Archivo desconocido';
+                const currentFile = fileName ?? 'Archivo desconocido';
+
+                // Only consider it a duplicate if it's actually a different file
+                // If the filenames match exactly, this is likely a race condition from concurrent batch processing
+                if (originalFile === currentFile) {
+                    console.warn(`[saveExtractedInvoice] Race condition detected: Invoice ${extractedData.invoiceCode} was already created by a concurrent batch job with the same file ${currentFile}. Skipping without error.`);
+                    return {
+                        success: true, // Return success to avoid error reporting
+                        message: `Invoice ${extractedData.invoiceCode} already processed (concurrent batch)`,
+                        invoiceId: existingInvoice.id,
+                        isDuplicate: false, // Not a user-facing duplicate, just a race condition
+                    };
+                }
+
+                console.warn(`[saveExtractedInvoice] Invoice ${extractedData.invoiceCode} already exists for provider ${provider.name} (original file: ${originalFile}, duplicate file: ${currentFile})`);
                 return {
                     success: false,
-                    message: `Factura Duplicada - ${extractedData.invoiceCode} - ${fileName ?? 'Archivo desconocido'}`,
+                    message: `Factura Duplicada - ${extractedData.invoiceCode} - Archivo original: ${originalFile}, Archivo duplicado: ${currentFile}`,
                     invoiceId: existingInvoice.id,
                     isDuplicate: true,
                 };
@@ -2915,6 +2973,7 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
                     providerId: provider.id,
                     issueDate: new Date(extractedData.issueDate),
                     totalAmount: new Prisma.Decimal(extractedData.totalAmount.toFixed(2)),
+                    originalFileName: fileName,
                     status: "PROCESSED",
                 },
             });
@@ -2980,6 +3039,55 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
         return result;
     } catch (err) {
         const error = err as Error;
+
+        // Handle unique constraint violations (P2002) - likely from concurrent batch processing
+        if (typeof err === 'object' && err !== null && 'code' in err && (err as { code: string }).code === 'P2002') {
+
+
+            // Fetch the existing invoice to return its ID
+            try {
+                const user = await requireAuth();
+                const provider = await prisma.provider.findFirst({
+                    where: {
+                        OR: [
+                            { cif: extractedData.provider.cif ?? '' },
+                            { name: extractedData.provider.name }
+                        ],
+                        userId: user.id,
+                    },
+                    select: { id: true, name: true }
+                });
+
+                if (provider) {
+                    const existingInvoice = await prisma.invoice.findFirst({
+                        where: {
+                            invoiceCode: extractedData.invoiceCode,
+                            providerId: provider.id
+                        },
+                        select: { id: true }
+                    });
+
+                    if (existingInvoice) {
+                        return {
+                            success: true, // Treat as success since invoice exists
+                            message: `Invoice ${extractedData.invoiceCode} already processed (concurrent batch)`,
+                            invoiceId: existingInvoice.id,
+                            isDuplicate: false, // Not a user-facing duplicate
+                        };
+                    }
+                }
+            } catch (lookupError) {
+                console.error(`[saveExtractedInvoice] Failed to lookup existing invoice after P2002:`, lookupError);
+            }
+
+            // If we can't find the invoice, return error but don't fail loudly
+            return {
+                success: true, // Still return success to avoid error banner
+                message: `Invoice ${extractedData.invoiceCode} already processed by another batch`,
+                isDuplicate: false,
+            };
+        }
+
         console.error(`[saveExtractedInvoice] Failed to persist invoice from batch output (file: ${fileName ?? "unknown"})`, {
             error: error.message,
             stack: error.stack,
@@ -3186,6 +3294,51 @@ async function processBatchInBackground(files: File[], userId: string) {
 interface GeminiInlineResponse { key?: string; response?: { text?: string }; error?: unknown }
 type GeminiDest = { file_name?: string; fileName?: string; inlined_responses?: Array<GeminiInlineResponse>; inlinedResponses?: Array<GeminiInlineResponse> } | undefined | null;
 
+// Helper to detect Gemini timeout errors
+function isGeminiTimeoutError(error: unknown): boolean {
+    if (!error || typeof error !== 'object') return false;
+    const e = error as { code?: number; message?: string };
+    // Check for timeout error code or timeout message
+    if (e.code === 4) return true;
+    if (typeof e.message === 'string') {
+        const msg = e.message.toLowerCase();
+        return msg.includes('timeout') || msg.includes('timed out');
+    }
+    return false;
+}
+
+// Helper to retry Gemini API calls with exponential backoff
+async function retryGeminiOperation<T>(
+    operation: () => Promise<T>,
+    maxRetries: number = 3,
+    initialDelayMs: number = 2000
+): Promise<T> {
+    let lastError: unknown = null;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            return await operation();
+        } catch (error) {
+            lastError = error;
+
+            // Only retry on timeout errors
+            if (!isGeminiTimeoutError(error)) {
+                throw error;
+            }
+
+            if (attempt < maxRetries) {
+                const delayMs = initialDelayMs * Math.pow(2, attempt - 1);
+                console.log(`[retryGeminiOperation] Timeout on attempt ${attempt}/${maxRetries}, retrying in ${delayMs}ms...`);
+                await new Promise(resolve => setTimeout(resolve, delayMs));
+            } else {
+                console.error(`[retryGeminiOperation] All ${maxRetries} attempts failed with timeout`);
+            }
+        }
+    }
+
+    throw lastError;
+}
+
 export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiDest) {
     // Supports file-based dest or inlined_responses
     if (dest && (dest.file_name || dest.fileName)) {
@@ -3213,7 +3366,12 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
         let downloadedPath: string;
         try {
             downloadedPath = path.join(tmpDir, path.basename(fileName));
-            await gemini.files.download({ file: fileName as unknown as string, downloadPath: downloadedPath });
+
+            // Wrap download operation with retry logic for timeout resilience
+            await retryGeminiOperation(async () => {
+                console.log(`[ingestBatchOutput] Attempting to download batch results file: ${fileName}`);
+                await gemini.files.download({ file: fileName as unknown as string, downloadPath: downloadedPath });
+            }, 3, 3000); // 3 retries with 3 second initial delay
 
             // Wait for the file to be fully downloaded with retry logic
             const maxWaitTime = 60000; // 60 seconds max wait
@@ -3406,7 +3564,7 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                 // In batch mode, we CANNOT recover (no access to original PDF)
                 // We MUST reject truncated responses to prevent incomplete data
                 if (finishReason === 'MAX_TOKENS') {
-                    console.error(`[ingestBatchOutput] ${key}: Response truncated due to MAX_TOKENS. Invoice CANNOT be processed in batch mode.`);
+                    console.error(`[ingestBatchOutput] ${key}: MAX_TOKENS. Invoice CANNOT be processed in batch mode.`);
 
                     // Try to parse partial data to report how many items we got before truncation
                     let itemsBeforeTruncation = 0;
@@ -3416,7 +3574,7 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                     } catch { }
 
                     const errorMsg = itemsBeforeTruncation > 0
-                        ? `Invoice truncated due to MAX_TOKENS (extracted ${itemsBeforeTruncation} items, but more exist). This invoice has too many line items for batch processing. Please upload this specific PDF manually for automatic recovery.`
+                        ? `MAX_TOKENS (se extrayeron ${itemsBeforeTruncation} items, pero existen más). Esta factura es demasiado larga para la IA.`
                         : `Invoice truncated due to MAX_TOKENS. Please upload this PDF manually for automatic recovery.`;
 
                     errors.push({
