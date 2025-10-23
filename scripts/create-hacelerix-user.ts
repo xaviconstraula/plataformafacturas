@@ -1,7 +1,8 @@
-import { PrismaClient, ProviderType, BatchStatus } from '../generated/prisma'
-import { hash } from 'bcryptjs'
+import { ProviderType, BatchStatus } from '../generated/prisma'
+import { prisma } from '@/lib/db'
+import { auth } from '@/auth'
 
-const prisma = new PrismaClient()
+
 
 // Función para generar fechas aleatorias entre dos fechas
 function randomDate(start: Date, end: Date) {
@@ -25,30 +26,20 @@ async function main() {
     if (!user) {
         console.log('Creating Hacelerix user with authentication...')
 
-        // Hash the password
-        const hashedPassword = await hash('hacelerix', 12)
-
-        user = await prisma.user.create({
-            data: {
+        // Create the user via Better Auth server API
+        await auth.api.signUpEmail({
+            body: {
                 email: 'info@hacelerix.com',
-                name: 'Hacelerix',
-                emailVerified: true,
-                image: null
+                password: 'hacelerix',
+                name: 'Hacelerix'
             }
         })
 
-        // Create the account for password authentication
-        await prisma.account.create({
-            data: {
-                id: `account_${user.id}`,
-                accountId: user.id,
-                providerId: 'credential',
-                userId: user.id,
-                password: hashedPassword,
-                createdAt: new Date(),
-                updatedAt: new Date()
-            }
-        })
+        // Resolve created user from DB
+        user = await prisma.user.findUnique({ where: { email: 'info@hacelerix.com' } })
+        if (!user) {
+            throw new Error('Failed to create Hacelerix user via Better Auth')
+        }
 
         console.log('✅ User and authentication created')
     } else {

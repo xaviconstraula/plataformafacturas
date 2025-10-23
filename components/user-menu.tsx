@@ -11,10 +11,13 @@ import {
     DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
-import { LogOut, User, Settings, ChevronUp } from "lucide-react"
+import { LogOut, User, Settings, ChevronUp, Check } from "lucide-react"
+import { setThemePack } from "@/lib/actions/user-preferences"
+import { useRouter } from "next/navigation"
 
 export function UserMenu() {
     const { data: session, isPending } = authClient.useSession()
+    const router = useRouter()
 
     if (isPending) {
         return (
@@ -75,6 +78,30 @@ export function UserMenu() {
                         </p>
                     </div>
                 </DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuLabel>Tema</DropdownMenuLabel>
+                <DropdownMenuItem
+                    className="cursor-pointer"
+                    onClick={async () => { await setThemePack('lime'); router.refresh() }}
+                >
+                    <span className="flex items-center justify-between w-full">
+                        <span>Lima</span>
+                        {typeof document !== 'undefined' && document.documentElement.dataset.pack === 'lime' ? (
+                            <Check className="h-4 w-4" />
+                        ) : null}
+                    </span>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                    className="cursor-pointer"
+                    onClick={async () => { await setThemePack('blue'); router.refresh() }}
+                >
+                    <span className="flex items-center justify-between w-full">
+                        <span>Azul</span>
+                        {typeof document !== 'undefined' && document.documentElement.dataset.pack === 'blue' ? (
+                            <Check className="h-4 w-4" />
+                        ) : null}
+                    </span>
+                </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem className="cursor-pointer">
                     <User className="mr-2 h-4 w-4" />

@@ -52,6 +52,23 @@
   --sidebar-ring: var(--constraula-green);
 }
 
+/* Blue pack overrides */
+[data-pack="blue"] {
+  /* Brand primary */
+  --constraula-green: #077FD3;
+
+  /* Derived brand accents */
+  --ring: #077FD3;
+  --primary-foreground: var(--constraula-white);
+
+  /* Charts palette tuned for blue */
+  --chart-1: #077FD3;
+  --chart-2: oklch(0.79 0.13 253); /* ~ #3BA5F6 */
+  --chart-3: oklch(0.84 0.09 253); /* ~ #5CB7FF */
+  --chart-4: oklch(0.72 0.09 253); /* ~ #046BB0 (approx) */
+  --chart-5: oklch(0.66 0.08 253); /* ~ #035A94 (approx) */
+}
+
 
 @theme inline {
   --radius-sm: calc(var(--radius) - 4px);
