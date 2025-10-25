@@ -128,17 +128,19 @@ model Material {
 // Modelo para Items de Factura
 
 model InvoiceItem {
-  id         String   @id @default(cuid())
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
-  invoice    Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
-  invoiceId  String
-  material   Material @relation(fields: [materialId], references: [id])
-  materialId String
-  quantity   Decimal  @db.Decimal(10, 2)
-  unitPrice  Decimal  @db.Decimal(10, 2)
-  totalPrice Decimal  @db.Decimal(10, 2)
-  itemDate   DateTime // Date specific to this item, may differ from invoice date
+  id                 String   @id @default(cuid())
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  invoice            Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  invoiceId          String
+  material           Material @relation(fields: [materialId], references: [id])
+  materialId         String
+  quantity           Decimal  @db.Decimal(10, 2)
+  unitPrice          Decimal  @db.Decimal(10, 2)
+  totalPrice         Decimal  @db.Decimal(10, 2)
+  listPrice          Decimal? @db.Decimal(10, 2)
+  discountPercentage Decimal? @db.Decimal(5, 2)
+  itemDate           DateTime // Date specific to this item, may differ from invoice date
 
   // Nueva funcionalidad: OT/CECO
   workOrder String? // OT (Orden de Trabajo) o CECO (Centro de Coste)

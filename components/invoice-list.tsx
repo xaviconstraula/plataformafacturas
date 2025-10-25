@@ -22,6 +22,8 @@ interface InvoiceListProps {
     items?: {
       id: string
       quantity: number
+      listPrice: number | null
+      discountPercentage: number | null
       unitPrice: number
       totalPrice: number
       workOrder: string | null

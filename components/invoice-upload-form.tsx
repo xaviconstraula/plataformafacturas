@@ -6,7 +6,7 @@ import { zodResolver } from "@hookform/resolvers/zod"
 import { useForm, useFieldArray, type Resolver, type SubmitHandler } from "react-hook-form"
 import { z } from "zod"
 import { Button } from "@/components/ui/button"
-import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form"
+import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage, FormDescription } from "@/components/ui/form"
 import { Input } from "@/components/ui/input"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -29,11 +29,20 @@ const invoiceItemSchema = z.object({
   quantity: z.coerce.number().positive({
     message: "La cantidad debe ser un número positivo.",
   }),
-  unitPrice: z.coerce.number().positive({
-    message: "El precio unitario debe ser un número positivo.",
+  listPrice: z.coerce.number().nonnegative({
+    message: "El precio base debe ser un número no negativo.",
+  }).optional(),
+  discountPercentage: z.coerce.number().min(0).max(100, {
+    message: "El porcentaje de descuento debe estar entre 0 y 100.",
+  }).optional(),
+  unitPrice: z.coerce.number().nonnegative({
+    message: "El precio unitario debe ser un número no negativo.",
   }),
   description: z.string().optional(),
   workOrder: z.string().optional(),
+  materialCode: z.string().optional(),
+  isMaterial: z.boolean().optional(),
+  totalPrice: z.coerce.number().optional(),
 })
 
 const formSchema = z.object({
@@ -85,9 +94,14 @@ export function InvoiceUploadForm({ onClose }: InvoiceUploadFormProps = {}) {
         {
           materialName: "",
           quantity: 0,
+          listPrice: 0,
+          discountPercentage: 0,
           unitPrice: 0,
           description: "",
           workOrder: "",
+          materialCode: "",
+          isMaterial: true,
+          totalPrice: 0,
         }
       ],
       notes: "",
@@ -419,10 +433,39 @@ export function InvoiceUploadForm({ onClose }: InvoiceUploadFormProps = {}) {
 
                           <FormField
                             control={form.control}
+                            name={`items.${index}.listPrice`}
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Precio Base *</FormLabel>
+                                <FormControl>
+                                  <Input type="number" step="0.01" placeholder="0.00" {...field} />
+                                </FormControl>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+
+                          <FormField
+                            control={form.control}
+                            name={`items.${index}.discountPercentage`}
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>% Descuento</FormLabel>
+                                <FormControl>
+                                  <Input type="number" step="0.01" placeholder="0.00" {...field} />
+                                </FormControl>
+                                <FormDescription>Introducir porcentaje (ej. 10 para 10%).</FormDescription>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+
+                          <FormField
+                            control={form.control}
                             name={`items.${index}.unitPrice`}
                             render={({ field }) => (
                               <FormItem>
-                                <FormLabel>Precio Unitario *</FormLabel>
+                                <FormLabel>Precio Final *</FormLabel>
                                 <FormControl>
                                   <Input type="number" step="0.01" placeholder="0.00" {...field} />
                                 </FormControl>
@@ -462,8 +505,13 @@ export function InvoiceUploadForm({ onClose }: InvoiceUploadFormProps = {}) {
                           </div>
                         </div>
 
-                        <div className="mt-3 p-2 bg-muted rounded text-sm">
-                          Total del item: €{((watchedItems[index]?.quantity || 0) * (watchedItems[index]?.unitPrice || 0)).toFixed(2)}
+                        <div className="mt-3 p-2 bg-muted rounded text-sm space-y-1">
+                          <div>
+                            Total del item: €{((watchedItems[index]?.quantity || 0) * (watchedItems[index]?.unitPrice || 0)).toFixed(2)}
+                          </div>
+                          <div>
+                            Precio Base x Cantidad: €{((watchedItems[index]?.quantity || 0) * (watchedItems[index]?.listPrice || 0)).toFixed(2)}
+                          </div>
                         </div>
                       </Card>
                     ))}

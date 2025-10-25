@@ -15,6 +15,8 @@ type InvoiceItemWithoutMaterial = {
     invoiceId: string;
     description: string | null;
     quantity: Prisma.Decimal;
+    listPrice: Prisma.Decimal | null;
+    discountPercentage: Prisma.Decimal | null;
     unitPrice: Prisma.Decimal;
     totalPrice: Prisma.Decimal;
     itemDate: Date;
@@ -229,6 +231,8 @@ export async function getInvoices(params: GetInvoicesParams) {
                             select: {
                                 id: true,
                                 quantity: true,
+                                listPrice: true,
+                                discountPercentage: true,
                                 unitPrice: true,
                                 totalPrice: true,
                                 workOrder: true,
@@ -257,6 +261,8 @@ export async function getInvoices(params: GetInvoicesParams) {
                             select: {
                                 id: true,
                                 quantity: true,
+                                listPrice: true,
+                                discountPercentage: true,
                                 unitPrice: true,
                                 totalPrice: true,
                                 workOrder: true,
@@ -302,6 +308,8 @@ export async function getInvoices(params: GetInvoicesParams) {
                 items?: Array<{
                     id: string;
                     quantity: number;
+                    listPrice: number | null;
+                    discountPercentage: number | null;
                     unitPrice: number;
                     totalPrice: number;
                     workOrder: string | null;
@@ -333,32 +341,34 @@ export async function getInvoices(params: GetInvoicesParams) {
                 issueDate: invoice.issueDate
             }
 
-            if (params.includeItems && invoice.items && invoice.items.length > 0 && hasMaterial(invoice.items[0])) {
-                base.items = invoice.items.map((item) => {
-                    // At this point, we know the item has material due to the type guard
-                    const itemWithMaterial = item as InvoiceItemWithMaterial;
-                    return {
-                        id: itemWithMaterial.id,
-                        quantity: itemWithMaterial.quantity.toNumber(),
-                        unitPrice: itemWithMaterial.unitPrice.toNumber(),
-                        totalPrice: itemWithMaterial.totalPrice.toNumber(),
-                        workOrder: itemWithMaterial.workOrder,
-                        description: itemWithMaterial.description,
-                        lineNumber: itemWithMaterial.lineNumber,
-                        itemDate: itemWithMaterial.itemDate,
-                        material: {
-                            id: itemWithMaterial.material.id,
-                            code: itemWithMaterial.material.code,
-                            name: itemWithMaterial.material.name,
-                            category: itemWithMaterial.material.category,
-                            unit: itemWithMaterial.material.unit,
-                            productGroup: itemWithMaterial.material.productGroup ? {
-                                id: itemWithMaterial.material.productGroup.id,
-                                standardizedName: itemWithMaterial.material.productGroup.standardizedName
-                            } : null
-                        }
-                    };
-                });
+            if (params.includeItems && invoice.items && invoice.items.length > 0) {
+                base.items = invoice.items
+                    .filter((item): item is InvoiceItemWithMaterial => hasMaterial(item))
+                    .map((itemWithMaterial) => {
+                        return {
+                            id: itemWithMaterial.id,
+                            quantity: itemWithMaterial.quantity.toNumber(),
+                            listPrice: itemWithMaterial.listPrice?.toNumber() ?? null,
+                            discountPercentage: itemWithMaterial.discountPercentage?.toNumber() ?? null,
+                            unitPrice: itemWithMaterial.unitPrice.toNumber(),
+                            totalPrice: itemWithMaterial.totalPrice.toNumber(),
+                            workOrder: itemWithMaterial.workOrder,
+                            description: itemWithMaterial.description,
+                            lineNumber: itemWithMaterial.lineNumber,
+                            itemDate: itemWithMaterial.itemDate,
+                            material: {
+                                id: itemWithMaterial.material.id,
+                                code: itemWithMaterial.material.code,
+                                name: itemWithMaterial.material.name,
+                                category: itemWithMaterial.material.category,
+                                unit: itemWithMaterial.material.unit,
+                                productGroup: itemWithMaterial.material.productGroup ? {
+                                    id: itemWithMaterial.material.productGroup.id,
+                                    standardizedName: itemWithMaterial.material.productGroup.standardizedName
+                                } : null
+                            }
+                        };
+                    });
             }
 
             return base

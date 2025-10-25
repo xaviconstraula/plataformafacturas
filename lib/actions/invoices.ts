@@ -166,7 +166,7 @@ const TEXT_FORMAT_NESTED_DELIMITER = ';';
  * Format:
  * HEADER|invoiceCode|issueDate|totalAmount
  * PROVIDER|name|cif|email|phone|address
- * ITEM|materialName|materialCode|isMaterial|quantity|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber
+ * ITEM|materialName|materialCode|isMaterial|quantity|listPrice|discountPercentage|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber
  * ITEM|...
  * 
  * Empty/null fields use: ~
@@ -174,8 +174,8 @@ const TEXT_FORMAT_NESTED_DELIMITER = ';';
  * Example:
  * HEADER|FAC-2024-001|2024-01-15|1250.50
  * PROVIDER|ACME S.L.|A12345678|info@acme.com|+34912345678|Calle Principal 123, Madrid
- * ITEM|Cemento Portland|CEM001|true|10.00|25.50|255.00|~|OT-4077|Cemento gris 50kg|1
- * ITEM|Transporte|~|false|1.00|995.50|995.50|2024-01-15|~|Envío especial|2
+ * ITEM|Cemento Portland|CEM001|true|10.00|28.33|10.00|25.50|255.00|~|OT-4077|Cemento gris 50kg|1
+ * ITEM|Transporte|~|false|1.00|995.50|0.00|995.50|995.50|2024-01-15|~|Envío especial|2
  */
 function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: boolean }): ExtractedPdfData | null {
     const suppressWarnings = options?.suppressWarnings ?? false;
@@ -236,11 +236,12 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
                 address: parseField(parts[5])
             };
         } else if (recordType === 'ITEM') {
-            // ITEM|materialName|materialCode|isMaterial|quantity|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber
-            // Need 11 parts total (ITEM + 10 fields)
-            if (parts.length < 11) {
+            // ITEM|materialName|materialCode|isMaterial|quantity|listPrice|discountPercentage|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber
+            // ITEM|materialName|materialCode|isMaterial|quantity|listPrice|discountPercentage|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber
+            // Need 13 parts total (ITEM + 12 fields)
+            if (parts.length < 13) {
                 if (!suppressWarnings) {
-                    console.warn(`Malformed ITEM line (expected 11 parts, got ${parts.length}): ${trimmedLine}`);
+                    console.warn(`Malformed ITEM line (expected 13 parts, got ${parts.length}): ${trimmedLine}`);
                     console.warn(`This likely indicates Gemini's response was truncated. Consider processing this invoice manually.`);
                 }
                 continue;
@@ -248,8 +249,10 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
 
             const materialName = parseField(parts[1]);
             let quantity = parseNumber(parts[4]);
-            let unitPrice = parseNumber(parts[5]);
-            let totalPrice = parseNumber(parts[6]);
+            let listPrice = parseNumber(parts[5]);
+            let discountPercentage = parseNumber(parts[6]);
+            let unitPrice = parseNumber(parts[7]);
+            let totalPrice = parseNumber(parts[8]);
 
             if (!materialName) {
                 if (!suppressWarnings) console.warn(`Missing required ITEM fields: ${trimmedLine}`);
@@ -262,12 +265,31 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
                 if (!suppressWarnings) console.warn(`Defaulting quantity to 1 for item: ${materialName}`);
             }
 
+            if ((listPrice === undefined || isNaN(listPrice)) && discountPercentage !== undefined && !isNaN(discountPercentage) && unitPrice !== undefined && !isNaN(unitPrice)) {
+                const discountFactor = 1 - (discountPercentage / 100);
+                if (discountFactor !== 0) {
+                    listPrice = Number((unitPrice / discountFactor).toFixed(4));
+                }
+            }
+
             if ((unitPrice === undefined || isNaN(unitPrice)) && totalPrice !== undefined && !isNaN(totalPrice) && quantity > 0) {
-                unitPrice = Number((totalPrice / quantity).toFixed(2));
+                unitPrice = Number((totalPrice / quantity).toFixed(4));
             }
 
             if ((totalPrice === undefined || isNaN(totalPrice)) && unitPrice !== undefined && !isNaN(unitPrice)) {
                 totalPrice = Number((unitPrice * quantity).toFixed(2));
+            }
+
+            if ((discountPercentage === undefined || isNaN(discountPercentage)) && listPrice !== undefined && !isNaN(listPrice) && unitPrice !== undefined && !isNaN(unitPrice) && listPrice !== 0) {
+                discountPercentage = Number(((1 - unitPrice / listPrice) * 100).toFixed(2));
+            }
+
+            if ((listPrice === undefined || isNaN(listPrice)) && unitPrice !== undefined && !isNaN(unitPrice)) {
+                listPrice = unitPrice;
+            }
+
+            if (discountPercentage === undefined || isNaN(discountPercentage)) {
+                discountPercentage = 0;
             }
 
             if (unitPrice === undefined || isNaN(unitPrice)) {
@@ -278,20 +300,28 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
                 totalPrice = 0;
             }
 
+            if (listPrice === undefined || isNaN(listPrice)) {
+                listPrice = unitPrice;
+            }
+
             unitPrice = Number(unitPrice.toFixed(2));
             totalPrice = Number(totalPrice.toFixed(2));
+            listPrice = Number(listPrice.toFixed(2));
+            discountPercentage = Number(discountPercentage.toFixed(2));
 
             items.push({
                 materialName,
                 materialCode: parseField(parts[2]),
                 isMaterial: parseBoolean(parts[3] || 'true'),
                 quantity,
+                listPrice,
+                discountPercentage,
                 unitPrice,
                 totalPrice,
-                itemDate: parseField(parts[7]),
-                workOrder: parseField(parts[8]),
-                description: parseField(parts[9]),
-                lineNumber: parseNumber(parts[10])
+                itemDate: parseField(parts[9]),
+                workOrder: parseField(parts[10]),
+                description: parseField(parts[11]),
+                lineNumber: parseNumber(parts[12])
             });
         }
     }
@@ -906,13 +936,15 @@ INVOICE HEADER:
 - Issue date in YYYY-MM-DD format
 - Total amount (sum of all line items)
 
-LINE ITEMS (extract ALL visible items):
+LINE ITEMS (extract ALL visible columns exactly as shown):
 - materialName: Descriptive product/service name
 - materialCode: Reference code from "Código/Ref/Artículo" column, use ~ if missing
 - isMaterial: true for physical goods, false for services/fees
 - quantity: Units ordered (default 1.00 if not visible)
-- unitPrice: Price per unit from "Precio/PVP/€" columns
-- totalPrice: Line total from "Total/Importe/Subtotal" columns
+- listPrice: Unit price **before** applying any discount/rebate. Must come from the column that states PVP/Precio unitario sin descuento. If the invoice displays a discount column, listPrice must be the value before discount even if that column is labeled as base price.
+- discountPercentage: Discount rate in percent (0-100). If the discount is shown as an absolute amount, convert it to percentage relative to listPrice. If no discount applies, return 0.
+- unitPrice: Final unit price **after** applying the discountPercentage, exactly as charged. Must respect sign (abonos -> negative prices).
+- totalPrice: Line total after discount (unitPrice * quantity), keeping the sign consistent with abonos/credit notes.
 - itemDate: YYYY-MM-DD if different from invoice date, otherwise ~
 - workOrder: "OT-xxxx" format from "Obra:" references, otherwise ~
 - description: Brief notes, otherwise ~
@@ -930,7 +962,7 @@ Use pipe (|) as delimiter, tilde (~) for missing values.
 MANDATORY STRUCTURE (NEVER omit any line type):
 Line 1 - HEADER (exactly 4 fields): HEADER|invoiceCode|issueDate|totalAmount
 Line 2 - PROVIDER (exactly 6 fields): PROVIDER|name|cif|email|phone|address  
-Lines 3+ - ITEMS (exactly 11 fields each): ITEM|materialName|materialCode|isMaterial|quantity|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber
+Lines 3+ - ITEMS (exactly 13 fields each): ITEM|materialName|materialCode|isMaterial|quantity|listPrice|discountPercentage|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber
 
 FORMATTING RULES:
 - Output ONLY the structured lines, no explanations
@@ -946,8 +978,8 @@ FORMATTING RULES:
 EXAMPLE OUTPUT:
 HEADER|FAC-2024-001|2024-01-15|1250.50
 PROVIDER|ACME S.L.|A12345678|info@acme.com|+34912345678|Calle Principal 123, Madrid
-ITEM|Cemento Portland|CEM001|true|10.00|25.50|255.00|~|OT-4077|Cemento gris 50kg|1
-ITEM|Transporte|~|false|1.00|995.50|995.50|2024-01-15|~|Envío especial|2
+ITEM|Cemento Portland|CEM001|true|10.00|28.33|10.00|25.50|255.00|~|OT-4077|Cemento gris 50kg|1
+ITEM|Transporte|~|false|1.00|995.50|0.00|995.50|995.50|2024-01-15|~|Envío especial|2
 
 REMEMBER: PROVIDER line is MANDATORY - always include it even with partial data.`;
 }
@@ -1067,7 +1099,7 @@ async function callPdfExtractAPI(file: File, batchErrors: BatchErrorDetail[]): P
                 const looksLikeTruncation = text.includes('ITEM|') &&
                     (text.split('\n').some(line => {
                         const trimmed = line.trim();
-                        return trimmed.startsWith('ITEM|') && trimmed.split('|').length < 11;
+                        return trimmed.startsWith('ITEM|') && trimmed.split('|').length < 13;
                     }) || !text.trim().endsWith('}'));
 
                 const errorMsg = looksLikeTruncation
@@ -1616,7 +1648,7 @@ async function processInvoiceItemTx(
     createdMaterial: Material,
     isMaterialItem: boolean
 ): Promise<{ invoiceItem: InvoiceItem; alert?: PriceAlert }> {
-    const { quantity, unitPrice, totalPrice, itemDate } = itemData;
+    const { quantity, unitPrice, totalPrice, itemDate, listPrice, discountPercentage } = itemData;
 
     if (typeof quantity !== 'number' || isNaN(quantity) ||
         typeof unitPrice !== 'number' || isNaN(unitPrice) ||
@@ -1627,6 +1659,12 @@ async function processInvoiceItemTx(
     const quantityDecimal = new Prisma.Decimal(quantity.toFixed(2));
     const currentUnitPriceDecimal = new Prisma.Decimal(unitPrice.toFixed(2));
     const totalPriceDecimal = new Prisma.Decimal(totalPrice.toFixed(2));
+    const listPriceDecimal = typeof listPrice === 'number' && !isNaN(listPrice)
+        ? new Prisma.Decimal(listPrice.toFixed(2))
+        : null;
+    const discountPercentageDecimal = typeof discountPercentage === 'number' && !isNaN(discountPercentage)
+        ? new Prisma.Decimal(discountPercentage.toFixed(2))
+        : null;
 
     // Use itemDate if provided, otherwise use invoice issue date
     const effectiveDate = itemDate ? new Date(itemDate) : invoiceIssueDate;
@@ -1638,6 +1676,8 @@ async function processInvoiceItemTx(
             invoiceId,
             materialId: createdMaterial.id,
             quantity: quantityDecimal,
+            listPrice: listPriceDecimal,
+            discountPercentage: discountPercentageDecimal,
             unitPrice: currentUnitPriceDecimal,
             totalPrice: totalPriceDecimal,
             itemDate: effectiveDate, // Store the effective date for the item
@@ -2194,6 +2234,34 @@ export async function createInvoiceFromFiles(
                         const currentInvoiceIssueDate = new Date(extractedData.issueDate);
                         const intraInvoiceMaterialPriceHistory = new Map<string, { price: Prisma.Decimal; date: Date; invoiceItemId: string }>();
 
+                        // Pre-process work orders: if any item has an OT, apply it to ALL items
+                        // This handles the case where work orders should be invoice-wide
+                        const workOrdersInInvoice = new Set<string>();
+                        for (const item of extractedData.items) {
+                            if (item.workOrder && item.workOrder.trim()) {
+                                workOrdersInInvoice.add(item.workOrder.trim());
+                            }
+                        }
+
+                        // If multiple different work orders found, log warning but use the first one
+                        // In practice, an invoice should typically have only one work order
+                        let invoiceWorkOrder: string | null = null;
+                        if (workOrdersInInvoice.size > 0) {
+                            invoiceWorkOrder = Array.from(workOrdersInInvoice)[0]; // Use first work order found
+                            if (workOrdersInInvoice.size > 1) {
+                                console.warn(`[Invoice ${extractedData.invoiceCode}] Multiple work orders found in invoice: ${Array.from(workOrdersInInvoice).join(', ')}. Using: ${invoiceWorkOrder}`);
+                            }
+                        }
+
+                        // Apply the invoice work order to all items
+                        if (invoiceWorkOrder) {
+                            for (const item of extractedData.items) {
+                                if (!item.workOrder || item.workOrder.trim() === '') {
+                                    item.workOrder = invoiceWorkOrder;
+                                }
+                            }
+                        }
+
                         // Process items in optimized chunks for performance
                         const ITEM_CHUNK_SIZE = isVeryLargeInvoice ? 15 : isLargeInvoice ? 30 : 999; // Smaller chunks for very large invoices
                         const itemChunks = [];
@@ -2231,10 +2299,24 @@ export async function createInvoiceFromFiles(
                                     itemData.totalPrice = 0;
                                 }
 
+                                if (typeof itemData.listPrice !== 'number' || isNaN(itemData.listPrice)) {
+                                    itemData.listPrice = itemData.unitPrice;
+                                }
+
+                                if (typeof itemData.discountPercentage !== 'number' || isNaN(itemData.discountPercentage)) {
+                                    itemData.discountPercentage = 0;
+                                }
+
                                 const isMaterialItem = typeof itemData.isMaterial === 'boolean' ? itemData.isMaterial : true;
 
                                 if (!isMaterialItem) {
                                     const quantityDecimal = new Prisma.Decimal(itemData.quantity.toFixed(2));
+                                    const listPriceDecimal = typeof itemData.listPrice === 'number' && !isNaN(itemData.listPrice)
+                                        ? new Prisma.Decimal(itemData.listPrice.toFixed(2))
+                                        : null;
+                                    const discountPercentageDecimal = typeof itemData.discountPercentage === 'number' && !isNaN(itemData.discountPercentage)
+                                        ? new Prisma.Decimal(itemData.discountPercentage.toFixed(2))
+                                        : null;
                                     const currentUnitPriceDecimal = new Prisma.Decimal(itemData.unitPrice.toFixed(2));
                                     const totalPriceDecimal = new Prisma.Decimal(itemData.totalPrice.toFixed(2));
                                     const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
@@ -2244,6 +2326,8 @@ export async function createInvoiceFromFiles(
                                             invoiceId: invoice.id,
                                             materialId: (await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache, user.id)).id,
                                             quantity: quantityDecimal,
+                                            listPrice: listPriceDecimal,
+                                            discountPercentage: discountPercentageDecimal,
                                             unitPrice: currentUnitPriceDecimal,
                                             totalPrice: totalPriceDecimal,
                                             itemDate: effectiveItemDate,
@@ -2578,6 +2662,8 @@ export interface ManualInvoiceData {
         materialName: string;
         materialCode?: string;
         quantity: number;
+        listPrice?: number;
+        discountPercentage?: number;
         unitPrice: number;
         totalPrice: number;
         description: string | null;
@@ -2634,8 +2720,35 @@ export async function createManualInvoice(data: ManualInvoiceData): Promise<Crea
             let alertsCounter = 0;
             const currentInvoiceIssueDate = new Date(data.issueDate);
 
-            // 5. Process each item
-            for (const itemData of data.items) {
+            // 5. Pre-process work orders: if any item has an OT, apply it to ALL items
+            const workOrdersInInvoice = new Set<string>();
+            for (const item of data.items) {
+                if (item.workOrder && item.workOrder.trim()) {
+                    workOrdersInInvoice.add(item.workOrder.trim());
+                }
+            }
+
+            // If multiple different work orders found, log warning but use the first one
+            let invoiceWorkOrder: string | null = null;
+            if (workOrdersInInvoice.size > 0) {
+                invoiceWorkOrder = Array.from(workOrdersInInvoice)[0]; // Use first work order found
+                if (workOrdersInInvoice.size > 1) {
+                    console.warn(`[Manual Invoice ${data.invoiceCode}] Multiple work orders found in invoice: ${Array.from(workOrdersInInvoice).join(', ')}. Using: ${invoiceWorkOrder}`);
+                }
+            }
+
+            // Apply the invoice work order to all items
+            if (invoiceWorkOrder) {
+                for (const item of data.items) {
+                    if (!item.workOrder || item.workOrder.trim() === '') {
+                        item.workOrder = invoiceWorkOrder;
+                    }
+                }
+            }
+
+            // 6. Process each item
+            for (const rawItem of data.items) {
+                const itemData = { ...rawItem };
                 if (!itemData.materialName) {
                     console.warn(`Skipping item due to missing material name in manual invoice ${invoice.invoiceCode}`);
                     continue;
@@ -2644,14 +2757,26 @@ export async function createManualInvoice(data: ManualInvoiceData): Promise<Crea
                 // Find or create material
                 const material = await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialCode, provider.type, user.id);
 
+                const quantityDecimal = new Prisma.Decimal(itemData.quantity.toFixed(2));
+                const listPriceDecimal = typeof itemData.listPrice === 'number' && !isNaN(itemData.listPrice)
+                    ? new Prisma.Decimal(itemData.listPrice.toFixed(2))
+                    : null;
+                const discountPercentageDecimal = typeof itemData.discountPercentage === 'number' && !isNaN(itemData.discountPercentage)
+                    ? new Prisma.Decimal(itemData.discountPercentage.toFixed(2))
+                    : null;
+                const unitPriceDecimal = new Prisma.Decimal(itemData.unitPrice.toFixed(2));
+                const totalPriceDecimal = new Prisma.Decimal(itemData.totalPrice.toFixed(2));
+
                 // Create invoice item
                 const invoiceItem = await tx.invoiceItem.create({
                     data: {
                         invoiceId: invoice.id,
                         materialId: material.id,
-                        quantity: new Prisma.Decimal(itemData.quantity.toFixed(2)),
-                        unitPrice: new Prisma.Decimal(itemData.unitPrice.toFixed(2)),
-                        totalPrice: new Prisma.Decimal(itemData.totalPrice.toFixed(2)),
+                        quantity: quantityDecimal,
+                        listPrice: listPriceDecimal,
+                        discountPercentage: discountPercentageDecimal,
+                        unitPrice: unitPriceDecimal,
+                        totalPrice: totalPriceDecimal,
                         itemDate: currentInvoiceIssueDate,
                         description: itemData.description,
                         workOrder: itemData.workOrder,
@@ -2677,7 +2802,7 @@ export async function createManualInvoice(data: ManualInvoiceData): Promise<Crea
                     });
 
                     if (lastPurchase) {
-                        const currentPrice = new Prisma.Decimal(itemData.unitPrice.toFixed(2));
+                        const currentPrice = unitPriceDecimal;
                         const lastPrice = lastPurchase.unitPrice;
 
                         if (!currentPrice.equals(lastPrice)) {
@@ -2982,6 +3107,32 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
             let itemsProcessed = 0;
             let itemsSkipped = 0;
 
+            // Pre-process work orders: if any item has an OT, apply it to ALL items
+            const workOrdersInInvoice = new Set<string>();
+            for (const item of extractedData.items) {
+                if (item.workOrder && item.workOrder.trim()) {
+                    workOrdersInInvoice.add(item.workOrder.trim());
+                }
+            }
+
+            // If multiple different work orders found, log warning but use the first one
+            let invoiceWorkOrder: string | null = null;
+            if (workOrdersInInvoice.size > 0) {
+                invoiceWorkOrder = Array.from(workOrdersInInvoice)[0]; // Use first work order found
+                if (workOrdersInInvoice.size > 1) {
+                    console.warn(`[Batch Invoice ${extractedData.invoiceCode}] Multiple work orders found in invoice: ${Array.from(workOrdersInInvoice).join(', ')}. Using: ${invoiceWorkOrder}`);
+                }
+            }
+
+            // Apply the invoice work order to all items
+            if (invoiceWorkOrder) {
+                for (const item of extractedData.items) {
+                    if (!item.workOrder || item.workOrder.trim() === '') {
+                        item.workOrder = invoiceWorkOrder;
+                    }
+                }
+            }
+
             for (const item of extractedData.items) {
                 // 🚦 Validate item data to prevent runtime errors
                 if (!item.materialName) {
@@ -2997,13 +3148,21 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
                 }
 
                 // Default missing or invalid prices to 0 so the invoice can still be saved
+                if (typeof item.listPrice !== "number" || isNaN(item.listPrice)) {
+                    (item as unknown as { listPrice: number }).listPrice = typeof item.unitPrice === "number" && !isNaN(item.unitPrice) ? item.unitPrice : 0;
+                }
+                if (typeof item.discountPercentage !== "number" || isNaN(item.discountPercentage)) {
+                    (item as unknown as { discountPercentage: number }).discountPercentage = 0;
+                }
                 if (typeof item.unitPrice !== "number" || isNaN(item.unitPrice)) {
-                    console.warn(`[saveExtractedInvoice][Invoice ${extractedData.invoiceCode}] Invalid or missing unitPrice for '${item.materialName}'. Defaulting to 0 (file: ${fileName ?? "unknown"})`);
-                    (item as unknown as { unitPrice: number }).unitPrice = 0;
+                    console.warn(`[saveExtractedInvoice][Invoice ${extractedData.invoiceCode}] Invalid or missing unitPrice for '${item.materialName}'. Defaulting to discount-adjusted list price (file: ${fileName ?? "unknown"})`);
+                    const listPriceVal = (item.listPrice ?? 0);
+                    const adjusted = listPriceVal * (1 - ((item.discountPercentage ?? 0) / 100));
+                    (item as unknown as { unitPrice: number }).unitPrice = Number.isFinite(adjusted) ? adjusted : 0;
                 }
                 if (typeof item.totalPrice !== "number" || isNaN(item.totalPrice)) {
-                    console.warn(`[saveExtractedInvoice][Invoice ${extractedData.invoiceCode}] Invalid or missing totalPrice for '${item.materialName}'. Defaulting to 0 (file: ${fileName ?? "unknown"})`);
-                    (item as unknown as { totalPrice: number }).totalPrice = 0;
+                    console.warn(`[saveExtractedInvoice][Invoice ${extractedData.invoiceCode}] Invalid or missing totalPrice for '${item.materialName}'. Defaulting to unitPrice * quantity (file: ${fileName ?? "unknown"})`);
+                    (item as unknown as { totalPrice: number }).totalPrice = Number(((item.unitPrice ?? 0) * item.quantity).toFixed(2));
                 }
 
                 try {

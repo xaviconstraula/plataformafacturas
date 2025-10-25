@@ -11,6 +11,8 @@ export interface ExtractedPdfItemData {
     materialCode?: string; // Código de referencia del producto extraído del PDF
     materialDescription?: string;
     quantity: number;
+    listPrice?: number;
+    discountPercentage?: number;
     unitPrice: number;
     totalPrice: number;
     itemDate?: string; // Optional ISO date string for items with different dates
