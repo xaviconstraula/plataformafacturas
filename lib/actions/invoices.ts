@@ -237,12 +237,16 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
             };
         } else if (recordType === 'ITEM') {
             // ITEM|materialName|materialCode|isMaterial|quantity|listPrice|discountPercentage|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber
-            // ITEM|materialName|materialCode|isMaterial|quantity|listPrice|discountPercentage|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber
             // Need 13 parts total (ITEM + 12 fields)
-            if (parts.length < 13) {
+            if (parts.length !== 13) {
                 if (!suppressWarnings) {
-                    console.warn(`Malformed ITEM line (expected 13 parts, got ${parts.length}): ${trimmedLine}`);
-                    console.warn(`This likely indicates Gemini's response was truncated. Consider processing this invoice manually.`);
+                    console.warn(`Malformed ITEM line (expected exactly 13 parts, got ${parts.length}): ${trimmedLine}`);
+                    console.warn(`Parts: ${parts.map((p, i) => `${i}:${p}`).join(', ')}`);
+                    if (parts.length < 13) {
+                        console.warn(`This likely indicates Gemini's response was truncated. Consider processing this invoice manually.`);
+                    } else {
+                        console.warn(`This indicates extra fields or parsing issues. Extra parts: ${parts.slice(13).join(', ')}`);
+                    }
                 }
                 continue;
             }
@@ -259,55 +263,64 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
                 continue;
             }
 
-            // Default quantity to 1 if missing (common in service items or single units)
-            if (quantity === undefined || quantity === 0) {
-                quantity = 1;
-                if (!suppressWarnings) console.warn(`Defaulting quantity to 1 for item: ${materialName}`);
+            // Simple defaults only for required fields
+            if (quantity === undefined || isNaN(quantity)) {
+                quantity = 0; // Allow 0 but don't default to 1
             }
 
-            if ((listPrice === undefined || isNaN(listPrice)) && discountPercentage !== undefined && !isNaN(discountPercentage) && unitPrice !== undefined && !isNaN(unitPrice)) {
-                const discountFactor = 1 - (discountPercentage / 100);
-                if (discountFactor !== 0) {
-                    listPrice = Number((unitPrice / discountFactor).toFixed(4));
-                }
+            // For prices, use 0 if missing or invalid (don't recalculate)
+            if (listPrice === undefined || isNaN(listPrice)) {
+                listPrice = 0;
             }
-
-            if ((unitPrice === undefined || isNaN(unitPrice)) && totalPrice !== undefined && !isNaN(totalPrice) && quantity > 0) {
-                unitPrice = Number((totalPrice / quantity).toFixed(4));
-            }
-
-            if ((totalPrice === undefined || isNaN(totalPrice)) && unitPrice !== undefined && !isNaN(unitPrice)) {
-                totalPrice = Number((unitPrice * quantity).toFixed(2));
-            }
-
-            if ((discountPercentage === undefined || isNaN(discountPercentage)) && listPrice !== undefined && !isNaN(listPrice) && unitPrice !== undefined && !isNaN(unitPrice) && listPrice !== 0) {
-                discountPercentage = Number(((1 - unitPrice / listPrice) * 100).toFixed(2));
-            }
-
-            if ((listPrice === undefined || isNaN(listPrice)) && unitPrice !== undefined && !isNaN(unitPrice)) {
-                listPrice = unitPrice;
-            }
-
             if (discountPercentage === undefined || isNaN(discountPercentage)) {
                 discountPercentage = 0;
             }
-
             if (unitPrice === undefined || isNaN(unitPrice)) {
                 unitPrice = 0;
             }
-
             if (totalPrice === undefined || isNaN(totalPrice)) {
                 totalPrice = 0;
             }
 
-            if (listPrice === undefined || isNaN(listPrice)) {
-                listPrice = unitPrice;
-            }
-
+            // Round to 2 decimal places as per business rules
+            quantity = Number(quantity.toFixed(2));
             unitPrice = Number(unitPrice.toFixed(2));
             totalPrice = Number(totalPrice.toFixed(2));
             listPrice = Number(listPrice.toFixed(2));
             discountPercentage = Number(discountPercentage.toFixed(2));
+
+            // Validate price consistency and detect potential row misalignment (log warnings but don't correct)
+            if (!suppressWarnings) {
+                // Calculate expected total using original precision to avoid rounding errors
+                const rawQuantity = parseNumber(parts[4]) || 0;
+                const rawUnitPrice = parseNumber(parts[7]) || 0;
+                const expectedTotalPrice = Number((rawQuantity * rawUnitPrice).toFixed(2));
+                const totalPriceDiff = Math.abs(totalPrice - expectedTotalPrice);
+
+                if (totalPriceDiff > 0.01 && quantity > 0 && unitPrice > 0 && totalPrice > 0) {
+                    console.warn(`[Price Validation] Inconsistent prices for '${materialName}': quantity=${quantity}, unitPrice=${unitPrice}, expected total=${expectedTotalPrice.toFixed(2)}, actual total=${totalPrice}. Difference: ${totalPriceDiff.toFixed(2)}`);
+                }
+
+                if (listPrice > 0 && unitPrice > 0 && discountPercentage === 0) {
+                    const expectedDiscount = ((listPrice - unitPrice) / listPrice) * 100;
+                    if (Math.abs(expectedDiscount) > 1) { // More than 1% difference
+                        console.warn(`[Price Validation] Possible missing discount for '${materialName}': listPrice=${listPrice}, unitPrice=${unitPrice}, expected discount=${expectedDiscount.toFixed(2)}%`);
+                    }
+                }
+
+                if (listPrice > 0 && unitPrice > listPrice) {
+                    console.warn(`[Price Validation] Unit price higher than list price for '${materialName}': listPrice=${listPrice}, unitPrice=${unitPrice}`);
+                }
+
+                // Detect potential row misalignment issues
+                if (quantity === 0 && unitPrice === 0 && totalPrice === 0 && listPrice > 0) {
+                    console.warn(`[Row Alignment] Possible row misalignment for '${materialName}': has listPrice (${listPrice}) but all other prices are 0. This might indicate prices shifted from previous row.`);
+                }
+
+                if (materialName && materialName.length > 50) {
+                    console.warn(`[Data Quality] Unusually long material name for '${materialName.substring(0, 30)}...'. This might indicate concatenated data from multiple rows.`);
+                }
+            }
 
             items.push({
                 materialName,
@@ -936,19 +949,30 @@ INVOICE HEADER:
 - Issue date in YYYY-MM-DD format
 - Total amount (sum of all line items)
 
-LINE ITEMS (extract ALL visible columns exactly as shown):
-- materialName: Descriptive product/service name
-- materialCode: Reference code from "Código/Ref/Artículo" column, use ~ if missing
+LINE ITEMS (extract EXACTLY what you see in the invoice - NO calculations or corrections):
+- materialName: Descriptive product/service name exactly as written
+- materialCode: Reference code from "Código/Ref/Artículo" column, use ~ if missing or empty
 - isMaterial: true for physical goods, false for services/fees
-- quantity: Units ordered (default 1.00 if not visible)
-- listPrice: Unit price **before** applying any discount/rebate. Must come from the column that states PVP/Precio unitario sin descuento. If the invoice displays a discount column, listPrice must be the value before discount even if that column is labeled as base price.
-- discountPercentage: Discount rate in percent (0-100). If the discount is shown as an absolute amount, convert it to percentage relative to listPrice. If no discount applies, return 0.
-- unitPrice: Final unit price **after** applying the discountPercentage, exactly as charged. Must respect sign (abonos -> negative prices).
-- totalPrice: Line total after discount (unitPrice * quantity), keeping the sign consistent with abonos/credit notes.
+- quantity: Units ordered exactly as shown (use ~ if missing, don't default to 1)
+- listPrice: Unit price BEFORE any discount, exactly as shown in the invoice column
+- discountPercentage: Discount percentage exactly as shown (0 if no discount, ~ if column missing)
+- unitPrice: Final unit price AFTER discount, exactly as shown in the invoice column
+- totalPrice: Line total exactly as shown in the invoice column
 - itemDate: YYYY-MM-DD if different from invoice date, otherwise ~
 - workOrder: "OT-xxxx" format from "Obra:" references, otherwise ~
 - description: Brief notes, otherwise ~
 - lineNumber: Visible line number, otherwise ~
+
+CRITICAL PRICE EXTRACTION RULES:
+- COPY prices exactly from invoice columns - DO NOT calculate or modify them
+- If invoice shows separate columns for "PVP", "Dto%", "Precio Final", "Total": copy each exactly
+- If a price column shows 0.00 or is empty: use 0.00
+- If a price column shows a dash (-) or is blank: use 0.00
+- If entire price column is missing from the invoice: use 0.00 for all items (not ~)
+- NEVER use ~ for any price values - always use 0.00 for missing/zero prices
+- NEVER calculate listPrice from unitPrice, NEVER calculate unitPrice from totalPrice
+- If prices don't make mathematical sense: still extract exactly as shown
+- For quantity: if empty or shows 0, use 0.00
 
 CRITICAL NUMBER ACCURACY:
 - Distinguish: 5 vs S, 8 vs B, 0 vs O vs 6
@@ -975,7 +999,7 @@ FORMATTING RULES:
 - NEVER include | or newlines within field values
 - NEVER output incomplete lines - all fields required
 
-EXAMPLE OUTPUT:
+EXAMPLE OUTPUT (extract exactly as shown, no calculations):
 HEADER|FAC-2024-001|2024-01-15|1250.50
 PROVIDER|ACME S.L.|A12345678|info@acme.com|+34912345678|Calle Principal 123, Madrid
 ITEM|Cemento Portland|CEM001|true|10.00|28.33|10.00|25.50|255.00|~|OT-4077|Cemento gris 50kg|1
