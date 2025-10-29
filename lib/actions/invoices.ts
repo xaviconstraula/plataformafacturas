@@ -3364,7 +3364,7 @@ async function processBatchInBackground(files: File[], userId: string) {
                 try {
                     uploaded = await gemini.files.upload({
                         file: jsonlPath,
-                        config: { displayName: `invoices-${Date.now()}-${index}`, mimeType: 'application/jsonl' }
+                        config: { displayName: `invoices-${Date.now()}-${index}`, mimeType: 'application/json' }
                     }) as unknown as { name?: string; id?: string };
                     break;
                 } catch (error: unknown) {
