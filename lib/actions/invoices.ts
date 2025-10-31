@@ -197,8 +197,28 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
         if (value === undefined || value === null) return undefined;
         const trimmed = value.trim();
         if (trimmed === '~' || trimmed === '') return undefined;
-        const num = parseFloat(trimmed);
-        return isNaN(num) ? undefined : num;
+
+        // Handle Spanish negative notation: trailing dash means negative (e.g., "74,40-" → -74.40)
+        let isNegative = false;
+        let cleanedValue = trimmed;
+
+        // Check for trailing dash (Spanish negative notation)
+        if (cleanedValue.endsWith('-')) {
+            isNegative = true;
+            cleanedValue = cleanedValue.slice(0, -1).trim();
+        }
+
+        // Check for leading minus sign (standard notation)
+        if (cleanedValue.startsWith('-')) {
+            isNegative = true;
+            cleanedValue = cleanedValue.slice(1).trim();
+        }
+
+        const num = parseFloat(cleanedValue);
+        if (isNaN(num)) return undefined;
+
+        // Apply negative sign if detected
+        return isNegative ? -Math.abs(num) : Math.abs(num);
     };
 
     const parseBoolean = (value: string): boolean => {
@@ -978,6 +998,15 @@ CRITICAL PRICE EXTRACTION RULES - READ THESE CAREFULLY:
 - NEVER calculate listPrice from unitPrice, NEVER calculate unitPrice from totalPrice
 - If prices don't make mathematical sense: still extract exactly as shown
 - For quantity: if empty or shows 0, use 0.00
+
+NEGATIVE AMOUNTS (CREDIT NOTES / DEVOLUCIONES):
+- Spanish invoices often show negative amounts with a dash AFTER the number (e.g., "74,40-" means -74.40)
+- IMPORTANT: Convert trailing dash notation to negative numbers: "74,40-" → -74.40
+- Also recognize minus sign BEFORE number: "-74.40" → -74.40
+- Apply the negative sign to: listPrice, unitPrice, totalPrice (all price fields when amount is negative)
+- NEVER ignore the trailing dash - it is critical to identify credit notes and returns
+- If totalAmount in invoice is negative: it is a CREDIT NOTE (devolución/nota de crédito)
+- Extract negative values exactly as shown, then convert to proper negative numbers with minus sign
 
 EXPLICIT PRICE FIELD REQUIREMENTS:
 - listPrice: The original/base price before any discounts are applied
