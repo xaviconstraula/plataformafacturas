@@ -953,19 +953,24 @@ LINE ITEMS (extract EXACTLY what you see in the invoice - NO calculations or cor
 - materialName: Descriptive product/service name exactly as written
 - materialCode: Reference code from "Código/Ref/Artículo" column, use ~ if missing or empty
 - isMaterial: true for physical goods, false for services/fees
-- quantity: Units ordered exactly as shown (use ~ if missing, don't default to 1)
-- listPrice: Unit price BEFORE any discount, exactly as shown in the invoice column
-- discountPercentage: Discount percentage exactly as shown (0 if no discount, ~ if column missing)
-- unitPrice: Final unit price AFTER discount, exactly as shown in the invoice column
-- totalPrice: Line total exactly as shown in the invoice column
+- quantity: Units ordered exactly as shown (use 0.00 if missing, don't default to 1)
+- listPrice: Unit price BEFORE any discount, exactly as shown in "Precio Base", "PVP", or "Importe" columns
+- discountPercentage: Discount percentage exactly as shown in "Dto%", "Descuento", or "% Dto" columns
+- unitPrice: Final unit price AFTER discount, exactly as shown in "Precio Final", "Precio", or "P.U." columns
+- totalPrice: Line total exactly as shown in "Total", "Importe", or "Total Linea" columns
 - itemDate: YYYY-MM-DD if different from invoice date, otherwise ~
 - workOrder: "OT-xxxx" format from "Obra:" references, otherwise ~
 - description: Brief notes, otherwise ~
 - lineNumber: Visible line number, otherwise ~
 
-CRITICAL PRICE EXTRACTION RULES:
+CRITICAL PRICE EXTRACTION RULES - READ THESE CAREFULLY:
 - COPY prices exactly from invoice columns - DO NOT calculate or modify them
-- If invoice shows separate columns for "PVP", "Dto%", "Precio Final", "Total": copy each exactly
+- ALWAYS look for these specific column headers and extract their values:
+  * "Precio Base" or "PVP" → listPrice
+  * "% Dto" or "Dto%" or "Descuento %" → discountPercentage
+  * "Precio Final" or "Precio" or "P.U." → unitPrice
+  * "Total" or "Importe" or "Total Línea" → totalPrice
+- If invoice shows separate columns for "Precio Base", "Dto%", "Precio Final": copy each exactly
 - If a price column shows 0.00 or is empty: use 0.00
 - If a price column shows a dash (-) or is blank: use 0.00
 - If entire price column is missing from the invoice: use 0.00 for all items (not ~)
@@ -973,6 +978,12 @@ CRITICAL PRICE EXTRACTION RULES:
 - NEVER calculate listPrice from unitPrice, NEVER calculate unitPrice from totalPrice
 - If prices don't make mathematical sense: still extract exactly as shown
 - For quantity: if empty or shows 0, use 0.00
+
+EXPLICIT PRICE FIELD REQUIREMENTS:
+- listPrice: The original/base price before any discounts are applied
+- discountPercentage: The discount percentage (e.g., 10.00 for 10%, 0.00 if no discount)
+- unitPrice: The final price after discount has been applied (listPrice - discount)
+- These three fields MUST be extracted independently - do not try to calculate one from the others
 
 CRITICAL NUMBER ACCURACY:
 - Distinguish: 5 vs S, 8 vs B, 0 vs O vs 6
@@ -987,11 +998,12 @@ MANDATORY STRUCTURE (NEVER omit any line type):
 Line 1 - HEADER (exactly 4 fields): HEADER|invoiceCode|issueDate|totalAmount
 Line 2 - PROVIDER (exactly 6 fields): PROVIDER|name|cif|email|phone|address  
 Lines 3+ - ITEMS (exactly 13 fields each): ITEM|materialName|materialCode|isMaterial|quantity|listPrice|discountPercentage|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber
+  * Field positions: 1=materialName, 2=materialCode, 3=isMaterial, 4=quantity, 5=listPrice, 6=discountPercentage, 7=unitPrice, 8=totalPrice, 9=itemDate, 10=workOrder, 11=description, 12=lineNumber
 
 FORMATTING RULES:
 - Output ONLY the structured lines, no explanations
 - Each line starts with HEADER, PROVIDER, or ITEM
-- EXACTLY the specified field counts (4 for HEADER, 6 for PROVIDER, 11 for ITEM)
+- EXACTLY the specified field counts (4 for HEADER, 6 for PROVIDER, 13 for ITEM)
 - Use | between fields (no spaces around pipes)
 - Use ~ for missing fields (no spaces around tildes)
 - No thousand separators, no commas as decimals
@@ -1004,6 +1016,10 @@ HEADER|FAC-2024-001|2024-01-15|1250.50
 PROVIDER|ACME S.L.|A12345678|info@acme.com|+34912345678|Calle Principal 123, Madrid
 ITEM|Cemento Portland|CEM001|true|10.00|28.33|10.00|25.50|255.00|~|OT-4077|Cemento gris 50kg|1
 ITEM|Transporte|~|false|1.00|995.50|0.00|995.50|995.50|2024-01-15|~|Envío especial|2
+
+FIELD EXPLANATION FOR EXAMPLE ITEMS:
+- Cemento Portland: listPrice=28.33 (base price), discountPercentage=10.00 (10% off), unitPrice=25.50 (final price), totalPrice=255.00 (10×25.50)
+- Transporte: listPrice=995.50 (base price), discountPercentage=0.00 (no discount), unitPrice=995.50 (same as base), totalPrice=995.50 (1×995.50)
 
 REMEMBER: PROVIDER line is MANDATORY - always include it even with partial data.`;
 }

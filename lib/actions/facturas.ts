@@ -473,6 +473,8 @@ export async function getInvoiceDetails(id: string) {
             items: invoice.items.map(item => ({
                 id: item.id,
                 quantity: item.quantity.toNumber(),
+                listPrice: item.listPrice?.toNumber() ?? null,
+                discountPercentage: item.discountPercentage?.toNumber() ?? null,
                 unitPrice: item.unitPrice.toNumber(),
                 totalPrice: item.totalPrice.toNumber(),
                 workOrder: item.workOrder,

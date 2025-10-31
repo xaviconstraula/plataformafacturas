@@ -111,7 +111,6 @@ export function InvoiceDetails({ invoice }: InvoiceDetailsProps) {
                     <th className="p-3 text-right text-sm font-medium">Precio Base</th>
                     <th className="p-3 text-right text-sm font-medium">% Dto.</th>
                     <th className="p-3 text-right text-sm font-medium">Precio Final</th>
-                    <th className="p-3 text-right text-sm font-medium">Total</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -127,7 +126,6 @@ export function InvoiceDetails({ invoice }: InvoiceDetailsProps) {
                       <td className="p-3 text-right">{formatCurrency(item.listPrice ?? item.unitPrice)}</td>
                       <td className="p-3 text-right">{item.discountPercentage !== undefined && item.discountPercentage !== null ? `${item.discountPercentage.toFixed(2)}%` : '0.00%'}</td>
                       <td className="p-3 text-right">{formatCurrency(item.unitPrice)}</td>
-                      <td className="p-3 text-right font-medium">{formatCurrency(item.totalPrice)}</td>
                     </tr>
                   ))}
                 </tbody>
