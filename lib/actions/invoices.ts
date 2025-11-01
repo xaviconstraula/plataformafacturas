@@ -184,6 +184,7 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
     let invoiceCode: string | undefined = undefined;
     let issueDate: string | undefined = undefined;
     let totalAmount: number | undefined = undefined;
+    let invoiceWorkOrder: string | undefined = undefined; // Extract OT once from HEADER
     let provider: ExtractedPdfData['provider'] | null = null;
     const items: ExtractedPdfItemData[] = [];
 
@@ -234,7 +235,7 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
         const recordType = parts[0]?.toUpperCase();
 
         if (recordType === 'HEADER') {
-            // HEADER|invoiceCode|issueDate|totalAmount
+            // HEADER|invoiceCode|issueDate|totalAmount|workOrder (5 fields)
             if (parts.length < 4) {
                 if (!suppressWarnings) console.warn(`Invalid HEADER line: ${trimmedLine}`);
                 continue;
@@ -242,6 +243,8 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
             invoiceCode = parseField(parts[1]);
             issueDate = parseField(parts[2]);
             totalAmount = parseNumber(parts[3]);
+            // Extract work order (OT) if present (field 5, optional for backward compatibility)
+            invoiceWorkOrder = parts.length >= 5 ? parseField(parts[4]) : undefined;
         } else if (recordType === 'PROVIDER') {
             // PROVIDER|name|cif|email|phone|address
             if (parts.length < 6) {
@@ -256,16 +259,17 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
                 address: parseField(parts[5])
             };
         } else if (recordType === 'ITEM') {
-            // ITEM|materialName|materialCode|isMaterial|quantity|listPrice|discountPercentage|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber
-            // Need 13 parts total (ITEM + 12 fields)
-            if (parts.length !== 13) {
+            // NEW FORMAT (12 fields + ITEM = 13 parts): ITEM|materialName|materialCode|isMaterial|quantity|listPrice|discountPercentage|unitPrice|totalPrice|itemDate|description|lineNumber
+            // OLD FORMAT (12 fields + workOrder + ITEM = 14 parts): ITEM|...|itemDate|workOrder|description|lineNumber (for backward compatibility)
+            // Accept 12-14 parts to handle variations (lineNumber optional in both formats)
+            if (parts.length < 12 || parts.length > 14) {
                 if (!suppressWarnings) {
-                    console.warn(`Malformed ITEM line (expected exactly 13 parts, got ${parts.length}): ${trimmedLine}`);
+                    console.warn(`Malformed ITEM line (expected 12-14 parts, got ${parts.length}): ${trimmedLine}`);
                     console.warn(`Parts: ${parts.map((p, i) => `${i}:${p}`).join(', ')}`);
-                    if (parts.length < 13) {
-                        console.warn(`This likely indicates Gemini's response was truncated. Consider processing this invoice manually.`);
+                    if (parts.length < 12) {
+                        console.warn(`This likely indicates Gemini's response was truncated or missing required fields (especially quantity). Consider processing this invoice manually.`);
                     } else {
-                        console.warn(`This indicates extra fields or parsing issues. Extra parts: ${parts.slice(13).join(', ')}`);
+                        console.warn(`This indicates extra fields or parsing issues. Extra parts: ${parts.slice(14).join(', ')}`);
                     }
                 }
                 continue;
@@ -277,6 +281,24 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
             let discountPercentage = parseNumber(parts[6]);
             let unitPrice = parseNumber(parts[7]);
             let totalPrice = parseNumber(parts[8]);
+
+            // Parse fields based on format detection
+            const rawItemDate = parseField(parts[9]);
+            let rawDescription: string | undefined;
+            let rawLineNumber: number | undefined;
+
+            // Detect format: if parts.length === 14, it's old format with workOrder field
+            // If parts.length === 13 or 12, it's new format without workOrder
+            if (parts.length === 14) {
+                // Old format: ITEM|...|itemDate|workOrder|description|lineNumber
+                // Skip parts[10] (workOrder) since we now get it from HEADER
+                rawDescription = parseField(parts[11]);
+                rawLineNumber = parseNumber(parts[12]);
+            } else {
+                // New format: ITEM|...|itemDate|description|lineNumber
+                rawDescription = parseField(parts[10]);
+                rawLineNumber = parts.length === 13 ? parseNumber(parts[11]) : undefined;
+            }
 
             if (!materialName) {
                 if (!suppressWarnings) console.warn(`Missing required ITEM fields: ${trimmedLine}`);
@@ -351,11 +373,31 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
                 discountPercentage,
                 unitPrice,
                 totalPrice,
-                itemDate: parseField(parts[9]),
-                workOrder: parseField(parts[10]),
-                description: parseField(parts[11]),
-                lineNumber: parseNumber(parts[12])
+                itemDate: rawItemDate,
+                workOrder: invoiceWorkOrder, // Use OT from HEADER (applies to all items)
+                description: rawDescription,
+                lineNumber: rawLineNumber
             });
+        }
+    }
+
+    // � POST-PROCESSING: Detect vertical price displacement issues (logging only)
+    // This helps identify cases where AI shifts prices from row N+1 to row N
+    if (!suppressWarnings && items.length > 1) {
+        for (let i = 0; i < items.length - 1; i++) {
+            const currentItem = items[i];
+            const nextItem = items[i + 1];
+
+            // Calculate what the totalPrice should be based on quantity × unitPrice
+            const currentExpectedTotal = Number((currentItem.quantity * currentItem.unitPrice).toFixed(2));
+            const currentTotalDiff = Math.abs(currentExpectedTotal - currentItem.totalPrice);
+
+            // Check if math doesn't work (potential displacement)
+            if (currentTotalDiff > 0.02 && (currentItem.totalPrice ?? 0) > 0) {
+                console.warn(`⚠️ [Price Warning] Row ${i + 1} ('${currentItem.materialName.substring(0, 40)}'):`);
+                console.warn(`   qty=${currentItem.quantity} × unitPrice=${currentItem.unitPrice} = ${currentExpectedTotal} but totalPrice=${currentItem.totalPrice}`);
+                console.warn(`   Difference: ${currentTotalDiff.toFixed(2)} (might indicate price displacement from adjacent rows)`);
+            }
         }
     }
 
@@ -968,22 +1010,97 @@ INVOICE HEADER:
 - Invoice code/number (from top of document)
 - Issue date in YYYY-MM-DD format
 - Total amount (sum of all line items)
+- Work Order (OT): Extract ONCE at invoice level (applies to ALL items)
+  * Common formats: "OT-1234", "OT.4129", "OT4129/002041", "OT:4129"
+  * Look for: "Obra:", "OT:", "S/REF:", "ALBARAN" section headers
+  * Normalize: keep separators (OT4129/002041 or OT-4129)
+  * If no OT found or multiple different OTs, use ~
 
-LINE ITEMS (extract EXACTLY what you see in the invoice - NO calculations or corrections):
-- materialName: Descriptive product/service name exactly as written
-- materialCode: Reference code from "Código/Ref/Artículo" column, use ~ if missing or empty
-- isMaterial: true for physical goods, false for services/fees
-- quantity: Units ordered exactly as shown (use 0.00 if missing, don't default to 1)
-- listPrice: Unit price BEFORE any discount, exactly as shown in "Precio Base", "PVP", or "Importe" columns
-- discountPercentage: Discount percentage exactly as shown in "Dto%", "Descuento", or "% Dto" columns
-- unitPrice: Final unit price AFTER discount, exactly as shown in "Precio Final", "Precio", or "P.U." columns
-- totalPrice: Line total exactly as shown in "Total", "Importe", or "Total Linea" columns
-- itemDate: YYYY-MM-DD if different from invoice date, otherwise ~
-- workOrder: "OT-xxxx" format from "Obra:" references, otherwise ~
-- description: Brief notes, otherwise ~
-- lineNumber: Visible line number, otherwise ~
+LINE ITEMS - CRITICAL TABLE STRUCTURE RULES:
+⚠️ INVOICE TABLES ARE GRIDS - Each row is independent, each cell must align with its column header
+
+🚨 MANDATORY OUTPUT FORMAT FOR EACH ITEM (13 fields, in EXACT order):
+ITEM|materialName|materialCode|isMaterial|quantity|listPrice|discountPercentage|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber
+
+🔢 CRITICAL: You MUST output EXACTLY 13 fields per ITEM line (including ITEM prefix = 13 total parts)
+   Position 1: materialName (text)
+   Position 2: materialCode (text or ~)
+   Position 3: isMaterial (true/false)
+   Position 4: quantity (number - NEVER skip this field!)
+   Position 5: listPrice (number)
+   Position 6: discountPercentage (number)
+   Position 7: unitPrice (number)
+   Position 8: totalPrice (number)
+   Position 9: itemDate (date or ~)
+   Position 10: workOrder (text or ~)
+   Position 11: description (text or ~)
+   Position 12: lineNumber (number or ~)
+
+🚨 CRITICAL CELL-BY-CELL EXTRACTION PROCESS:
+When you see a table row, you must extract data by following these steps EXACTLY:
+
+STEP 1: Identify the row you're processing (e.g., Row 1, Row 2, Row 3)
+STEP 2: Read material name/code from the LEFTMOST columns of THAT SPECIFIC ROW
+STEP 3: For THAT SAME ROW, look for the CANTIDAD/UNIDADES/Uds column → extract as QUANTITY (field 4)
+STEP 4: For THAT SAME ROW, move your "eye" horizontally to find PRECIO column → extract as listPrice (field 5)
+STEP 5: For THAT SAME ROW, find % DTO/DESCUENTO column → extract as discountPercentage (field 6)
+STEP 6: For THAT SAME ROW, find PRECIO FINAL/P.U. column → extract as unitPrice (field 7)
+STEP 7: For THAT SAME ROW, find TOTAL/IMPORTE column → extract as totalPrice (field 8)
+STEP 8: If ANY cell is blank/empty in that row → write 0.00 for that numeric field
+STEP 9: NEVER look at cells from different rows to "fill in" missing values
+STEP 10: VERIFY you have all 13 fields before outputting the line
+
+🔍 VISUAL READING TECHNIQUE:
+Imagine you're using a ruler placed HORIZONTALLY across the page.
+- Place the ruler on Row 1 → read ALL values from Row 1 only
+- Move the ruler down to Row 2 → read ALL values from Row 2 only
+- If a cell under the ruler is BLANK → that value is 0.00
+- NEVER slide the ruler up/down while reading a single row
+
+TABLE EXTRACTION PROCESS (follow in order):
+1. IDENTIFY column headers FIRST: CÓDIGO, CANTIDAD/Uds, CONCEPTO/DESCRIPCIÓN, PRECIO/P.BASE, % DTO, P.U./PRECIO FINAL, TOTAL/IMPORTE
+2. For EACH row in the table:
+   a. Read the material name/code from leftmost columns (fields 1-2)
+   b. Find CANTIDAD/Uds column in that row → extract as quantity (field 4) - DO NOT SKIP!
+   c. Look DIRECTLY ACROSS in the same horizontal row for each price column
+   d. If a cell in that row is BLANK/EMPTY → use 0.00 for that field
+   e. NEVER look up or down to other rows for missing values
+   f. Count your fields - you must have EXACTLY 13 total (12 after ITEM prefix)
+3. Move to the next row and repeat
+
+FIELD EXTRACTION GUIDE (extract in this exact order):
+1. materialName: Descriptive product/service name exactly as written from "CONCEPTO/DESCRIPCIÓN" column
+2. materialCode: Reference code from "CÓDIGO/REF/ARTÍCULO" column (use ~ if column missing/empty)
+3. isMaterial: true for physical goods, false for services/fees
+4. quantity: ⚠️ CRITICAL - Units from "CANTIDAD/Uds/UNIDADES" column (use 0.00 if missing, NEVER skip this field!)
+5. listPrice: Base unit price from "PRECIO BASE/PVP/PRECIO" column (use 0.00 if missing)
+6. discountPercentage: Discount % from "% DTO/DESCUENTO %/DTO%" column (use 0.00 if missing or "NETO")
+7. unitPrice: Final unit price from "PRECIO FINAL/P.U./PRECIO" column (use 0.00 if missing)
+8. totalPrice: Line total from "TOTAL/IMPORTE/TOTAL LÍNEA" column (use 0.00 if missing)
+9. itemDate: Date if different from invoice date in YYYY-MM-DD format (use ~ if same as invoice date)
+10. workOrder: Use ~ (OT extracted at HEADER level)
+11. description: Brief additional notes (use ~ if none)
+12. lineNumber: Visible line number if present (use ~ if not visible)
+
+⚠️ NOTE: Work Order (OT) is extracted ONCE at the HEADER level (field 4) and applies to ALL items.
+Do NOT extract or include OT in individual ITEM lines - this saves tokens!
+
+⚠️ VISUAL EXAMPLE - How to read a table with blank cells:
+┌──────┬─────────┬──────────────┬────────┬──────┬────────┐
+│ CODE │ QUANTITY│ DESCRIPTION  │ PRECIO │ %DTO │ IMPORTE│
+├──────┼─────────┼──────────────┼────────┼──────┼────────┤
+│ 001  │ 1.00    │ Item A       │ (blank)│(blank)│(blank)│  ← Output: 0.00|0.00|0.00
+│ 002  │ 6.00    │ Item B       │ 3.000  │ NETO │ 18.00 │  ← Output: 3.00|0.00|18.00
+└──────┴─────────┴──────────────┴────────┴──────┴────────┘
+
+In this example:
+- Row 1 (Item A) has blank price cells → Extract as: listPrice=0.00, discountPercentage=0.00, unitPrice=0.00, totalPrice=0.00
+- Row 2 (Item B) has actual values → Extract as: listPrice=3.00, discountPercentage=0.00, unitPrice=3.00, totalPrice=18.00
+- DO NOT mix: Item A must output zeros, even though Item B below has values
 
 CRITICAL PRICE EXTRACTION RULES - READ THESE CAREFULLY:
+⚠️ RULE #1 - NO VERTICAL DISPLACEMENT: When you see a blank price cell, write 0.00 for that exact cell. DO NOT grab the value from the row below or above. Each row is independent.
+
 - COPY prices exactly from invoice columns - DO NOT calculate or modify them
 - ALWAYS look for these specific column headers and extract their values:
   * "Precio Base" or "PVP" → listPrice
@@ -999,6 +1116,16 @@ CRITICAL PRICE EXTRACTION RULES - READ THESE CAREFULLY:
 - If prices don't make mathematical sense: still extract exactly as shown
 - For quantity: if empty or shows 0, use 0.00
 
+CRITICAL: PREVENT VERTICAL DATA DISPLACEMENT:
+- Each invoice line is a HORIZONTAL row - NEVER mix data from different rows
+- If a line item has blank/empty price cells, use 0.00 for those specific cells
+- DO NOT "borrow" or "shift" price values from the row below or above
+- Match each price value to its EXACT horizontal row by the line's material name/code
+- If you see "PACK 6 UDS SILICONA FUNGICIDA BLANCA" with blank prices, output zeros for that line
+- If the NEXT line "PATTEX SILICON 5 SILICONA BLANCA" has prices 3,000 NETO 18,00, those belong ONLY to that line
+- VERIFY: Material name in column 1 must align horizontally with its prices in other columns
+- When in doubt about which row a price belongs to: use the material description as anchor point
+
 NEGATIVE AMOUNTS (CREDIT NOTES / DEVOLUCIONES):
 - Spanish invoices often show negative amounts with a dash AFTER the number (e.g., "74,40-" means -74.40)
 - IMPORTANT: Convert trailing dash notation to negative numbers: "74,40-" → -74.40
@@ -1007,6 +1134,8 @@ NEGATIVE AMOUNTS (CREDIT NOTES / DEVOLUCIONES):
 - NEVER ignore the trailing dash - it is critical to identify credit notes and returns
 - If totalAmount in invoice is negative: it is a CREDIT NOTE (devolución/nota de crédito)
 - Extract negative values exactly as shown, then convert to proper negative numbers with minus sign
+- CRITICAL: If ANY product price is negative, output it as negative in the structured format (e.g., -74.40 not 74.40)
+- For credit notes: ALL price fields (listPrice, unitPrice, totalPrice) should be negative if the line item represents a return/credit
 
 EXPLICIT PRICE FIELD REQUIREMENTS:
 - listPrice: The original/base price before any discounts are applied
@@ -1024,15 +1153,16 @@ OUTPUT FORMAT - STRICT REQUIREMENTS:
 Use pipe (|) as delimiter, tilde (~) for missing values.
 
 MANDATORY STRUCTURE (NEVER omit any line type):
-Line 1 - HEADER (exactly 4 fields): HEADER|invoiceCode|issueDate|totalAmount
+Line 1 - HEADER (exactly 5 fields): HEADER|invoiceCode|issueDate|totalAmount|workOrder
 Line 2 - PROVIDER (exactly 6 fields): PROVIDER|name|cif|email|phone|address  
-Lines 3+ - ITEMS (exactly 13 fields each): ITEM|materialName|materialCode|isMaterial|quantity|listPrice|discountPercentage|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber
-  * Field positions: 1=materialName, 2=materialCode, 3=isMaterial, 4=quantity, 5=listPrice, 6=discountPercentage, 7=unitPrice, 8=totalPrice, 9=itemDate, 10=workOrder, 11=description, 12=lineNumber
+Lines 3+ - ITEMS (exactly 12 fields each): ITEM|materialName|materialCode|isMaterial|quantity|listPrice|discountPercentage|unitPrice|totalPrice|itemDate|description|lineNumber
+  * Field positions: 1=materialName, 2=materialCode, 3=isMaterial, 4=quantity, 5=listPrice, 6=discountPercentage, 7=unitPrice, 8=totalPrice, 9=itemDate, 10=description, 11=lineNumber
+  * NOTE: workOrder is NOT in ITEM lines - it's extracted once in HEADER (field 5)
 
 FORMATTING RULES:
 - Output ONLY the structured lines, no explanations
 - Each line starts with HEADER, PROVIDER, or ITEM
-- EXACTLY the specified field counts (4 for HEADER, 6 for PROVIDER, 13 for ITEM)
+- EXACTLY the specified field counts (5 for HEADER, 6 for PROVIDER, 12 for ITEM)
 - Use | between fields (no spaces around pipes)
 - Use ~ for missing fields (no spaces around tildes)
 - No thousand separators, no commas as decimals
@@ -1041,16 +1171,76 @@ FORMATTING RULES:
 - NEVER output incomplete lines - all fields required
 
 EXAMPLE OUTPUT (extract exactly as shown, no calculations):
-HEADER|FAC-2024-001|2024-01-15|1250.50
+HEADER|FAC-2024-001|2024-01-15|1250.50|OT-4077
 PROVIDER|ACME S.L.|A12345678|info@acme.com|+34912345678|Calle Principal 123, Madrid
-ITEM|Cemento Portland|CEM001|true|10.00|28.33|10.00|25.50|255.00|~|OT-4077|Cemento gris 50kg|1
-ITEM|Transporte|~|false|1.00|995.50|0.00|995.50|995.50|2024-01-15|~|Envío especial|2
+ITEM|Cemento Portland|CEM001|true|10.00|28.33|10.00|25.50|255.00|~|Cemento gris 50kg|1
+ITEM|Transporte|~|false|1.00|995.50|0.00|995.50|995.50|2024-01-15|Envío especial|2
+
+NEGATIVE PRICE EXAMPLE (credit note/devolución):
+HEADER|DEV-2024-002|2024-01-16|-255.00|OT-4077
+PROVIDER|ACME S.L.|A12345678|info@acme.com|+34912345678|Calle Principal 123, Madrid
+ITEM|Cemento Portland|CEM001|true|-10.00|-28.33|10.00|-25.50|-255.00|~|Devolución cemento gris 50kg|1
 
 FIELD EXPLANATION FOR EXAMPLE ITEMS:
+- HEADER: workOrder="OT-4077" applies to ALL items (no need to repeat per item)
 - Cemento Portland: listPrice=28.33 (base price), discountPercentage=10.00 (10% off), unitPrice=25.50 (final price), totalPrice=255.00 (10×25.50)
 - Transporte: listPrice=995.50 (base price), discountPercentage=0.00 (no discount), unitPrice=995.50 (same as base), totalPrice=995.50 (1×995.50)
+- NEGATIVE EXAMPLE: For credit notes, ALL price fields are negative: listPrice=-28.33, unitPrice=-25.50, totalPrice=-255.00
 
-REMEMBER: PROVIDER line is MANDATORY - always include it even with partial data.`;
+🚨 CRITICAL EXAMPLE - Table with BLANK cells (extract row by row):
+┌────────┬──────┬────────────────────────┬────────┬──────┬────────┐
+│ CÓDIGO │ CANT │ CONCEPTO               │ PRECIO │ %DTO │ IMPORTE│
+├────────┼──────┼────────────────────────┼────────┼──────┼────────┤
+│ 001    │ 1.00 │ PACK 6 UDS SILICONA   │ (blank)│(blank)│(blank)│  ← Row 1: ALL prices are blank
+│ 002    │ 6.00 │ PATTEX SILICON        │ 3,000  │ NETO │ 18,00 │  ← Row 2: Has actual prices
+│ 003    │12.00 │ MASCARILLA STEELPRO   │ 0,740  │  25  │  6,66 │  ← Row 3: Has actual prices
+└────────┴──────┴────────────────────────┴────────┴──────┴────────┘
+
+CORRECT extraction (reading horizontally, row by row):
+HEADER|206979|2025-06-30|449.50|OT4129/002041
+PROVIDER|Example S.L.|A12345678|~|~|~
+ITEM|PACK 6 UDS SILICONA|001|true|1.00|0.00|0.00|0.00|0.00|~|~|~
+ITEM|PATTEX SILICON|002|true|6.00|3.00|0.00|3.00|18.00|~|~|~
+ITEM|MASCARILLA STEELPRO|003|true|12.00|0.74|25.00|0.56|6.66|~|~|~
+
+🚨 REAL EXAMPLE - Quantity extraction is MANDATORY:
+Invoice shows: "PS REDUCCION 240 HH COBRE 15x12" → Quantity: 2 → Price: 2,63€ → 78% discount → Total: 1,16€
+
+WRONG extraction (missing quantity field - DON'T DO THIS):
+❌ ITEM|PS REDUCCION 240 HH COBRE 15x12|1251097152|true|2.63|78.00|0.58|1.16|~|~|~
+   This is WRONG because: quantity (2) was skipped, and all values shifted left!
+
+CORRECT extraction (all 12 fields in proper order):
+✅ ITEM|PS REDUCCION 240 HH COBRE 15x12|1251097152|true|2.00|2.63|78.00|0.58|1.16|~|~|~
+   Field 4 (quantity) = 2.00 ← NEVER skip this!
+   Field 5 (listPrice) = 2.63
+   Field 6 (discountPercentage) = 78.00
+   Field 7 (unitPrice) = 0.58 (calculated: 2.63 × (1 - 0.78) = 0.58)
+   Field 8 (totalPrice) = 1.16 (calculated: 2 × 0.58 = 1.16)
+
+REMEMBER: ALWAYS count your fields - each ITEM line must have EXACTLY 12 fields after "ITEM|"
+
+CORRECT extraction (reading horizontally, row by row):
+HEADER|206979|2025-06-30|449.50|OT4129/002041
+PROVIDER|SALTOKI CORNELLÀ, S.A.|A64207400|cornella@saltoki.es|+34932968117|Pg Famades, C/ Silici 17
+ITEM|PACK 6 UDS SILICONA|001|true|1.00|0.00|0.00|0.00|0.00|~|~|~
+ITEM|PATTEX SILICON|002|true|6.00|3.00|0.00|3.00|18.00|~|~|~
+ITEM|MASCARILLA STEELPRO|003|true|12.00|0.74|25.00|0.56|6.66|~|~|~
+
+❌ WRONG extraction (DO NOT DO THIS - shifting prices from row below):
+ITEM|PACK 6 UDS SILICONA|001|true|1.00|3.00|0.00|3.00|18.00|~|~|~  ← ERROR: borrowed prices from row 2
+ITEM|PATTEX SILICON|002|true|6.00|0.74|25.00|0.56|6.66|~|~|~      ← ERROR: borrowed prices from row 3
+ITEM|MASCARILLA STEELPRO|003|true|12.00|...                        ← ERROR: missing prices
+
+REMEMBER: 
+- Read each row independently
+- If a cell is blank, use 0.00
+- Never take values from a different row
+- Work Order (OT) goes in HEADER only, not in ITEM lines
+- PROVIDER line is MANDATORY - always include it even with partial data
+- OUTPUT ITEMS IN THE EXACT SAME ORDER they appear on the invoice (top to bottom, left to right)
+- Do NOT reorder items alphabetically, by price, or by any other criteria
+- Maintain the original sequence from the document to preserve invoice structure`;
 }
 
 async function callPdfExtractAPI(file: File, batchErrors: BatchErrorDetail[]): Promise<CallPdfExtractAPIResponse> {
@@ -3255,6 +3445,31 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
                 }
             }
 
+            // ✅ Validate totals: Sum of all item totals should match invoice totalAmount
+            const calculatedTotal = extractedData.items.reduce((sum, item) => {
+                const totalPrice = typeof item.totalPrice === 'number' && !isNaN(item.totalPrice) ? item.totalPrice : 0;
+                return sum + totalPrice;
+            }, 0);
+
+            // Apply 21% IVA to get the final total (same calculation as UI)
+            const calculatedTotalWithIVA = calculatedTotal * 1.21;
+
+            // Check if calculated total matches invoice total (allow small rounding differences)
+            const totalDifference = Math.abs(calculatedTotalWithIVA - extractedData.totalAmount);
+            if (totalDifference > 0.01) { // More than 1 cent difference
+                console.error(`[saveExtractedInvoice][Invoice ${extractedData.invoiceCode}] Total mismatch detected (file: ${fileName ?? "unknown"}):`);
+                console.error(`  - Calculated total (items + IVA): €${calculatedTotalWithIVA.toFixed(2)}`);
+                console.error(`  - Invoice stated total: €${extractedData.totalAmount.toFixed(2)}`);
+                console.error(`  - Difference: €${totalDifference.toFixed(2)}`);
+                console.error(`  - Items processed: ${itemsProcessed}, Items skipped: ${itemsSkipped}`);
+
+                // Log item details for debugging
+                extractedData.items.forEach((item, index) => {
+                    console.error(`    Item ${index + 1}: ${item.materialName} - Qty: ${item.quantity}, Total: €${item.totalPrice?.toFixed(2) ?? 'N/A'}`);
+                });
+
+                throw new Error(`Total de factura no coincide: calculado €${calculatedTotalWithIVA.toFixed(2)}, factura €${extractedData.totalAmount.toFixed(2)} (diferencia €${totalDifference.toFixed(2)})`);
+            }
 
             return {
                 success: true,
@@ -3469,6 +3684,7 @@ async function processBatchInBackground(files: File[], userId: string) {
 
             // Cleanup temp file in background (don't block loop)
             fs.promises.unlink(jsonlPath).catch(() => undefined);
+
         }
     } catch (err) {
         console.error('[processBatchInBackground] Failed to enqueue batches', err);
@@ -3502,9 +3718,12 @@ async function processBatchInBackground(files: File[], userId: string) {
                     try {
                         const filePath = path.join(tmpDir, file);
                         const stats = await fs.promises.stat(filePath);
-                        if (stats.isFile() && stats.mtime.getTime() < oneHourAgo) {
-                            await fs.promises.unlink(filePath);
-                            console.log(`[processBatchInBackground] Cleaned up old tmp file: ${file}`);
+                        //do not delete in development to allow inspection
+                        if (process.env.NODE_ENV !== 'development') {
+                            if (stats.isFile() && stats.mtime.getTime() < oneHourAgo) {
+                                await fs.promises.unlink(filePath);
+                                console.log(`[processBatchInBackground] Cleaned up old tmp file: ${file}`);
+                            }
                         }
                     } catch { }
                 }
@@ -3674,7 +3893,7 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
 
             // Clean up the downloaded file only if there are no actual errors (i.e., only duplicates or complete success)
             // Keep the file if there are actual errors for debugging
-            if (!processingResult.hasActualErrors) {
+            if (!processingResult.hasActualErrors && process.env.NODE_ENV !== 'development') {
                 try {
                     await fs.promises.unlink(downloadedPath);
                     console.log(`[ingestBatchOutput] Cleaned up downloaded result file: ${downloadedPath} (${processingResult.hasOnlyDuplicates ? 'only duplicates' : 'no errors'})`);
@@ -3722,6 +3941,7 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
         extractedData?: ExtractedPdfData;
         result?: CreateInvoiceResult;
         itemsExtracted?: number;
+        finishReason?: string;
     }
 
     async function processOutputLines(entries: unknown[]): Promise<{ hasActualErrors: boolean; hasOnlyDuplicates: boolean; totalProcessed: number; successCount: number; failedCount: number }> {
@@ -3764,6 +3984,20 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                     const firstCandidate = candidates?.[0];
                     finishReason = firstCandidate?.finishReason as string | undefined;
 
+                    // Check for MAX_TOKENS early - skip processing entirely to avoid wasted effort
+                    if (finishReason === 'MAX_TOKENS') {
+                        const errorMsg = 'Response truncated due to MAX_TOKENS - invoice cannot be processed in batch mode';
+                        console.error(`[ingestBatchOutput] ${errorMsg} for line ${lineIndex} (key: ${key})`);
+                        errors.push({
+                            lineIndex,
+                            error: errorMsg,
+                            context: { custom_id: key, finishReason: 'MAX_TOKENS' }
+                        });
+                        failed++;
+                        actualErrors++;
+                        continue; // Skip processing this invoice entirely
+                    }
+
                     const contentObj = firstCandidate?.content as Record<string, unknown> | undefined;
                     const parts = contentObj?.parts as Array<Record<string, unknown>> | undefined;
                     if (Array.isArray(parts)) {
@@ -3786,33 +4020,6 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                     failed++;
                     actualErrors++;
                     continue;
-                }
-
-                // Check for MAX_TOKENS truncation in batch responses
-                // In batch mode, we CANNOT recover (no access to original PDF)
-                // We MUST reject truncated responses to prevent incomplete data
-                if (finishReason === 'MAX_TOKENS') {
-                    console.error(`[ingestBatchOutput] ${key}: MAX_TOKENS. Invoice CANNOT be processed in batch mode.`);
-
-                    // Try to parse partial data to report how many items we got before truncation
-                    let itemsBeforeTruncation = 0;
-                    try {
-                        const partialData = parseTextBasedExtraction(content, { suppressWarnings: true });
-                        itemsBeforeTruncation = partialData?.items?.length || 0;
-                    } catch { }
-
-                    const errorMsg = itemsBeforeTruncation > 0
-                        ? `MAX_TOKENS (se extrayeron ${itemsBeforeTruncation} items, pero existen más). Esta factura es demasiado larga para la IA.`
-                        : `Invoice truncated due to MAX_TOKENS. Please upload this PDF manually for automatic recovery.`;
-
-                    errors.push({
-                        lineIndex,
-                        error: errorMsg,
-                        context: { custom_id: key, itemsExtracted: itemsBeforeTruncation }
-                    });
-                    failed++;
-                    actualErrors++;
-                    continue; // Skip processing this invoice entirely
                 }
 
                 const extractedData = parseTextBasedExtraction(content);
