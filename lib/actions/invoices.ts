@@ -987,6 +987,9 @@ CRITICAL REQUIREMENTS - READ CAREFULLY:
 - PROVIDER is the invoice issuer (company at top), NOT the client/customer
 - If you cannot find provider info, use reasonable defaults but NEVER omit the PROVIDER line
 - Process ALL line items you can find, even if uncertain about some fields
+- ⚠️ CRITICAL: Extract items in the EXACT ORDER they appear on the invoice (top to bottom, left to right)
+- ⚠️ CRITICAL: Maintain the original sequence - do NOT reorder items alphabetically or by any other criteria
+- ⚠️ CRITICAL: If items span multiple pages, extract them in the order they appear across all pages
 
 PROVIDER (MANDATORY - Invoice Issuer):
 - Company name at TOP of invoice, labeled "Vendedor/Proveedor/Emisor/Emitido por"

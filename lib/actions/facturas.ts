@@ -254,7 +254,11 @@ export async function getInvoices(params: GetInvoicesParams) {
                                         }
                                     }
                                 }
-                            }
+                            },
+                            orderBy: [
+                                { lineNumber: 'asc' },
+                                { createdAt: 'asc' }
+                            ]
                         }
                     } : {
                         items: {
@@ -269,7 +273,11 @@ export async function getInvoices(params: GetInvoicesParams) {
                                 description: true,
                                 lineNumber: true,
                                 itemDate: true,
-                            }
+                            },
+                            orderBy: [
+                                { lineNumber: 'asc' },
+                                { createdAt: 'asc' }
+                            ]
                         }
                     })
                 },
@@ -448,7 +456,11 @@ export async function getInvoiceDetails(id: string) {
                 items: {
                     include: {
                         material: true
-                    }
+                    },
+                    orderBy: [
+                        { lineNumber: 'asc' },
+                        { createdAt: 'asc' }
+                    ]
                 }
             }
         });
