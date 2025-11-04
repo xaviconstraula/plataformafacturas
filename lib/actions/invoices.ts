@@ -161,21 +161,62 @@ const TEXT_FORMAT_DELIMITER = '|';
 const TEXT_FORMAT_NESTED_DELIMITER = ';';
 
 /**
+ * Calculate combined discount from sequential discount string
+ * Examples:
+ * - "50 5" → 52.5% (50% then 5% on discounted price)
+ * - "10" → 10% (single discount)
+ * - "20 10 5" → 32.6% (20%, then 10%, then 5% sequentially)
+ * 
+ * Formula: finalMultiplier = (1-d1) × (1-d2) × (1-d3)...
+ * Combined discount = 1 - finalMultiplier
+ */
+function calculateCombinedDiscount(discountRaw: string): number {
+    const trimmed = discountRaw.trim();
+    if (!trimmed || trimmed === '~' || trimmed.toLowerCase() === 'neto') {
+        return 0;
+    }
+
+    // Extract all numbers from the string (handles "50 5", "50+5", "50-5", etc.)
+    const discounts = trimmed.split(/[\s+\-,;]+/).map(d => parseFloat(d)).filter(d => !isNaN(d) && d > 0);
+
+    if (discounts.length === 0) {
+        return 0;
+    }
+
+    if (discounts.length === 1) {
+        return Math.min(discounts[0], 100); // Cap at 100%
+    }
+
+    // Sequential discounts: multiply (1 - discount/100) for each
+    let multiplier = 1;
+    for (const discount of discounts) {
+        multiplier *= (1 - Math.min(discount, 100) / 100);
+    }
+
+    // Combined discount percentage
+    const combined = (1 - multiplier) * 100;
+    return Number(combined.toFixed(2));
+}
+
+/**
  * Parse text-based invoice extraction response from Gemini
  * 
  * Format:
- * HEADER|invoiceCode|issueDate|totalAmount
+ * HEADER|invoiceCode|issueDate|totalAmount|workOrder (workOrder deprecated, use ~ here)
  * PROVIDER|name|cif|email|phone|address
- * ITEM|materialName|materialCode|isMaterial|quantity|listPrice|discountPercentage|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber
+ * ITEM|materialName|materialCode|isMaterial|quantity|discountRaw|totalPrice|itemDate|workOrder|description|lineNumber
  * ITEM|...
  * 
  * Empty/null fields use: ~
+ * discountRaw can be: "10" (single), "50 5" (sequential 50% then 5%), "NETO" (no discount)
+ * Code calculates: discountPercentage (combined), unitPrice = totalPrice / quantity, listPrice = unitPrice / (1 - discount/100)
+ * workOrder: Specified per-item (field 8), NOT at invoice level (HEADER field 5 should be ~)
  * 
  * Example:
- * HEADER|FAC-2024-001|2024-01-15|1250.50
+ * HEADER|FAC-2024-001|2024-01-15|1512.55|~
  * PROVIDER|ACME S.L.|A12345678|info@acme.com|+34912345678|Calle Principal 123, Madrid
- * ITEM|Cemento Portland|CEM001|true|10.00|28.33|10.00|25.50|255.00|~|OT-4077|Cemento gris 50kg|1
- * ITEM|Transporte|~|false|1.00|995.50|0.00|995.50|995.50|2024-01-15|~|Envío especial|2
+ * ITEM|Cemento Portland|CEM001|true|10.00|50 5|255.00|~|OT-4077|Cemento gris 50kg|1
+ * ITEM|Transporte|~|false|1.00|0|995.50|2024-01-15|OT-4077|Envío especial|2
  */
 function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: boolean }): ExtractedPdfData | null {
     const suppressWarnings = options?.suppressWarnings ?? false;
@@ -184,7 +225,7 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
     let invoiceCode: string | undefined = undefined;
     let issueDate: string | undefined = undefined;
     let totalAmount: number | undefined = undefined;
-    let invoiceWorkOrder: string | undefined = undefined; // Extract OT once from HEADER
+    let invoiceWorkOrder: string | undefined = undefined; // DEPRECATED: OT is now per-item, not invoice-level (kept for backward compatibility)
     let provider: ExtractedPdfData['provider'] | null = null;
     const items: ExtractedPdfItemData[] = [];
 
@@ -259,17 +300,18 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
                 address: parseField(parts[5])
             };
         } else if (recordType === 'ITEM') {
-            // NEW FORMAT (12 fields + ITEM = 13 parts): ITEM|materialName|materialCode|isMaterial|quantity|listPrice|discountPercentage|unitPrice|totalPrice|itemDate|description|lineNumber
-            // OLD FORMAT (12 fields + workOrder + ITEM = 14 parts): ITEM|...|itemDate|workOrder|description|lineNumber (for backward compatibility)
-            // Accept 12-14 parts to handle variations (lineNumber optional in both formats)
-            if (parts.length < 12 || parts.length > 14) {
+            // NEW SIMPLIFIED FORMAT (10 fields + ITEM = 11 parts): ITEM|materialName|materialCode|isMaterial|quantity|discountRaw|totalPrice|itemDate|workOrder|description|lineNumber
+            // discountRaw can be: "10" (single discount), "50 5" (sequential 50% then 5%), "NETO" (no discount)
+            // Code calculates: discountPercentage (combined), unitPrice = totalPrice / quantity, listPrice = unitPrice / (1 - discount/100)
+            // Accept 10-11 parts (lineNumber optional)
+            if (parts.length < 10 || parts.length > 11) {
                 if (!suppressWarnings) {
-                    console.warn(`Malformed ITEM line (expected 12-14 parts, got ${parts.length}): ${trimmedLine}`);
+                    console.warn(`Malformed ITEM line (expected 10-11 parts, got ${parts.length}): ${trimmedLine}`);
                     console.warn(`Parts: ${parts.map((p, i) => `${i}:${p}`).join(', ')}`);
-                    if (parts.length < 12) {
-                        console.warn(`This likely indicates Gemini's response was truncated or missing required fields (especially quantity). Consider processing this invoice manually.`);
+                    if (parts.length < 10) {
+                        console.warn(`This likely indicates Gemini's response was truncated or missing required fields. Consider processing this invoice manually.`);
                     } else {
-                        console.warn(`This indicates extra fields or parsing issues. Extra parts: ${parts.slice(14).join(', ')}`);
+                        console.warn(`This indicates extra fields or parsing issues. Extra parts: ${parts.slice(11).join(', ')}`);
                     }
                 }
                 continue;
@@ -277,91 +319,50 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
 
             const materialName = parseField(parts[1]);
             let quantity = parseNumber(parts[4]);
-            let listPrice = parseNumber(parts[5]);
-            let discountPercentage = parseNumber(parts[6]);
-            let unitPrice = parseNumber(parts[7]);
-            let totalPrice = parseNumber(parts[8]);
+            const discountRaw = parseField(parts[5]) || '0'; // Raw discount text (e.g., "50 5" or "10")
+            let totalPrice = parseNumber(parts[6]);
 
-            // Parse fields based on format detection
-            const rawItemDate = parseField(parts[9]);
-            let rawDescription: string | undefined;
-            let rawLineNumber: number | undefined;
-
-            // Detect format: if parts.length === 14, it's old format with workOrder field
-            // If parts.length === 13 or 12, it's new format without workOrder
-            if (parts.length === 14) {
-                // Old format: ITEM|...|itemDate|workOrder|description|lineNumber
-                // Skip parts[10] (workOrder) since we now get it from HEADER
-                rawDescription = parseField(parts[11]);
-                rawLineNumber = parseNumber(parts[12]);
-            } else {
-                // New format: ITEM|...|itemDate|description|lineNumber
-                rawDescription = parseField(parts[10]);
-                rawLineNumber = parts.length === 13 ? parseNumber(parts[11]) : undefined;
-            }
+            // Parse remaining fields
+            const rawItemDate = parseField(parts[7]);
+            const itemWorkOrder = parseField(parts[8]); // Per-item work order (overrides invoice-level)
+            const rawDescription = parseField(parts[9]);
+            const rawLineNumber = parts.length === 11 ? parseNumber(parts[10]) : undefined;
 
             if (!materialName) {
                 if (!suppressWarnings) console.warn(`Missing required ITEM fields: ${trimmedLine}`);
                 continue;
             }
 
-            // Simple defaults only for required fields
+            // Simple defaults for required fields
             if (quantity === undefined || isNaN(quantity)) {
                 quantity = 0; // Allow 0 but don't default to 1
-            }
-
-            // For prices, use 0 if missing or invalid (don't recalculate)
-            if (listPrice === undefined || isNaN(listPrice)) {
-                listPrice = 0;
-            }
-            if (discountPercentage === undefined || isNaN(discountPercentage)) {
-                discountPercentage = 0;
-            }
-            if (unitPrice === undefined || isNaN(unitPrice)) {
-                unitPrice = 0;
             }
             if (totalPrice === undefined || isNaN(totalPrice)) {
                 totalPrice = 0;
             }
 
-            // Round to 2 decimal places as per business rules
+            // Calculate combined discount percentage from raw discount
+            const discountPercentage = calculateCombinedDiscount(discountRaw);
+
+            // Round to 2 decimal places
             quantity = Number(quantity.toFixed(2));
-            unitPrice = Number(unitPrice.toFixed(2));
             totalPrice = Number(totalPrice.toFixed(2));
-            listPrice = Number(listPrice.toFixed(2));
-            discountPercentage = Number(discountPercentage.toFixed(2));
 
-            // Validate price consistency and detect potential row misalignment (log warnings but don't correct)
-            if (!suppressWarnings) {
-                // Calculate expected total using original precision to avoid rounding errors
-                const rawQuantity = parseNumber(parts[4]) || 0;
-                const rawUnitPrice = parseNumber(parts[7]) || 0;
-                const expectedTotalPrice = Number((rawQuantity * rawUnitPrice).toFixed(2));
-                const totalPriceDiff = Math.abs(totalPrice - expectedTotalPrice);
+            // Calculate unitPrice and listPrice from extracted values
+            // unitPrice = totalPrice / quantity (handle division by zero)
+            let unitPrice = 0;
+            if (quantity !== 0) {
+                unitPrice = Number((totalPrice / quantity).toFixed(2));
+            }
 
-                if (totalPriceDiff > 0.01 && quantity > 0 && unitPrice > 0 && totalPrice > 0) {
-                    console.warn(`[Price Validation] Inconsistent prices for '${materialName}': quantity=${quantity}, unitPrice=${unitPrice}, expected total=${expectedTotalPrice.toFixed(2)}, actual total=${totalPrice}. Difference: ${totalPriceDiff.toFixed(2)}`);
-                }
-
-                if (listPrice > 0 && unitPrice > 0 && discountPercentage === 0) {
-                    const expectedDiscount = ((listPrice - unitPrice) / listPrice) * 100;
-                    if (Math.abs(expectedDiscount) > 1) { // More than 1% difference
-                        console.warn(`[Price Validation] Possible missing discount for '${materialName}': listPrice=${listPrice}, unitPrice=${unitPrice}, expected discount=${expectedDiscount.toFixed(2)}%`);
-                    }
-                }
-
-                if (listPrice > 0 && unitPrice > listPrice) {
-                    console.warn(`[Price Validation] Unit price higher than list price for '${materialName}': listPrice=${listPrice}, unitPrice=${unitPrice}`);
-                }
-
-                // Detect potential row misalignment issues
-                if (quantity === 0 && unitPrice === 0 && totalPrice === 0 && listPrice > 0) {
-                    console.warn(`[Row Alignment] Possible row misalignment for '${materialName}': has listPrice (${listPrice}) but all other prices are 0. This might indicate prices shifted from previous row.`);
-                }
-
-                if (materialName && materialName.length > 50) {
-                    console.warn(`[Data Quality] Unusually long material name for '${materialName.substring(0, 30)}...'. This might indicate concatenated data from multiple rows.`);
-                }
+            // listPrice = unitPrice / (1 - discount/100) (handle 100% discount case)
+            let listPrice = unitPrice; // Default to unitPrice if no discount
+            if (discountPercentage > 0 && discountPercentage < 100) {
+                listPrice = Number((unitPrice / (1 - discountPercentage / 100)).toFixed(2));
+            } else if (discountPercentage === 100) {
+                // For 100% discount, we can't calculate listPrice from unitPrice (would be division by zero)
+                // Keep listPrice = unitPrice (both will be 0 if totalPrice is 0)
+                listPrice = unitPrice;
             }
 
             items.push({
@@ -369,35 +370,16 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
                 materialCode: parseField(parts[2]),
                 isMaterial: parseBoolean(parts[3] || 'true'),
                 quantity,
-                listPrice,
-                discountPercentage,
-                unitPrice,
+                listPrice, // Calculated
+                discountPercentage, // Calculated from discountRaw
+                discountRaw, // Store raw discount text
+                unitPrice, // Calculated
                 totalPrice,
                 itemDate: rawItemDate,
-                workOrder: invoiceWorkOrder, // Use OT from HEADER (applies to all items)
+                workOrder: itemWorkOrder, // Per-item work order (no fallback to invoice-level anymore)
                 description: rawDescription,
                 lineNumber: rawLineNumber
             });
-        }
-    }
-
-    // � POST-PROCESSING: Detect vertical price displacement issues (logging only)
-    // This helps identify cases where AI shifts prices from row N+1 to row N
-    if (!suppressWarnings && items.length > 1) {
-        for (let i = 0; i < items.length - 1; i++) {
-            const currentItem = items[i];
-            const nextItem = items[i + 1];
-
-            // Calculate what the totalPrice should be based on quantity × unitPrice
-            const currentExpectedTotal = Number((currentItem.quantity * currentItem.unitPrice).toFixed(2));
-            const currentTotalDiff = Math.abs(currentExpectedTotal - currentItem.totalPrice);
-
-            // Check if math doesn't work (potential displacement)
-            if (currentTotalDiff > 0.02 && (currentItem.totalPrice ?? 0) > 0) {
-                console.warn(`⚠️ [Price Warning] Row ${i + 1} ('${currentItem.materialName.substring(0, 40)}'):`);
-                console.warn(`   qty=${currentItem.quantity} × unitPrice=${currentItem.unitPrice} = ${currentExpectedTotal} but totalPrice=${currentItem.totalPrice}`);
-                console.warn(`   Difference: ${currentTotalDiff.toFixed(2)} (might indicate price displacement from adjacent rows)`);
-            }
         }
     }
 
@@ -424,7 +406,40 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
         return null;
     }
 
-    // At this point, all required fields are validated
+    // 🚨 POST-VALIDATION: Check for credit note sign consistency
+    // If totalAmount is negative (credit note), check if ALL items are incorrectly positive
+    // Note: Mixed positive/negative items are valid (adjustments, discounts, etc.)
+    if (totalAmount! < 0) {
+        const itemsWithPositivePrices = items.filter(item => item.totalPrice > 0);
+        const itemsWithNegativePrices = items.filter(item => item.totalPrice < 0);
+
+        // Only auto-correct if ALL items are positive (clear extraction error)
+        // If there's a mix, respect the extraction as-is (legitimate invoice with adjustments)
+        if (itemsWithPositivePrices.length > 0 && itemsWithNegativePrices.length === 0 && !suppressWarnings) {
+            const itemsSum = items.reduce((sum, item) => sum + item.totalPrice, 0);
+            const expectedSum = totalAmount! / 1.21; // Remove IVA to get base
+
+            // Check if flipping all signs would make the math work
+            const flippedSum = -itemsSum;
+            const diffWithFlip = Math.abs(flippedSum - expectedSum);
+
+            if (diffWithFlip < Math.abs(itemsSum - expectedSum)) {
+                console.error(`⚠️ [Credit Note Sign Error] Invoice ${invoiceCode} has negative totalAmount (${totalAmount}) but ALL ${items.length} items are positive!`);
+                console.error(`   Items sum: ${itemsSum.toFixed(2)}, Expected (totalAmount / 1.21): ${expectedSum.toFixed(2)}`);
+                console.error(`   This indicates the AI failed to extract negative prices correctly.`);
+
+                // Auto-correct: flip signs of all prices for credit notes
+                console.warn(`   Auto-correcting: Converting all item prices to negative...`);
+                for (const item of items) {
+                    if (item.listPrice && item.listPrice > 0) item.listPrice = -item.listPrice;
+                    if (item.unitPrice > 0) item.unitPrice = -item.unitPrice;
+                    if (item.totalPrice > 0) item.totalPrice = -item.totalPrice;
+                }
+            } else {
+                console.warn(`⚠️ [Credit Note Warning] Invoice ${invoiceCode} has negative totalAmount but positive items - keeping as-is (validation will check total)`);
+            }
+        }
+    }    // At this point, all required fields are validated
     return {
         invoiceCode: invoiceCode!,
         provider: provider!,
@@ -1010,34 +1025,51 @@ PHONE NUMBER:
 - Look for: "Tel:", "Teléfono:", "Phone:", "Tlf:"
 
 INVOICE HEADER:
-- Invoice code/number (from top of document)
+- Invoice code/number (from top of document, usually near "FACTURA Nº" or "INVOICE NO.")
 - Issue date in YYYY-MM-DD format
-- Total amount (sum of all line items)
-- Work Order (OT): Extract ONCE at invoice level (applies to ALL items)
-  * Common formats: "OT-1234", "OT.4129", "OT4129/002041", "OT:4129"
-  * Look for: "Obra:", "OT:", "S/REF:", "ALBARAN" section headers
-  * Normalize: keep separators (OT4129/002041 or OT-4129)
-  * If no OT found or multiple different OTs, use ~
+- Total amount (FINAL TOTAL at bottom of invoice INCLUDING 21% IVA/tax)
+  * CRITICAL: Look for the FINAL TOTAL at the BOTTOM of the last page
+  * Common labels: "TOTAL", "TOTAL FACTURA", "IMPORTE TOTAL", "R. EQUIV.", "TOTAL €"
+  * Usually appears in a box or bold text at the very end
+  * The totalAmount should equal: (sum of all item totalPrice values) × 1.21
+  * DO NOT confuse invoice number with total amount (invoice numbers are usually shorter, e.g., 272916 vs 743.75)
+  * DO NOT confuse subtotals ("IMP. BRUTO", "BASE IMPONIBLE") with the final TOTAL
+  * CRITICAL: For credit notes (devoluciones), the totalAmount MUST be negative
+  * If invoice shows negative total or is labeled "DEVOLUCIÓN/ABONO/NOTA DE CRÉDITO", totalAmount must be negative
+- Work Order (OT): Leave as ~ in HEADER (work orders are specified per-item, not at invoice level)
 
 LINE ITEMS - CRITICAL TABLE STRUCTURE RULES:
 ⚠️ INVOICE TABLES ARE GRIDS - Each row is independent, each cell must align with its column header
 
-🚨 MANDATORY OUTPUT FORMAT FOR EACH ITEM (13 fields, in EXACT order):
-ITEM|materialName|materialCode|isMaterial|quantity|listPrice|discountPercentage|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber
+🚨 SIMPLIFIED EXTRACTION - Let code handle calculations!
+We only extract what's VISIBLE on the invoice. Calculations (unitPrice, listPrice) are done by code.
 
-🔢 CRITICAL: You MUST output EXACTLY 13 fields per ITEM line (including ITEM prefix = 13 total parts)
-   Position 1: materialName (text)
-   Position 2: materialCode (text or ~)
-   Position 3: isMaterial (true/false)
-   Position 4: quantity (number - NEVER skip this field!)
-   Position 5: listPrice (number)
-   Position 6: discountPercentage (number)
-   Position 7: unitPrice (number)
-   Position 8: totalPrice (number)
-   Position 9: itemDate (date or ~)
-   Position 10: workOrder (text or ~)
-   Position 11: description (text or ~)
-   Position 12: lineNumber (number or ~)
+🚨 MANDATORY OUTPUT FORMAT FOR EACH ITEM (10 fields after ITEM prefix):
+ITEM|materialName|materialCode|isMaterial|quantity|discountRaw|totalPrice|itemDate|workOrder|description|lineNumber
+
+🔢 CRITICAL: You MUST output EXACTLY 10 fields per ITEM line (11 total parts including ITEM prefix)
+   Position 1: materialName (text) - Product/service name from CONCEPTO column
+   Position 2: materialCode (text or ~) - Code from CÓDIGO column
+   Position 3: isMaterial (true/false) - true for products, false for services
+   Position 4: quantity (number) - From CANTIDAD/Uds column - NEVER skip this!
+   Position 5: discountRaw (text) - From %DTO column EXACTLY as shown:
+      * Single discount: "10" or "5.5" → extract as-is
+      * Sequential discounts: "50 5" (50% then 5%) → extract as "50 5"
+      * No discount: blank/"NETO" → extract as "0"
+      * Code will calculate combined discount automatically
+   Position 6: totalPrice (number) - From TOTAL/IMPORTE column - THIS IS THE MOST IMPORTANT!
+   Position 7: itemDate (date or ~) - Date if different from invoice date
+   Position 8: workOrder (text or ~) - Work order for this specific item (if different from invoice-level OT)
+   Position 9: description (text or ~) - Additional notes
+   Position 10: lineNumber (number or ~) - Line number if visible
+
+🎁 SPECIAL ITEMS (PACKS, KITS, ACCESSORIES):
+Items like "PACK 6 UDS", "KIT G FIJACION", "KIT FIJACION LAVABO-PARED" commonly have NO prices - this is NORMAL.
+- These are bundled items, accessories, or complementary products not priced individually
+- ALWAYS output: discountRaw=0, totalPrice=0.00
+- Still extract quantity if visible (e.g., "PACK 6 UDS" may show quantity=1.00 or 6.00)
+- DO NOT try to find prices from other rows - if the row has blank price cells, use 0.00
+- Examples: "PACK", "KIT", "FIJACION", "ACCESORIO", "COMPLEMENTO"
 
 🚨 CRITICAL CELL-BY-CELL EXTRACTION PROCESS:
 When you see a table row, you must extract data by following these steps EXACTLY:
@@ -1045,13 +1077,39 @@ When you see a table row, you must extract data by following these steps EXACTLY
 STEP 1: Identify the row you're processing (e.g., Row 1, Row 2, Row 3)
 STEP 2: Read material name/code from the LEFTMOST columns of THAT SPECIFIC ROW
 STEP 3: For THAT SAME ROW, look for the CANTIDAD/UNIDADES/Uds column → extract as QUANTITY (field 4)
-STEP 4: For THAT SAME ROW, move your "eye" horizontally to find PRECIO column → extract as listPrice (field 5)
-STEP 5: For THAT SAME ROW, find % DTO/DESCUENTO column → extract as discountPercentage (field 6)
-STEP 6: For THAT SAME ROW, find PRECIO FINAL/P.U. column → extract as unitPrice (field 7)
-STEP 7: For THAT SAME ROW, find TOTAL/IMPORTE column → extract as totalPrice (field 8)
-STEP 8: If ANY cell is blank/empty in that row → write 0.00 for that numeric field
-STEP 9: NEVER look at cells from different rows to "fill in" missing values
-STEP 10: VERIFY you have all 13 fields before outputting the line
+STEP 4: For THAT SAME ROW, find % DTO/DESCUENTO column → extract as discountRaw (field 5)
+   - Extract EXACTLY what you see: "10", "5.5", "50 5", "20 10", etc.
+   - Sequential discounts: "50 5" means 50% discount, then 5% on the discounted price
+   - If % DTO cell is BLANK/EMPTY or shows "NETO" → write "0"
+   - DO NOT calculate combined discount - just extract the text as-is
+   - DO NOT look down to the next row
+STEP 5: For THAT SAME ROW, find TOTAL/IMPORTE column → extract as totalPrice (field 6)
+   - This is the MOST IMPORTANT field - extract it carefully!
+   - If TOTAL cell is BLANK/EMPTY → write 0.00
+   - DO NOT look down to the next row
+STEP 6: If ANY cell is blank/empty in that row → write 0 or 0.00 for that field
+STEP 7: NEVER look at cells from different rows to "fill in" missing values
+STEP 8: VERIFY you have all 10 fields before outputting the line (count them!)
+STEP 9: Move to the NEXT row and repeat from STEP 1
+
+NOTE: We do NOT extract PRECIO BASE or PRECIO FINAL/P.U. columns anymore!
+      The code will calculate unitPrice and listPrice from quantity, discountRaw, and totalPrice.
+
+🔍 VISUAL READING TECHNIQUE (USE A MENTAL RULER):
+Imagine you're using a physical ruler placed HORIZONTALLY across the page.
+- Place the ruler on Row 1 → read ALL values from Row 1 only (material, quantity, prices)
+- If any cell under the ruler is BLANK → that value is 0.00
+- Move the ruler DOWN to Row 2 → read ALL values from Row 2 only
+- If any cell under the ruler is BLANK → that value is 0.00
+- NEVER slide the ruler up/down while reading a single row
+- NEVER "peek" above or below the ruler to fill in missing data
+
+💡 THINK OF IT LIKE THIS:
+- Each row is a separate invoice line with its own independent data
+- Blank cells in a row mean that specific value is 0.00 for THAT item
+- The price in Row 2 belongs ONLY to Row 2's item, NOT to Row 1's item
+- Common scenario: PACKs/KITs (Row 1) have blank prices, regular items (Row 2) have prices
+  → Row 1 must output all zeros, Row 2 must output its actual prices
 
 🔍 VISUAL READING TECHNIQUE:
 Imagine you're using a ruler placed HORIZONTALLY across the page.
@@ -1061,96 +1119,263 @@ Imagine you're using a ruler placed HORIZONTALLY across the page.
 - NEVER slide the ruler up/down while reading a single row
 
 TABLE EXTRACTION PROCESS (follow in order):
-1. IDENTIFY column headers FIRST: CÓDIGO, CANTIDAD/Uds, CONCEPTO/DESCRIPCIÓN, PRECIO/P.BASE, % DTO, P.U./PRECIO FINAL, TOTAL/IMPORTE
-2. For EACH row in the table:
+1. IDENTIFY column headers FIRST: CÓDIGO, CANTIDAD/Uds, CONCEPTO/DESCRIPCIÓN, % DTO, TOTAL/IMPORTE
+   - NOTE: We skip PRECIO BASE and PRECIO FINAL columns - not needed!
+2. SKIP non-item rows (see exclusion list below)
+3. For EACH row in the table:
    a. Read the material name/code from leftmost columns (fields 1-2)
    b. Find CANTIDAD/Uds column in that row → extract as quantity (field 4) - DO NOT SKIP!
-   c. Look DIRECTLY ACROSS in the same horizontal row for each price column
-   d. If a cell in that row is BLANK/EMPTY → use 0.00 for that field
-   e. NEVER look up or down to other rows for missing values
-   f. Count your fields - you must have EXACTLY 13 total (12 after ITEM prefix)
-3. Move to the next row and repeat
+   c. Find % DTO column in that row → extract as discountPercentage (field 5)
+   d. Find TOTAL/IMPORTE column in that row → extract as totalPrice (field 6) - MOST IMPORTANT!
+   e. If a cell in that row is BLANK/EMPTY → use 0.00 for that field
+   f. NEVER look up or down to other rows for missing values
+   g. Count your fields - you must have EXACTLY 11 total (10 after ITEM prefix)
+4. Move to the next row and repeat
 
-FIELD EXTRACTION GUIDE (extract in this exact order):
+🚫 CRITICAL: SKIP THESE ROWS (NOT INVOICE ITEMS):
+DO NOT extract rows that contain ONLY promotional notes, accumulations, or metadata:
+- "EUROS ACUMULADOS" or "Lleva acumulados" (loyalty points tracking)
+- "PROMOCION" or "Promo" (promotional campaign names)
+- "Fecha límite promoc" (promotion deadline notes)
+- "Hacer:" or "Hager:" followed by promotional text
+- "Exclusivas" (exclusive offers notes)
+- Any row where CONCEPTO contains only metadata and has NO material/service name
+- Rows with asterisks (****) marking section dividers
+
+⚠️ IMPORTANT: DO EXTRACT delivery note references - these contain Work Order (OT) information:
+✅ "ALBARAN Nº 300.199 FECHA 23-11-2020" → EXTRACT AS SECTION HEADER (not as item)
+✅ "S/REF: 074129/001942" or "S/REF:4060-1799-146710 ESCOLA EL SEC" → EXTRACT AS SECTION HEADER
+
+WORK ORDER (OT) EXTRACTION - CRITICAL INSTRUCTIONS:
+📋 Invoices often have MULTIPLE work orders, with items grouped under section headers.
+
+SECTION HEADER DETECTION:
+- Look for rows containing: "ALBARAN Nº", "S/REF:", "Obra:", "OT:", "CECO:"
+- These are NOT line items - they are section dividers that indicate a new work order
+- Common patterns:
+  * "ALBARAN Nº 1 096.232 FECHA 7-04-2025" 
+  * "S/REF: 074129/001941" or "S/REF:4060-1799-146710 ESCOLA EL SEC"
+  * "Obra: OT-4129" or "OT: 4129"
+
+EXTRACTING OT FROM SECTION HEADERS:
+1. When you see "S/REF: 074129/001941":
+   - Extract the work order code: "074129" (first part before the slash)
+   - Normalize format: keep as "OT-074129" or "074129" (be consistent)
+2. When you see "ALBARAN Nº" followed by "S/REF:":
+   - The S/REF line contains the work order - extract from there
+3. When you see "Obra: OT-4129" or "OT: 4129":
+   - Extract the work order: "OT-4129" or "4129"
+
+APPLYING OT TO ITEMS (MOST IMPORTANT RULE):
+- When you encounter a section header with an OT, remember that OT code
+- Apply that OT to ALL subsequent items until you see a new section header with a different OT
+- Each item's workOrder field (position 8) should contain the OT from its section
+- DO NOT leave workOrder as ~ unless there is truly no OT information anywhere
+
+EXAMPLE INVOICE STRUCTURE (text format output):
+  HEADER|FAC-2024-001|2024-01-15|1512.55|~
+  
+  PROVIDER|ACME S.L.|A12345678|info@acme.com|+34912345678|Calle Principal 123
+  
+  [Section Header - not an item line]
+  ALBARAN Nº 1 096.232 FECHA 7-04-2025
+  S/REF: 074129/001941  ← Extract OT: "074129"
+  
+  ITEM|Cemento Portland|CEM001|true|10.00|50 5|255.00|~|074129|~|1  ← Apply OT "074129"
+  ITEM|Arena|ARENA01|true|5.00|38|125.00|~|074129|~|2  ← Apply OT "074129"
+  
+  [Section Header - not an item line]  
+  ALBARAN Nº 1 097.126 FECHA 7-04-2025
+  S/REF: 074129/001942  ← Extract OT: "074129" (same OT, different albaran)
+  
+  ITEM|Ladrillos|LAD001|true|100.00|40|280.00|~|074129|~|3  ← Apply OT "074129"
+  ITEM|Transporte|~|false|1.00|0|150.00|~|074129|~|4  ← Apply OT "074129"
+
+KEY POINTS:
+- Section headers are NOT output as ITEM lines
+- Extract OT from section headers and apply to following items
+- If invoice has NO section headers and NO OT anywhere, use ~ for all item workOrder fields
+- If you see "S/REF: 074129/001941", extract "074129" as the work order
+- Keep the OT normalized (e.g., always add "OT-" prefix or always omit it - be consistent)
+
+📋 STEP-BY-STEP PROCESSING ALGORITHM:
+When processing the invoice, follow these steps IN ORDER:
+
+1. INITIALIZE: Set currentWorkOrder = ~ (no work order yet)
+
+2. READ EACH LINE from top to bottom:
+   a. Is this line a section header (contains "ALBARAN", "S/REF:", "Obra:", "OT:")?
+      → YES: Extract the work order code and update currentWorkOrder
+             Example: "S/REF: 074129/001941" → currentWorkOrder = "074129"
+             DO NOT output an ITEM line for this
+      → NO: Continue to step b
+   
+   b. Is this line a table row with material/product information?
+      → YES: Extract the item data and set its workOrder field (position 8) to currentWorkOrder
+             Example: If currentWorkOrder = "074129", then output:
+             ITEM|Material Name|CODE|true|5.00|10|50.00|~|074129|~|1
+      → NO: Skip this line (it's metadata, totals, or other non-item content)
+
+3. REPEAT step 2 for all lines in the invoice
+
+EXAMPLE WALKTHROUGH:
+Given this invoice content:
+  Line 1: "FACTURA Nº FAC-001"
+  Line 2: "PROVIDER INFO..."
+  Line 3: "ALBARAN Nº 1 096.232 FECHA 7-04-2025"
+  Line 4: "S/REF: 074129/001941"
+  Line 5: "Cemento Portland | 10.00 | 255.00"
+  Line 6: "Arena | 5.00 | 125.00"
+  Line 7: "ALBARAN Nº 1 097.126 FECHA 7-04-2025"
+  Line 8: "S/REF: 082341/002001"
+  Line 9: "Ladrillos | 100.00 | 280.00"
+
+Processing:
+  Line 1-2: Extract HEADER and PROVIDER (currentWorkOrder = ~)
+  Line 3-4: Section header → Extract "074129" → currentWorkOrder = "074129", DO NOT output ITEM
+  Line 5: Item → Output: ITEM|Cemento Portland|...|074129|...
+  Line 6: Item → Output: ITEM|Arena|...|074129|...
+  Line 7-8: Section header → Extract "082341" → currentWorkOrder = "082341", DO NOT output ITEM
+  Line 9: Item → Output: ITEM|Ladrillos|...|082341|...
+
+✅ DO EXTRACT these rows:
+- Rows with material codes (CÓDIGO column has alphanumeric code)
+- Rows with material/service names in CONCEPTO
+- Rows with ECOTASA, fees, or actual charges (even if 0.00)
+- Rows showing actual products/services delivered
+
+EXAMPLE OF WHAT TO SKIP:
+❌ "EUROS ACUMULADOS PROMOCION JAM" → SKIP (promotional note)
+❌ "Lleva acumulados 598.42 Euros/Tubes" → SKIP (accumulated points note)
+❌ "Fecha límite promoc. 31-12-20" → SKIP (promotion deadline)
+❌ "Hacer:Jamon compras acum +500¤" → SKIP (promotional milestone)
+❌ "***** Promo herramienta 2020 *****" → SKIP (section divider)
+❌ "ALBARAN Nº 300.199 FECHA 23-11-2020" → SKIP (delivery note reference in middle of table)
+❌ "S/REF:4060-1799-146710 ESCOLA EL SEC" → SKIP (reference note)
+
+EXAMPLE OF WHAT TO EXTRACT:
+✅ "HAG ESC225 CONTACTOR 230V 25A 2NA" → EXTRACT (actual product)
+✅ "ECOTASA DE RESIDUOS DE APARATO" → EXTRACT (actual fee/charge)
+✅ "TERMO GREENHEISS FIVE 140L VERTICAL SE ERP" → EXTRACT (actual product)
+
+FIELD EXTRACTION GUIDE (extract in this exact order - 10 fields total):
 1. materialName: Descriptive product/service name exactly as written from "CONCEPTO/DESCRIPCIÓN" column
 2. materialCode: Reference code from "CÓDIGO/REF/ARTÍCULO" column (use ~ if column missing/empty)
 3. isMaterial: true for physical goods, false for services/fees
 4. quantity: ⚠️ CRITICAL - Units from "CANTIDAD/Uds/UNIDADES" column (use 0.00 if missing, NEVER skip this field!)
-5. listPrice: Base unit price from "PRECIO BASE/PVP/PRECIO" column (use 0.00 if missing)
-6. discountPercentage: Discount % from "% DTO/DESCUENTO %/DTO%" column (use 0.00 if missing or "NETO")
-7. unitPrice: Final unit price from "PRECIO FINAL/P.U./PRECIO" column (use 0.00 if missing)
-8. totalPrice: Line total from "TOTAL/IMPORTE/TOTAL LÍNEA" column (use 0.00 if missing)
-9. itemDate: Date if different from invoice date in YYYY-MM-DD format (use ~ if same as invoice date)
-10. workOrder: Use ~ (OT extracted at HEADER level)
-11. description: Brief additional notes (use ~ if none)
-12. lineNumber: Visible line number if present (use ~ if not visible)
+   * NEVER confuse quantity with totalPrice - they are in different columns!
+   * Quantity is typically a small number (1, 2, 5, 10) or decimal (2.5, 4.5)
+   * If you see a larger number like 33.78 in the quantity position, it's likely totalPrice - check the column headers!
+5. discountRaw: Discount text from "% DTO/DESCUENTO %/DTO%" column - extract EXACTLY as shown:
+   * Single discount: "10", "5.5", "15" → extract as-is (e.g., "10")
+   * Sequential discounts: "50 5" (50% then 5%), "20 10" (20% then 10%) → extract as-is (e.g., "50 5")
+   * No discount: blank/"NETO" → extract as "0"
+   * Examples: "10", "50 5", "20 10 5", "0", "NETO" → all valid
+   * Code will calculate: 52.5% for "50 5", 32.6% for "20 10 5", 10% for "10"
+6. totalPrice: ⚠️ MOST IMPORTANT - Line total from "TOTAL/IMPORTE/TOTAL LÍNEA" column (use 0.00 if missing)
+   * This is the line item total - extract it carefully and accurately!
+   * Example: If invoice shows 33.74 or 33.78, extract exactly as shown
+   * NEVER put the quantity value here by mistake!
+   * The code will calculate: unitPrice = totalPrice / quantity
+   * The code will calculate: listPrice = unitPrice / (1 - discountPercentage/100)
+7. itemDate: Date if different from invoice date in YYYY-MM-DD format (use ~ if same as invoice date)
+8. workOrder: Work order for this specific item if shown (use ~ if not present or same as invoice-level OT)
+   * Most items will use ~ here since OT is usually at invoice level
+9. description: Brief additional notes (use ~ if none)
+10. lineNumber: Visible line number if present (use ~ if not visible)
 
-⚠️ NOTE: Work Order (OT) is extracted ONCE at the HEADER level (field 4) and applies to ALL items.
-Do NOT extract or include OT in individual ITEM lines - this saves tokens!
-
-⚠️ VISUAL EXAMPLE - How to read a table with blank cells:
-┌──────┬─────────┬──────────────┬────────┬──────┬────────┐
-│ CODE │ QUANTITY│ DESCRIPTION  │ PRECIO │ %DTO │ IMPORTE│
-├──────┼─────────┼──────────────┼────────┼──────┼────────┤
-│ 001  │ 1.00    │ Item A       │ (blank)│(blank)│(blank)│  ← Output: 0.00|0.00|0.00
-│ 002  │ 6.00    │ Item B       │ 3.000  │ NETO │ 18.00 │  ← Output: 3.00|0.00|18.00
-└──────┴─────────┴──────────────┴────────┴──────┴────────┘
+⚠️ VISUAL EXAMPLE - How to read a simplified table:
+┌──────┬─────────┬──────────────┬──────┬────────┐
+│ CODE │ QUANTITY│ DESCRIPTION  │ %DTO │ IMPORTE│
+├──────┼─────────┼──────────────┼──────┼────────┤
+│ 001  │ 1.00    │ Item A       │(blank)│(blank)│  ← Output: discountRaw="0"|totalPrice=0.00
+│ 002  │ 8.00    │ Item B       │  5   │ 33.74 │  ← Output: discountRaw="5"|totalPrice=33.74
+│ 003  │ 6.00    │ Item C       │ 50 5 │ 18.00 │  ← Output: discountRaw="50 5"|totalPrice=18.00
+│ 004  │ 2.00    │ Item D       │ NETO │ 25.00 │  ← Output: discountRaw="0"|totalPrice=25.00
+└──────┴─────────┴──────────────┴──────┴────────┘
 
 In this example:
-- Row 1 (Item A) has blank price cells → Extract as: listPrice=0.00, discountPercentage=0.00, unitPrice=0.00, totalPrice=0.00
-- Row 2 (Item B) has actual values → Extract as: listPrice=3.00, discountPercentage=0.00, unitPrice=3.00, totalPrice=18.00
-- DO NOT mix: Item A must output zeros, even though Item B below has values
+- Row 1 (Item A) has blank cells → Extract as: discountRaw="0", totalPrice=0.00
+- Row 2 (Item B) has 5% discount and 33.74 total → Extract as: discountRaw="5", totalPrice=33.74
+  * Code will calculate: combined discount=5%, unitPrice=33.74/8=4.22, listPrice=4.22/0.95=4.44
+- Row 3 (Item C) has sequential "50 5" discount and 18.00 total → Extract as: discountRaw="50 5", totalPrice=18.00
+  * Code will calculate: combined discount=52.5% (50% then 5%), unitPrice=18.00/6=3.00, listPrice=3.00/0.475=6.32
+- Row 4 (Item D) has NETO (no discount) and 25.00 total → Extract as: discountRaw="0", totalPrice=25.00
+  * Code will calculate: combined discount=0%, unitPrice=25.00/2=12.50, listPrice=12.50
 
-CRITICAL PRICE EXTRACTION RULES - READ THESE CAREFULLY:
-⚠️ RULE #1 - NO VERTICAL DISPLACEMENT: When you see a blank price cell, write 0.00 for that exact cell. DO NOT grab the value from the row below or above. Each row is independent.
+CRITICAL EXTRACTION RULES:
+⚠️ RULE #1 - NO VERTICAL DISPLACEMENT: When you see a blank cell, write 0 or 0.00 for that exact cell. DO NOT grab the value from the row below or above. Each row is independent.
+⚠️ RULE #2 - EXTRACT DISCOUNT AS TEXT: Always extract discountRaw as text exactly as shown: "10", "50 5", "20 10", "0", etc.
+⚠️ RULE #3 - FOCUS ON TOTAL: The totalPrice is the MOST IMPORTANT field - extract it accurately!
+⚠️ RULE #4 - SKIP PRICE COLUMNS: Do NOT extract from "PRECIO BASE" or "PRECIO FINAL" columns - we don't need them!
 
-- COPY prices exactly from invoice columns - DO NOT calculate or modify them
-- ALWAYS look for these specific column headers and extract their values:
-  * "Precio Base" or "PVP" → listPrice
-  * "% Dto" or "Dto%" or "Descuento %" → discountPercentage
-  * "Precio Final" or "Precio" or "P.U." → unitPrice
-  * "Total" or "Importe" or "Total Línea" → totalPrice
-- If invoice shows separate columns for "Precio Base", "Dto%", "Precio Final": copy each exactly
-- If a price column shows 0.00 or is empty: use 0.00
-- If a price column shows a dash (-) or is blank: use 0.00
-- If entire price column is missing from the invoice: use 0.00 for all items (not ~)
-- NEVER use ~ for any price values - always use 0.00 for missing/zero prices
-- NEVER calculate listPrice from unitPrice, NEVER calculate unitPrice from totalPrice
-- If prices don't make mathematical sense: still extract exactly as shown
+- Extract quantity and totalPrice exactly from invoice columns
+- Extract discountRaw as text (not as number) - "10", "50 5", "0", etc.
+- If a cell shows 0.00 or is empty: use "0" for discount, 0.00 for prices
+- If a cell shows a dash (-) or is blank: use "0" for discount, 0.00 for prices
+- NEVER use ~ for numeric values - always use 0.00 for missing/zero numbers
 - For quantity: if empty or shows 0, use 0.00
 
 CRITICAL: PREVENT VERTICAL DATA DISPLACEMENT:
 - Each invoice line is a HORIZONTAL row - NEVER mix data from different rows
-- If a line item has blank/empty price cells, use 0.00 for those specific cells
-- DO NOT "borrow" or "shift" price values from the row below or above
-- Match each price value to its EXACT horizontal row by the line's material name/code
-- If you see "PACK 6 UDS SILICONA FUNGICIDA BLANCA" with blank prices, output zeros for that line
-- If the NEXT line "PATTEX SILICON 5 SILICONA BLANCA" has prices 3,000 NETO 18,00, those belong ONLY to that line
-- VERIFY: Material name in column 1 must align horizontally with its prices in other columns
-- When in doubt about which row a price belongs to: use the material description as anchor point
+- If a line item has blank/empty cells, use 0.00 for those specific cells
+- DO NOT "borrow" or "shift" values from the row below or above
+- Match each value to its EXACT horizontal row by the line's material name/code
+- VERIFY: Material name in column 1 must align horizontally with its values in other columns
 
 NEGATIVE AMOUNTS (CREDIT NOTES / DEVOLUCIONES):
+🚨 CRITICAL: Credit notes are invoices that REFUND money - typically ALL amounts are NEGATIVE
+
+DETECTING CREDIT NOTES:
+- Look for labels: "DEVOLUCIÓN", "ABONO", "NOTA DE CRÉDITO", "RECTIFICATIVA"
+- Check if the final total on the invoice is negative (e.g., "-650,05 €" or "650,05- €")
+- If you see a negative total or credit note label → THIS IS LIKELY A CREDIT NOTE
+
+EXTRACTING NEGATIVE AMOUNTS:
 - Spanish invoices often show negative amounts with a dash AFTER the number (e.g., "74,40-" means -74.40)
 - IMPORTANT: Convert trailing dash notation to negative numbers: "74,40-" → -74.40
 - Also recognize minus sign BEFORE number: "-74.40" → -74.40
-- Apply the negative sign to: listPrice, unitPrice, totalPrice (all price fields when amount is negative)
+- Extract the sign EXACTLY as shown in each cell - positive or negative
 - NEVER ignore the trailing dash - it is critical to identify credit notes and returns
-- If totalAmount in invoice is negative: it is a CREDIT NOTE (devolución/nota de crédito)
-- Extract negative values exactly as shown, then convert to proper negative numbers with minus sign
-- CRITICAL: If ANY product price is negative, output it as negative in the structured format (e.g., -74.40 not 74.40)
-- For credit notes: ALL price fields (listPrice, unitPrice, totalPrice) should be negative if the line item represents a return/credit
 
-EXPLICIT PRICE FIELD REQUIREMENTS:
-- listPrice: The original/base price before any discounts are applied
-- discountPercentage: The discount percentage (e.g., 10.00 for 10%, 0.00 if no discount)
-- unitPrice: The final price after discount has been applied (listPrice - discount)
-- These three fields MUST be extracted independently - do not try to calculate one from the others
+CREDIT NOTE EXTRACTION RULES:
+1. If the invoice is a pure credit note (negative total, all returns), ALL item totalPrice values should be negative
+2. For each line item, extract the sign EXACTLY as shown in the TOTAL/IMPORTE column:
+   - If the cell shows "74,40-" or "-74.40" → extract as negative (-74.40)
+   - If the cell shows "74,40" with no sign → extract as positive (74.40)
+   - quantity: Can be positive or negative depending on the invoice
+   - discountPercentage: Usually positive (e.g., 10.00 for 10% discount)
+   - totalPrice: Extract with the sign shown (usually negative in credit notes)
+3. The totalAmount in HEADER must match the sign shown on the invoice
+4. The code will calculate unitPrice and listPrice from totalPrice, quantity, and discount
 
-CRITICAL NUMBER ACCURACY:
+MIXED POSITIVE/NEGATIVE ITEMS (VALID):
+- Some regular invoices have BOTH positive and negative line items (this is NORMAL!)
+- Example: Product charges (+100.00) and adjustment credits (-10.00) in same invoice
+- Extract EACH line's totalPrice sign EXACTLY as shown - do NOT assume all must be the same sign
+- The totalAmount can be positive even if some items are negative (net result)
+
+EXAMPLE PURE CREDIT NOTE:
+If invoice shows: "TOTAL: -650,05 €" or "TOTAL: 650,05-" and ALL items show negative amounts
+Then HEADER totalAmount = -650.05
+And all items should have negative totalPrice to sum to -650.05 ÷ 1.21 = -537.23 (before tax)
+
+EXAMPLE MIXED INVOICE:
+If invoice shows: "TOTAL: 108,90 €" with items showing: 150.00, -60.00, 0.00
+Then HEADER totalAmount = 108.90
+Items sum: 150.00 + (-60.00) + 0.00 = 90.00
+Calculation: 90.00 × 1.21 = 108.90 ✓
+
+CRITICAL: Extract each totalPrice with its EXACT sign as shown in the invoice
+Do NOT assume all items must have the same sign - mixed positive/negative is valid!
+
+CRITICAL NUMBER ACCURACY & PRECISION:
 - Distinguish: 5 vs S, 8 vs B, 0 vs O vs 6
 - Double-check CIF/NIF digit sequences
 - Prices: use dot as decimal (1234.56 not 1,234.56)
-- Always extract prices as numbers with 2 decimals
+- Extract totalPrice exactly as shown with 2 decimal precision (e.g., 33.74 not 33.744)
+- Extract discountPercentage as shown (e.g., 5 or 5.00 for 5%)
+- DO NOT add extra precision where it doesn't exist
 
 OUTPUT FORMAT - STRICT REQUIREMENTS:
 Use pipe (|) as delimiter, tilde (~) for missing values.
@@ -1158,91 +1383,148 @@ Use pipe (|) as delimiter, tilde (~) for missing values.
 MANDATORY STRUCTURE (NEVER omit any line type):
 Line 1 - HEADER (exactly 5 fields): HEADER|invoiceCode|issueDate|totalAmount|workOrder
 Line 2 - PROVIDER (exactly 6 fields): PROVIDER|name|cif|email|phone|address  
-Lines 3+ - ITEMS (exactly 12 fields each): ITEM|materialName|materialCode|isMaterial|quantity|listPrice|discountPercentage|unitPrice|totalPrice|itemDate|description|lineNumber
-  * Field positions: 1=materialName, 2=materialCode, 3=isMaterial, 4=quantity, 5=listPrice, 6=discountPercentage, 7=unitPrice, 8=totalPrice, 9=itemDate, 10=description, 11=lineNumber
-  * NOTE: workOrder is NOT in ITEM lines - it's extracted once in HEADER (field 5)
+Lines 3+ - ITEMS (exactly 10 fields each): ITEM|materialName|materialCode|isMaterial|quantity|discountRaw|totalPrice|itemDate|workOrder|description|lineNumber
+  * Field positions: 1=materialName, 2=materialCode, 3=isMaterial, 4=quantity, 5=discountRaw, 6=totalPrice, 7=itemDate, 8=workOrder, 9=description, 10=lineNumber
+  * NOTE: HEADER workOrder (field 5) is DEPRECATED - always use ~ there. Work orders are specified per-item in field 8.
 
 FORMATTING RULES:
 - Output ONLY the structured lines, no explanations
 - Each line starts with HEADER, PROVIDER, or ITEM
-- EXACTLY the specified field counts (5 for HEADER, 6 for PROVIDER, 12 for ITEM)
+- EXACTLY the specified field counts (5 for HEADER, 6 for PROVIDER, 10 for ITEM)
 - Use | between fields (no spaces around pipes)
 - Use ~ for missing fields (no spaces around tildes)
 - No thousand separators, no commas as decimals
 - Boolean isMaterial: "true" or "false" (lowercase, no quotes)
+- discountRaw is TEXT: "10", "50 5", "0" (not numbers with decimals like 10.00)
 - NEVER include | or newlines within field values
 - NEVER output incomplete lines - all fields required
 
-EXAMPLE OUTPUT (extract exactly as shown, no calculations):
-HEADER|FAC-2024-001|2024-01-15|1250.50|OT-4077
+EXAMPLE OUTPUT (simplified format - code calculates combined discount, unitPrice, and listPrice):
+HEADER|FAC-2024-001|2024-01-15|1526.16|~
 PROVIDER|ACME S.L.|A12345678|info@acme.com|+34912345678|Calle Principal 123, Madrid
-ITEM|Cemento Portland|CEM001|true|10.00|28.33|10.00|25.50|255.00|~|Cemento gris 50kg|1
-ITEM|Transporte|~|false|1.00|995.50|0.00|995.50|995.50|2024-01-15|Envío especial|2
+ITEM|Cemento Portland|CEM001|true|10.00|10|255.00|~|OT-4077|Cemento gris 50kg|1
+ITEM|Transporte|~|false|1.00|0|995.50|2024-01-15|OT-4077|Envío especial|2
 
-NEGATIVE PRICE EXAMPLE (credit note/devolución):
-HEADER|DEV-2024-002|2024-01-16|-255.00|OT-4077
+Explanation:
+- Item 1: qty=10, discount="10", total=255.00 → Code calculates: combined=10%, unitPrice=255/10=25.50, listPrice=25.50/0.90=28.33
+- Item 2: qty=1, discount="0", total=995.50 → Code calculates: combined=0%, unitPrice=995.50/1=995.50, listPrice=995.50
+- Both items belong to work order OT-4077 (specified per-item, not at invoice level)
+- Invoice total: (255.00 + 995.50) × 1.21 = 1526.16
+
+SEQUENTIAL DISCOUNT EXAMPLE (discount shows "50 5" - 50% then 5%):
+HEADER|FAC-2024-002|2024-01-16|145.53|~
+PROVIDER|MATERIALS INC.|B87654321|~|~|~
+ITEM|Special Offer Item|SPEC001|true|10.00|50 5|95.00|~|~|Promotional product|1
+
+Explanation:
+- Item 1: qty=10, discount="50 5", total=95.00 → Code calculates: combined=52.5%, unitPrice=95/10=9.50, listPrice=9.50/0.475=20.00
+- No work order for this item (~ in field 8)
+- Invoice total: 95.00 × 1.21 = 114.95 (but invoice shows 145.53 including tax)
+
+CREDIT NOTE EXAMPLE (devolución - ALL totalPrice values negative):
+HEADER|DEV-2024-002|2024-01-16|-308.55|~
 PROVIDER|ACME S.L.|A12345678|info@acme.com|+34912345678|Calle Principal 123, Madrid
-ITEM|Cemento Portland|CEM001|true|-10.00|-28.33|10.00|-25.50|-255.00|~|Devolución cemento gris 50kg|1
+ITEM|Cemento Portland|CEM001|true|10.00|10|-255.00|~|OT-4077|Devolución cemento gris 50kg|1
 
-FIELD EXPLANATION FOR EXAMPLE ITEMS:
-- HEADER: workOrder="OT-4077" applies to ALL items (no need to repeat per item)
-- Cemento Portland: listPrice=28.33 (base price), discountPercentage=10.00 (10% off), unitPrice=25.50 (final price), totalPrice=255.00 (10×25.50)
-- Transporte: listPrice=995.50 (base price), discountPercentage=0.00 (no discount), unitPrice=995.50 (same as base), totalPrice=995.50 (1×995.50)
-- NEGATIVE EXAMPLE: For credit notes, ALL price fields are negative: listPrice=-28.33, unitPrice=-25.50, totalPrice=-255.00
+Explanation:
+- qty=10, discount="10", total=-255.00 → Code calculates: combined=10%, unitPrice=-255/10=-25.50, listPrice=-25.50/0.90=-28.33
+- Item belongs to work order OT-4077
+- Invoice total: -255.00 × 1.21 = -308.55
+CRITICAL: When invoice total is negative, ALL item totalPrice values must be negative!
 
-🚨 CRITICAL EXAMPLE - Table with BLANK cells (extract row by row):
-┌────────┬──────┬────────────────────────┬────────┬──────┬────────┐
-│ CÓDIGO │ CANT │ CONCEPTO               │ PRECIO │ %DTO │ IMPORTE│
-├────────┼──────┼────────────────────────┼────────┼──────┼────────┤
-│ 001    │ 1.00 │ PACK 6 UDS SILICONA   │ (blank)│(blank)│(blank)│  ← Row 1: ALL prices are blank
-│ 002    │ 6.00 │ PATTEX SILICON        │ 3,000  │ NETO │ 18,00 │  ← Row 2: Has actual prices
-│ 003    │12.00 │ MASCARILLA STEELPRO   │ 0,740  │  25  │  6,66 │  ← Row 3: Has actual prices
-└────────┴──────┴────────────────────────┴────────┴──────┴────────┘
+MIXED INVOICE EXAMPLE (positive total with both positive and negative items):
+HEADER|FAC-2024-003|2024-01-17|108.90|OT-4088
+PROVIDER|ACME S.L.|A12345678|info@acme.com|+34912345678|Calle Principal 123, Madrid
+ITEM|Cemento Portland|CEM001|true|5.00|0|150.00|~|~|Cemento gris 50kg|1
+ITEM|Ajuste precio anterior|~|false|1.00|0|-60.00|~|~|Descuento por error facturación|2
+ITEM|Servicio adicional|~|false|0.00|0|0.00|~|~|Servicio sin cargo|3
 
-CORRECT extraction (reading horizontally, row by row):
-HEADER|206979|2025-06-30|449.50|OT4129/002041
-PROVIDER|Example S.L.|A12345678|~|~|~
-ITEM|PACK 6 UDS SILICONA|001|true|1.00|0.00|0.00|0.00|0.00|~|~|~
-ITEM|PATTEX SILICON|002|true|6.00|3.00|0.00|3.00|18.00|~|~|~
-ITEM|MASCARILLA STEELPRO|003|true|12.00|0.74|25.00|0.56|6.66|~|~|~
+Explanation:
+- Item 1: qty=5, discount="0", total=150.00 → Code calculates: combined=0%, unitPrice=150/5=30.00, listPrice=30.00
+- Item 2: qty=1, discount="0", total=-60.00 → Code calculates: combined=0%, unitPrice=-60/1=-60.00, listPrice=-60.00
+- Item 3: qty=0, discount="0", total=0.00 → Free service
+- Invoice total: (150.00 - 60.00 + 0.00) × 1.21 = 108.90
+This is VALID - extract each line's totalPrice sign EXACTLY as shown, positive OR negative!
 
-🚨 REAL EXAMPLE - Quantity extraction is MANDATORY:
-Invoice shows: "PS REDUCCION 240 HH COBRE 15x12" → Quantity: 2 → Price: 2,63€ → 78% discount → Total: 1,16€
+DISCOUNT EXAMPLE (showing single and sequential discounts):
+HEADER|FAC-2024-004|2024-01-18|40.81|~
+PROVIDER|ACME S.L.|A12345678|info@acme.com|+34912345678|Calle Principal 123, Madrid
+ITEM|FASDEL ATL80 TIRA 5 ADHESIVOS RIESGO ELECTRICO 8CM|ATL80|true|8.00|5|33.74|~|~|~|~
+ITEM|Material with sequential discount|MAT123|true|10.00|50 5|237.50|~|~|Promotional item|~
 
-WRONG extraction (missing quantity field - DON'T DO THIS):
-❌ ITEM|PS REDUCCION 240 HH COBRE 15x12|1251097152|true|2.63|78.00|0.58|1.16|~|~|~
-   This is WRONG because: quantity (2) was skipped, and all values shifted left!
+Explanation:
+- Item 1: Extract from invoice: qty=8, discount="5", total=33.74
+  * Code calculates: combined=5%, unitPrice=33.74/8=4.22, listPrice=4.22/0.95=4.44
+- Item 2: Extract from invoice: qty=10, discount="50 5", total=237.50
+  * Code calculates: combined=52.5%, unitPrice=237.50/10=23.75, listPrice=23.75/0.475=50.00
+- Invoice total: (33.74 + 237.50) × 1.21 = 328.60
 
-CORRECT extraction (all 12 fields in proper order):
-✅ ITEM|PS REDUCCION 240 HH COBRE 15x12|1251097152|true|2.00|2.63|78.00|0.58|1.16|~|~|~
-   Field 4 (quantity) = 2.00 ← NEVER skip this!
-   Field 5 (listPrice) = 2.63
-   Field 6 (discountPercentage) = 78.00
-   Field 7 (unitPrice) = 0.58 (calculated: 2.63 × (1 - 0.78) = 0.58)
-   Field 8 (totalPrice) = 1.16 (calculated: 2 × 0.58 = 1.16)
+FIELD EXPLANATION FOR EXAMPLES:
+- HEADER totalAmount: Sum of all item totalPrice values × 1.21 (including 21% IVA/tax)
+- HEADER workOrder: Applies to ALL items unless item has its own workOrder (field 8)
+- Sequential discount "50 5" means: 50% off list price, then 5% off the discounted price → combined 52.5%
+- Sequential discount "20 10" means: 20% off list price, then 10% off the discounted price → combined 28%
+- Cemento Portland example: qty=10, discount=10%, total=255.00
+  * Code calculates: unitPrice = 255.00/10 = 25.50
+  * Code calculates: listPrice = 25.50 / (1 - 0.10) = 25.50 / 0.90 = 28.33
+- Transporte example: qty=1, discount=0%, total=995.50
+  * Code calculates: unitPrice = 995.50/1 = 995.50
+  * Code calculates: listPrice = 995.50 / (1 - 0) = 995.50
+- CREDIT NOTE: quantity=10.00 (positive), but totalPrice=-255.00 (negative refund)
 
-REMEMBER: ALWAYS count your fields - each ITEM line must have EXACTLY 12 fields after "ITEM|"
+🚨 CRITICAL EXAMPLE - Simplified table (extract row by row):
+┌────────┬──────┬──────────────────────────────┬──────┬────────┐
+│ CÓDIGO │ CANT │ CONCEPTO                     │ %DTO │ IMPORTE│
+├────────┼──────┼──────────────────────────────┼──────┼────────┤
+│ 9900   │ 1.00 │ PACK 6 UDS SILICONA FUNGICIDA│(blank)│(blank)│  ← Row 1: PACK has NO prices (normal!)
+│ 2182   │ 6.00 │ PATTEX SILICON 5 SILICONA    │ NETO │ 18,00 │  ← Row 2: Has actual prices
+│ 2801   │12.00 │ MASCARILLA STEELPRO FFP2     │ 50 5 │  6,66 │  ← Row 3: Sequential discount!
+└────────┴──────┴──────────────────────────────┴──────┴────────┘
 
-CORRECT extraction (reading horizontally, row by row):
-HEADER|206979|2025-06-30|449.50|OT4129/002041
-PROVIDER|SALTOKI CORNELLÀ, S.A.|A64207400|cornella@saltoki.es|+34932968117|Pg Famades, C/ Silici 17
-ITEM|PACK 6 UDS SILICONA|001|true|1.00|0.00|0.00|0.00|0.00|~|~|~
-ITEM|PATTEX SILICON|002|true|6.00|3.00|0.00|3.00|18.00|~|~|~
-ITEM|MASCARILLA STEELPRO|003|true|12.00|0.74|25.00|0.56|6.66|~|~|~
+CORRECT extraction (reading horizontally, row by row, simplified format):
+HEADER|1.300.940|2025-06-30|24.66|~
+PROVIDER|SALTOKI CORNELLÀ S.A.|A64207400|~|~|Registre Mercantil de Barcelona
+ITEM|PACK 6 UDS SILICONA FUNGICIDA BLANCA|9900101019|true|1.00|0|0.00|~|~|~|~
+ITEM|PATTEX SILICON 5 SILICONA BLANCA CON FUNGICIDA CART. 280ML|2182020001|true|6.00|0|18.00|~|~|~|~
+ITEM|MASCARILLA STEELPRO FFP2 VALVULA|2801010800|true|12.00|50 5|6.66|~|~|~|~
 
-❌ WRONG extraction (DO NOT DO THIS - shifting prices from row below):
-ITEM|PACK 6 UDS SILICONA|001|true|1.00|3.00|0.00|3.00|18.00|~|~|~  ← ERROR: borrowed prices from row 2
-ITEM|PATTEX SILICON|002|true|6.00|0.74|25.00|0.56|6.66|~|~|~      ← ERROR: borrowed prices from row 3
-ITEM|MASCARILLA STEELPRO|003|true|12.00|...                        ← ERROR: missing prices
+🎯 KEY POINTS:
+- Row 1 (PACK): Blank cells → Output: discountRaw="0", total=0.00
+- Row 2 (PATTEX): NETO (no discount), 18.00 total → Output: discountRaw="0", total=18.00
+  * Code calculates: combined=0%, unitPrice=18.00/6=3.00, listPrice=3.00
+- Row 3 (MASCARILLA): "50 5" discount, 6.66 total → Output: discountRaw="50 5", total=6.66
+  * Code calculates: combined=52.5%, unitPrice=6.66/12=0.56, listPrice=0.56/0.475=1.18
+- Each row is independent - NEVER borrow values from other rows
+
+❌ WRONG extraction (DO NOT DO THIS - shifting values from row below):
+ITEM|PACK 6 UDS SILICONA FUNGICIDA BLANCA|9900101019|true|1.00|0.00|18.00|~|~|~|~  ← ERROR: borrowed total from row 2
+ITEM|PATTEX SILICON 5 SILICONA BLANCA CON FUNGICIDA CART. 280ML|2182020001|true|6.00|25.00|6.66|~|~|~|~  ← ERROR: borrowed values from row 3
+ITEM|MASCARILLA STEELPRO FFP2 VALVULA|2801010800|true|12.00|...                                                    ← ERROR: missing prices
+
+🚨 REAL EXAMPLE - KIT items with blank prices:
+Invoice shows:
+- Row 1: "NEW VICTORIA LAVABO 52X42,5 BLANCO" → Quantity: 1.00 → Price: 46,300 → 38% discount → Total: 28,71
+- Row 2: "KIT G FIJACION LAVABO-PARED" → Quantity: 1.00 → Price: (blank) → Discount: (blank) → Total: (blank)
+- Row 3: "NEW VICTORIA TAZA INODORO TANQUE BAJO S/H BLANCO" → Quantity: 1.00 → Price: 69,900 → 38% discount → Total: 43,34
+
+CORRECT extraction (each row independent):
+✅ ITEM|NEW VICTORIA LAVABO 52X42,5 BLANCO|code1|true|1.00|46.30|38.00|28.71|28.71|~|~|~
+✅ ITEM|KIT G FIJACION LAVABO-PARED|code2|true|1.00|0.00|0.00|0.00|0.00|~|~|~  ← KIT has blank prices = 0.00
+✅ ITEM|NEW VICTORIA TAZA INODORO TANQUE BAJO S/H BLANCO|code3|true|1.00|69.90|38.00|43.34|43.34|~|~|~
+
+❌ WRONG extraction (DO NOT borrow prices from adjacent rows):
+❌ ITEM|KIT G FIJACION LAVABO-PARED|code2|true|1.00|69.90|38.00|43.34|43.34|~|~|~  ← ERROR: took prices from row 3!
 
 REMEMBER: 
-- Read each row independently
-- If a cell is blank, use 0.00
-- Never take values from a different row
-- Work Order (OT) goes in HEADER only, not in ITEM lines
+- Read each row independently using the "horizontal ruler" technique
+- If a cell is blank, use 0.00 (NEVER borrow from other rows)
+- Never take values from a different row (NO vertical displacement)
+- Work Order (OT) can go in HEADER (applies to all items) or per ITEM line (overrides HEADER)
 - PROVIDER line is MANDATORY - always include it even with partial data
-- OUTPUT ITEMS IN THE EXACT SAME ORDER they appear on the invoice (top to bottom, left to right)
+- OUTPUT ITEMS IN THE EXACT SAME ORDER they appear on the invoice (top to bottom)
 - Do NOT reorder items alphabetically, by price, or by any other criteria
+- Each ITEM line must have EXACTLY 10 fields (11 parts total including "ITEM|" prefix)
+- PACKs and KITs commonly have blank prices - output 0.00 for discountPercentage and totalPrice
 - Maintain the original sequence from the document to preserve invoice structure`;
 }
 
@@ -1271,7 +1553,7 @@ async function callPdfExtractAPI(file: File, batchErrors: BatchErrorDetail[]): P
                 }
             ],
             config: {
-                temperature: 0.8,
+                // temperature: 0.8,
                 candidateCount: 1,
                 thinkingConfig: {
                     thinkingBudget: 0
@@ -1320,7 +1602,7 @@ async function callPdfExtractAPI(file: File, batchErrors: BatchErrorDetail[]): P
                             }
                         ],
                         config: {
-                            temperature: 0.8,
+                            // temperature: 0.8,
                             candidateCount: 1,
                             thinkingConfig: {
                                 thinkingBudget: 0
@@ -1940,6 +2222,7 @@ async function processInvoiceItemTx(
             quantity: quantityDecimal,
             listPrice: listPriceDecimal,
             discountPercentage: discountPercentageDecimal,
+            discountRaw: itemData.discountRaw || null, // Store raw discount text
             unitPrice: currentUnitPriceDecimal,
             totalPrice: totalPriceDecimal,
             itemDate: effectiveDate, // Store the effective date for the item
@@ -2590,6 +2873,7 @@ export async function createInvoiceFromFiles(
                                             quantity: quantityDecimal,
                                             listPrice: listPriceDecimal,
                                             discountPercentage: discountPercentageDecimal,
+                                            discountRaw: itemData.discountRaw || null,
                                             unitPrice: currentUnitPriceDecimal,
                                             totalPrice: totalPriceDecimal,
                                             itemDate: effectiveItemDate,
@@ -2926,6 +3210,7 @@ export interface ManualInvoiceData {
         quantity: number;
         listPrice?: number;
         discountPercentage?: number;
+        discountRaw?: string | null;
         unitPrice: number;
         totalPrice: number;
         description: string | null;
@@ -3037,6 +3322,7 @@ export async function createManualInvoice(data: ManualInvoiceData): Promise<Crea
                         quantity: quantityDecimal,
                         listPrice: listPriceDecimal,
                         discountPercentage: discountPercentageDecimal,
+                        discountRaw: itemData.discountRaw || null,
                         unitPrice: unitPriceDecimal,
                         totalPrice: totalPriceDecimal,
                         itemDate: currentInvoiceIssueDate,
@@ -3206,7 +3492,7 @@ async function prepareBatchLine(file: File): Promise<string> {
                 }
             ],
             generationConfig: {
-                temperature: 0.8,
+                // temperature: 0.8,
                 candidateCount: 1,
                 thinkingConfig: {
                     thinkingBudget: 0
@@ -3446,32 +3732,6 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
                     console.error(`[saveExtractedInvoice] Item data:`, item);
                     itemsSkipped++;
                 }
-            }
-
-            // ✅ Validate totals: Sum of all item totals should match invoice totalAmount
-            const calculatedTotal = extractedData.items.reduce((sum, item) => {
-                const totalPrice = typeof item.totalPrice === 'number' && !isNaN(item.totalPrice) ? item.totalPrice : 0;
-                return sum + totalPrice;
-            }, 0);
-
-            // Apply 21% IVA to get the final total (same calculation as UI)
-            const calculatedTotalWithIVA = calculatedTotal * 1.21;
-
-            // Check if calculated total matches invoice total (allow small rounding differences)
-            const totalDifference = Math.abs(calculatedTotalWithIVA - extractedData.totalAmount);
-            if (totalDifference > 0.01) { // More than 1 cent difference
-                console.error(`[saveExtractedInvoice][Invoice ${extractedData.invoiceCode}] Total mismatch detected (file: ${fileName ?? "unknown"}):`);
-                console.error(`  - Calculated total (items + IVA): €${calculatedTotalWithIVA.toFixed(2)}`);
-                console.error(`  - Invoice stated total: €${extractedData.totalAmount.toFixed(2)}`);
-                console.error(`  - Difference: €${totalDifference.toFixed(2)}`);
-                console.error(`  - Items processed: ${itemsProcessed}, Items skipped: ${itemsSkipped}`);
-
-                // Log item details for debugging
-                extractedData.items.forEach((item, index) => {
-                    console.error(`    Item ${index + 1}: ${item.materialName} - Qty: ${item.quantity}, Total: €${item.totalPrice?.toFixed(2) ?? 'N/A'}`);
-                });
-
-                throw new Error(`Total de factura no coincide: calculado €${calculatedTotalWithIVA.toFixed(2)}, factura €${extractedData.totalAmount.toFixed(2)} (diferencia €${totalDifference.toFixed(2)})`);
             }
 
             return {

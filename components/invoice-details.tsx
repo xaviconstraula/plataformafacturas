@@ -26,6 +26,7 @@ interface InvoiceData {
   issueDate: Date
   status: string
   totalAmount: number
+  originalFileName?: string | null
   provider: {
     id: string
     name: string
@@ -93,6 +94,12 @@ export function InvoiceDetails({ invoice }: InvoiceDetailsProps) {
                     {invoice.status}
                   </span>
                 </div>
+                {invoice.originalFileName && (
+                  <div className="flex justify-between">
+                    <span className="text-sm text-muted-foreground">Archivo:</span>
+                    <span className="text-sm font-mono">{invoice.originalFileName}</span>
+                  </div>
+                )}
               </div>
             </div>
           </div>

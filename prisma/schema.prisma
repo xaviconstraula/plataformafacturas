@@ -139,7 +139,8 @@ model InvoiceItem {
   unitPrice          Decimal  @db.Decimal(10, 2)
   totalPrice         Decimal  @db.Decimal(10, 2)
   listPrice          Decimal? @db.Decimal(10, 2)
-  discountPercentage Decimal? @db.Decimal(5, 2)
+  discountPercentage Decimal? @db.Decimal(5, 2) // Combined/effective discount percentage
+  discountRaw        String? // Raw discount text from invoice (e.g., "50 5" for sequential discounts)
   itemDate           DateTime // Date specific to this item, may differ from invoice date
 
   // Nueva funcionalidad: OT/CECO

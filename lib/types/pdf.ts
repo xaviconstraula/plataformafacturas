@@ -12,7 +12,8 @@ export interface ExtractedPdfItemData {
     materialDescription?: string;
     quantity: number;
     listPrice?: number;
-    discountPercentage?: number;
+    discountPercentage?: number; // Combined/effective discount (calculated from discountRaw)
+    discountRaw?: string; // Raw discount text from invoice (e.g., "50 5" for sequential discounts)
     unitPrice: number;
     totalPrice: number;
     itemDate?: string; // Optional ISO date string for items with different dates

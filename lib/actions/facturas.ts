@@ -474,6 +474,7 @@ export async function getInvoiceDetails(id: string) {
             issueDate: invoice.issueDate,
             status: invoice.status,
             totalAmount: invoice.totalAmount.toNumber(),
+            originalFileName: invoice.originalFileName,
             provider: {
                 id: invoice.provider.id,
                 name: invoice.provider.name,
