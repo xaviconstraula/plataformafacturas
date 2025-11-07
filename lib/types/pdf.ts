@@ -28,6 +28,8 @@ export interface ExtractedPdfData {
     provider: ExtractedPdfProviderData;
     issueDate: string; // ISO date string
     totalAmount: number;
+    ivaPercentage: number; // IVA percentage (e.g., 21.00 for 21%)
+    retentionAmount: number; // Amount withheld as retention/IRPF
     items: ExtractedPdfItemData[];
 }
 

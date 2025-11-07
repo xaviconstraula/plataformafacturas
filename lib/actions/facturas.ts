@@ -218,6 +218,7 @@ export async function getInvoices(params: GetInvoicesParams) {
                     invoiceCode: true,
                     issueDate: true,
                     totalAmount: true,
+                    hasTotalsMismatch: true,
                     provider: {
                         select: {
                             id: true,
@@ -289,6 +290,7 @@ export async function getInvoices(params: GetInvoicesParams) {
                 invoiceCode: string;
                 issueDate: Date;
                 totalAmount: Prisma.Decimal;
+                hasTotalsMismatch: boolean;
                 provider: {
                     id: string;
                     name: string;
@@ -306,6 +308,7 @@ export async function getInvoices(params: GetInvoicesParams) {
                 id: string;
                 invoiceCode: string;
                 totalAmount: number;
+                hasTotalsMismatch: boolean;
                 provider: {
                     id: string;
                     name: string;
@@ -340,6 +343,7 @@ export async function getInvoices(params: GetInvoicesParams) {
                 id: invoice.id,
                 invoiceCode: invoice.invoiceCode,
                 totalAmount: invoice.totalAmount.toNumber(),
+                hasTotalsMismatch: invoice.hasTotalsMismatch,
                 provider: {
                     id: invoice.provider.id,
                     name: invoice.provider.name,
@@ -474,7 +478,10 @@ export async function getInvoiceDetails(id: string) {
             issueDate: invoice.issueDate,
             status: invoice.status,
             totalAmount: invoice.totalAmount.toNumber(),
+            ivaPercentage: invoice.ivaPercentage?.toNumber() ?? 21.00,
+            retentionAmount: invoice.retentionAmount?.toNumber() ?? 0.00,
             originalFileName: invoice.originalFileName,
+            hasTotalsMismatch: invoice.hasTotalsMismatch,
             provider: {
                 id: invoice.provider.id,
                 name: invoice.provider.name,
@@ -485,9 +492,11 @@ export async function getInvoiceDetails(id: string) {
             },
             items: invoice.items.map(item => ({
                 id: item.id,
+                materialId: item.materialId,
                 quantity: item.quantity.toNumber(),
                 listPrice: item.listPrice?.toNumber() ?? null,
                 discountPercentage: item.discountPercentage?.toNumber() ?? null,
+                discountRaw: item.discountRaw,
                 unitPrice: item.unitPrice.toNumber(),
                 totalPrice: item.totalPrice.toNumber(),
                 workOrder: item.workOrder,

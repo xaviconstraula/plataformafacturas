@@ -59,19 +59,22 @@ model Provider {
 // Modelo para Facturas
 
 model Invoice {
-  id               String        @id @default(cuid())
-  invoiceCode      String // Código de factura (único por proveedor)
-  providerId       String
-  provider         Provider      @relation(fields: [providerId], references: [id], onDelete: Cascade)
-  issueDate        DateTime
-  totalAmount      Decimal       @db.Decimal(10, 2)
-  pdfUrl           String? // URL al archivo PDF almacenado
-  originalFileName String? // Nombre del archivo original que creó esta factura
-  status           String        @default("PENDING") // PENDING, PROCESSED, APPROVED, etc.
-  createdAt        DateTime      @default(now())
-  updatedAt        DateTime      @updatedAt
-  items            InvoiceItem[]
-  alerts           PriceAlert[]
+  id                String        @id @default(cuid())
+  invoiceCode       String // Código de factura (único por proveedor)
+  providerId        String
+  provider          Provider      @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  issueDate         DateTime
+  totalAmount       Decimal       @db.Decimal(10, 2)
+  ivaPercentage     Decimal?      @db.Decimal(5, 2) // IVA percentage (e.g., 21.00 for 21%)
+  retentionAmount   Decimal?      @db.Decimal(10, 2) // Amount withheld as retention/IRPF
+  pdfUrl            String? // URL al archivo PDF almacenado
+  originalFileName  String? // Nombre del archivo original que creó esta factura
+  status            String        @default("PENDING") // PENDING, PROCESSED, APPROVED, etc.
+  hasTotalsMismatch Boolean       @default(false)
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  items             InvoiceItem[]
+  alerts            PriceAlert[]
 
   // Código único por proveedor
   // Composite indexes for supplier analytics performance
@@ -135,10 +138,10 @@ model InvoiceItem {
   invoiceId          String
   material           Material @relation(fields: [materialId], references: [id])
   materialId         String
-  quantity           Decimal  @db.Decimal(10, 2)
-  unitPrice          Decimal  @db.Decimal(10, 2)
-  totalPrice         Decimal  @db.Decimal(10, 2)
-  listPrice          Decimal? @db.Decimal(10, 2)
+  quantity           Decimal  @db.Decimal(10, 3)
+  unitPrice          Decimal  @db.Decimal(10, 3)
+  totalPrice         Decimal  @db.Decimal(10, 3)
+  listPrice          Decimal? @db.Decimal(10, 3)
   discountPercentage Decimal? @db.Decimal(5, 2) // Combined/effective discount percentage
   discountRaw        String? // Raw discount text from invoice (e.g., "50 5" for sequential discounts)
   itemDate           DateTime // Date specific to this item, may differ from invoice date

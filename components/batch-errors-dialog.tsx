@@ -52,12 +52,14 @@ export function BatchErrorsDialog({
     const duplicates = errors.filter(error => error.kind === 'DUPLICATE_INVOICE')
     const parsingErrors = errors.filter(error => error.kind === 'PARSING_ERROR' || error.kind === 'EXTRACTION_ERROR')
     const blockedProviders = errors.filter(error => error.kind === 'BLOCKED_PROVIDER')
-    const otherErrors = errors.filter(error => !['DUPLICATE_INVOICE', 'PARSING_ERROR', 'EXTRACTION_ERROR', 'BLOCKED_PROVIDER'].includes(error.kind))
+    const validationErrors = errors.filter(error => error.kind === 'VALIDATION_ERROR')
+    const otherErrors = errors.filter(error => !['DUPLICATE_INVOICE', 'PARSING_ERROR', 'EXTRACTION_ERROR', 'BLOCKED_PROVIDER', 'VALIDATION_ERROR'].includes(error.kind))
 
     const duplicateCount = duplicates.length
-    const actualErrorCount = parsingErrors.length + blockedProviders.length + otherErrors.length
+    const actualErrorCount = parsingErrors.length + blockedProviders.length + validationErrors.length + otherErrors.length
 
     const sections = [
+        { title: 'Validaciones', items: validationErrors, badgeVariant: 'secondary' as const },
         { title: 'Errores críticos', items: otherErrors, badgeVariant: 'destructive' as const },
         { title: 'Errores de lectura', items: parsingErrors, badgeVariant: 'secondary' as const },
         { title: 'Duplicadas', items: duplicates, badgeVariant: 'outline' as const },

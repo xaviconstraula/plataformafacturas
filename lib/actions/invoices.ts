@@ -146,7 +146,7 @@ interface ChatCompletionBody {
 }
 
 // Gemini configuration
-const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_MODEL = "gemini-2.5-pro";
 
 // Regex helpers used to keep Gemini outputs constrained and avoid noisy payloads
 const CIF_REGEX = "^(?:ES)?[A-Z0-9][A-Z0-9\\-]{5,15}$";
@@ -204,19 +204,20 @@ function calculateCombinedDiscount(discountRaw: string): number {
  * Format:
  * HEADER|invoiceCode|issueDate|totalAmount|workOrder (workOrder deprecated, use ~ here)
  * PROVIDER|name|cif|email|phone|address
- * ITEM|materialName|materialCode|isMaterial|quantity|discountRaw|totalPrice|itemDate|workOrder|description|lineNumber
+ * ITEM|materialName|materialCode|isMaterial|quantity|discountRaw|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber
  * ITEM|...
  * 
  * Empty/null fields use: ~
  * discountRaw can be: "10" (single), "50 5" (sequential 50% then 5%), "NETO" (no discount)
- * Code calculates: discountPercentage (combined), unitPrice = totalPrice / quantity, listPrice = unitPrice / (1 - discount/100)
- * workOrder: Specified per-item (field 8), NOT at invoice level (HEADER field 5 should be ~)
+ * Code calculates: discountPercentage (combined), listPrice = unitPrice / (1 - discount/100)
+ * unitPrice: Extracted directly from PRECIO/PRECIO UNITARIO column (field 7). If missing, use 0.00 (no derivations).
+ * workOrder: Specified per-item (field 9), NOT at invoice level (HEADER field 5 should be ~)
  * 
  * Example:
  * HEADER|FAC-2024-001|2024-01-15|1512.55|~
  * PROVIDER|ACME S.L.|A12345678|info@acme.com|+34912345678|Calle Principal 123, Madrid
- * ITEM|Cemento Portland|CEM001|true|10.00|50 5|255.00|~|OT-4077|Cemento gris 50kg|1
- * ITEM|Transporte|~|false|1.00|0|995.50|2024-01-15|OT-4077|Envío especial|2
+ * ITEM|Cemento Portland|CEM001|true|10.00|50 5|25.50|255.00|~|OT-4077|Cemento gris 50kg|1
+ * ITEM|Transporte|~|false|1.00|0|995.50|995.50|2024-01-15|OT-4077|Envío especial|2
  */
 function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: boolean }): ExtractedPdfData | null {
     const suppressWarnings = options?.suppressWarnings ?? false;
@@ -225,6 +226,8 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
     let invoiceCode: string | undefined = undefined;
     let issueDate: string | undefined = undefined;
     let totalAmount: number | undefined = undefined;
+    let ivaPercentage: number | undefined = undefined;
+    let retentionAmount: number | undefined = undefined;
     let invoiceWorkOrder: string | undefined = undefined; // DEPRECATED: OT is now per-item, not invoice-level (kept for backward compatibility)
     let provider: ExtractedPdfData['provider'] | null = null;
     const items: ExtractedPdfItemData[] = [];
@@ -276,7 +279,7 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
         const recordType = parts[0]?.toUpperCase();
 
         if (recordType === 'HEADER') {
-            // HEADER|invoiceCode|issueDate|totalAmount|workOrder (5 fields)
+            // HEADER|invoiceCode|issueDate|totalAmount|ivaPercentage|retentionAmount|workOrder (7 fields)
             if (parts.length < 4) {
                 if (!suppressWarnings) console.warn(`Invalid HEADER line: ${trimmedLine}`);
                 continue;
@@ -284,8 +287,12 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
             invoiceCode = parseField(parts[1]);
             issueDate = parseField(parts[2]);
             totalAmount = parseNumber(parts[3]);
-            // Extract work order (OT) if present (field 5, optional for backward compatibility)
-            invoiceWorkOrder = parts.length >= 5 ? parseField(parts[4]) : undefined;
+            // Extract IVA percentage (field 4, required - default to 21% for Spain)
+            ivaPercentage = parts.length >= 5 ? parseNumber(parts[4]) : 21.00;
+            // Extract retention amount (field 5, required - default to 0)
+            retentionAmount = parts.length >= 6 ? parseNumber(parts[5]) : 0.00;
+            // Extract work order (OT) if present (field 6, optional)
+            invoiceWorkOrder = parts.length >= 7 ? parseField(parts[6]) : undefined;
         } else if (recordType === 'PROVIDER') {
             // PROVIDER|name|cif|email|phone|address
             if (parts.length < 6) {
@@ -300,18 +307,19 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
                 address: parseField(parts[5])
             };
         } else if (recordType === 'ITEM') {
-            // NEW SIMPLIFIED FORMAT (10 fields + ITEM = 11 parts): ITEM|materialName|materialCode|isMaterial|quantity|discountRaw|totalPrice|itemDate|workOrder|description|lineNumber
+            // NEW FORMAT (11 fields + ITEM = 12 parts): ITEM|materialName|materialCode|isMaterial|quantity|discountRaw|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber
             // discountRaw can be: "10" (single discount), "50 5" (sequential 50% then 5%), "NETO" (no discount)
-            // Code calculates: discountPercentage (combined), unitPrice = totalPrice / quantity, listPrice = unitPrice / (1 - discount/100)
-            // Accept 10-11 parts (lineNumber optional)
-            if (parts.length < 10 || parts.length > 11) {
+            // Code calculates: discountPercentage (combined), listPrice = unitPrice / (1 - discount/100)
+            // unitPrice: Extracted directly from PRECIO/PRECIO UNITARIO column (field 7)
+            // Accept 11-12 parts (lineNumber optional)
+            if (parts.length < 11 || parts.length > 12) {
                 if (!suppressWarnings) {
-                    console.warn(`Malformed ITEM line (expected 10-11 parts, got ${parts.length}): ${trimmedLine}`);
+                    console.warn(`Malformed ITEM line (expected 11-12 parts, got ${parts.length}): ${trimmedLine}`);
                     console.warn(`Parts: ${parts.map((p, i) => `${i}:${p}`).join(', ')}`);
-                    if (parts.length < 10) {
+                    if (parts.length < 11) {
                         console.warn(`This likely indicates Gemini's response was truncated or missing required fields. Consider processing this invoice manually.`);
                     } else {
-                        console.warn(`This indicates extra fields or parsing issues. Extra parts: ${parts.slice(11).join(', ')}`);
+                        console.warn(`This indicates extra fields or parsing issues. Extra parts: ${parts.slice(12).join(', ')}`);
                     }
                 }
                 continue;
@@ -320,13 +328,14 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
             const materialName = parseField(parts[1]);
             let quantity = parseNumber(parts[4]);
             const discountRaw = parseField(parts[5]) || '0'; // Raw discount text (e.g., "50 5" or "10")
-            let totalPrice = parseNumber(parts[6]);
+            let unitPrice = parseNumber(parts[6]); // Extracted unit price (field 7)
+            let totalPrice = parseNumber(parts[7]); // Total price (field 8)
 
             // Parse remaining fields
-            const rawItemDate = parseField(parts[7]);
-            const itemWorkOrder = parseField(parts[8]); // Per-item work order (overrides invoice-level)
-            const rawDescription = parseField(parts[9]);
-            const rawLineNumber = parts.length === 11 ? parseNumber(parts[10]) : undefined;
+            const rawItemDate = parseField(parts[8]);
+            const itemWorkOrder = parseField(parts[9]); // Per-item work order (overrides invoice-level)
+            const rawDescription = parseField(parts[10]);
+            const rawLineNumber = parts.length === 12 ? parseNumber(parts[11]) : undefined;
 
             if (!materialName) {
                 if (!suppressWarnings) console.warn(`Missing required ITEM fields: ${trimmedLine}`);
@@ -337,31 +346,31 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
             if (quantity === undefined || isNaN(quantity)) {
                 quantity = 0; // Allow 0 but don't default to 1
             }
+            if (unitPrice === undefined || isNaN(unitPrice)) {
+                // Do not derive from other fields; extract as-is or default to 0.00
+                unitPrice = 0;
+            }
             if (totalPrice === undefined || isNaN(totalPrice)) {
+                // Do not derive from other fields; extract as-is or default to 0.00
                 totalPrice = 0;
             }
 
             // Calculate combined discount percentage from raw discount
             const discountPercentage = calculateCombinedDiscount(discountRaw);
 
-            // Round to 2 decimal places
-            quantity = Number(quantity.toFixed(2));
-            totalPrice = Number(totalPrice.toFixed(2));
+            // Round to 3 decimal places to preserve precision
+            quantity = Number(quantity.toFixed(3));
+            unitPrice = Number(unitPrice.toFixed(3));
+            totalPrice = Number(totalPrice.toFixed(3));
 
-            // Calculate unitPrice and listPrice from extracted values
-            // unitPrice = totalPrice / quantity (handle division by zero)
-            let unitPrice = 0;
-            if (quantity !== 0) {
-                unitPrice = Number((totalPrice / quantity).toFixed(2));
-            }
-
+            // Calculate listPrice from extracted unitPrice
             // listPrice = unitPrice / (1 - discount/100) (handle 100% discount case)
             let listPrice = unitPrice; // Default to unitPrice if no discount
             if (discountPercentage > 0 && discountPercentage < 100) {
-                listPrice = Number((unitPrice / (1 - discountPercentage / 100)).toFixed(2));
+                listPrice = Number((unitPrice / (1 - discountPercentage / 100)).toFixed(3));
             } else if (discountPercentage === 100) {
                 // For 100% discount, we can't calculate listPrice from unitPrice (would be division by zero)
-                // Keep listPrice = unitPrice (both will be 0 if totalPrice is 0)
+                // Keep listPrice = unitPrice (both will be 0 if unitPrice is 0)
                 listPrice = unitPrice;
             }
 
@@ -417,7 +426,7 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
         // If there's a mix, respect the extraction as-is (legitimate invoice with adjustments)
         if (itemsWithPositivePrices.length > 0 && itemsWithNegativePrices.length === 0 && !suppressWarnings) {
             const itemsSum = items.reduce((sum, item) => sum + item.totalPrice, 0);
-            const expectedSum = totalAmount! / 1.21; // Remove IVA to get base
+            const expectedSum = totalAmount!; // Compare directly with extracted total (both include IVA)
 
             // Check if flipping all signs would make the math work
             const flippedSum = -itemsSum;
@@ -425,7 +434,7 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
 
             if (diffWithFlip < Math.abs(itemsSum - expectedSum)) {
                 console.error(`⚠️ [Credit Note Sign Error] Invoice ${invoiceCode} has negative totalAmount (${totalAmount}) but ALL ${items.length} items are positive!`);
-                console.error(`   Items sum: ${itemsSum.toFixed(2)}, Expected (totalAmount / 1.21): ${expectedSum.toFixed(2)}`);
+                console.error(`   Items sum: ${itemsSum.toFixed(2)}, Expected total: ${expectedSum.toFixed(2)}`);
                 console.error(`   This indicates the AI failed to extract negative prices correctly.`);
 
                 // Auto-correct: flip signs of all prices for credit notes
@@ -439,18 +448,54 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
                 console.warn(`⚠️ [Credit Note Warning] Invoice ${invoiceCode} has negative totalAmount but positive items - keeping as-is (validation will check total)`);
             }
         }
-    }    // At this point, all required fields are validated
+    }    // Validate and calculate IVA/retention with intelligent fallback
+    let finalIvaPercentage = ivaPercentage!;
+    let finalRetentionAmount = retentionAmount!;
+
+    // Calculate sum of line totals (already include IVA)
+    const itemsSum = items.reduce((sum, item) => sum + (item.totalPrice || 0), 0);
+
+    // Expected relationship: sum(lineTotals) - retention = invoiceTotal
+    const expectedTotal = itemsSum - finalRetentionAmount;
+    const totalDifference = Math.abs(expectedTotal - totalAmount!);
+
+    // If totals don't match within tolerance, try to fix retention
+    if (totalDifference > 1) { // More than 1€ tolerance
+        const calculatedRetention = itemsSum - totalAmount!;
+        // Only adjust if calculated retention is reasonable (positive and not >50% of total)
+        if (calculatedRetention >= 0 && calculatedRetention < itemsSum * 0.5) {
+            finalRetentionAmount = Number(calculatedRetention.toFixed(2));
+            console.log(`[IVA Validation] Adjusted retention from ${retentionAmount} to ${finalRetentionAmount} for invoice ${invoiceCode}`);
+        }
+    }
+
+    // Validate IVA rate is reasonable (common Spanish rates: 0%, 4%, 10%, 21%)
+    const validIvaRates = [0, 4, 10, 21];
+    const roundedIva = Math.round(finalIvaPercentage);
+    if (!validIvaRates.includes(roundedIva)) {
+        // If extracted IVA is not a standard rate, default to 21%
+        console.log(`[IVA Validation] IVA rate ${finalIvaPercentage}% is not standard, defaulting to 21.00% for invoice ${invoiceCode}`);
+        finalIvaPercentage = 21.00;
+    } else {
+        // Use the exact valid rate
+        finalIvaPercentage = roundedIva;
+    }
+    finalRetentionAmount = Number.isFinite(finalRetentionAmount) && finalRetentionAmount >= 0 ? finalRetentionAmount : 0.00;
+
+    // At this point, all required fields are validated
     return {
         invoiceCode: invoiceCode!,
         provider: provider!,
         issueDate: issueDate!,
         totalAmount: totalAmount!,
+        ivaPercentage: finalIvaPercentage,
+        retentionAmount: finalRetentionAmount,
         items
     };
 }
 
 export interface BatchErrorDetail {
-    kind: 'PARSING_ERROR' | 'DUPLICATE_INVOICE' | 'DATABASE_ERROR' | 'EXTRACTION_ERROR' | 'BLOCKED_PROVIDER' | 'UNKNOWN';
+    kind: 'PARSING_ERROR' | 'DUPLICATE_INVOICE' | 'DATABASE_ERROR' | 'EXTRACTION_ERROR' | 'BLOCKED_PROVIDER' | 'VALIDATION_ERROR' | 'UNKNOWN';
     message: string;
     fileName?: string;
     invoiceCode?: string;
@@ -481,6 +526,64 @@ type JsonErrorEntry = {
     fileName?: unknown;
     invoiceCode?: unknown;
     timestamp?: unknown;
+}
+
+const DEFAULT_MISMATCH_TOLERANCE = new Prisma.Decimal(0.5);
+const euroCurrencyFormatter = new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'EUR' });
+
+function decimalFrom(value: number | Prisma.Decimal | null | undefined): Prisma.Decimal {
+    if (value instanceof Prisma.Decimal) {
+        return value;
+    }
+
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        return new Prisma.Decimal(value);
+    }
+
+    return new Prisma.Decimal(0);
+}
+
+export interface TotalsMismatchResult {
+    hasMismatch: boolean;
+    difference: Prisma.Decimal;
+    itemsSum: Prisma.Decimal;
+    expectedBase: Prisma.Decimal;
+}
+
+function evaluateTotalsMismatch(
+    items: Array<{ totalPrice?: number | Prisma.Decimal | null }>,
+    totalAmount: number | Prisma.Decimal,
+    options?: { tolerance?: number; ivaPercentage?: number; retentionAmount?: number | Prisma.Decimal | null }
+): TotalsMismatchResult {
+    const tolerance = options?.tolerance !== undefined
+        ? new Prisma.Decimal(options.tolerance)
+        : DEFAULT_MISMATCH_TOLERANCE;
+
+    // Line totals are the base imponible (before IVA)
+    const baseImponible = items.reduce((acc, item) => acc.plus(decimalFrom(item.totalPrice)), new Prisma.Decimal(0));
+
+    // Calculate IVA amount based on percentage
+    const ivaPercentage = new Prisma.Decimal(options?.ivaPercentage ?? 21.00);
+    const ivaAmount = baseImponible.times(ivaPercentage).dividedBy(100);
+
+    // Calculate expected total: baseImponible + IVA - retention
+    const retentionAmount = decimalFrom(options?.retentionAmount || 0);
+    const expectedTotal = baseImponible.plus(ivaAmount).minus(retentionAmount);
+
+    const totalAmountDecimal = decimalFrom(totalAmount);
+    const difference = expectedTotal.minus(totalAmountDecimal).abs();
+
+    return {
+        hasMismatch: difference.greaterThan(tolerance),
+        difference,
+        itemsSum: expectedTotal, // Return the calculated total with IVA
+        expectedBase: baseImponible, // Store base imponible for reference
+    };
+}
+
+function buildTotalsMismatchMessage(invoiceCode: string, result: TotalsMismatchResult, totalAmount: number | Prisma.Decimal): string {
+    const totalAmountDecimal = decimalFrom(totalAmount);
+    return `Descuadre en factura ${invoiceCode}: suma de líneas ${euroCurrencyFormatter.format(Number(result.itemsSum.toFixed(2)))} frente a total extraído ${euroCurrencyFormatter.format(Number(totalAmountDecimal.toFixed(2)))}. Diferencia ${euroCurrencyFormatter.format(Number(result.difference.toFixed(2)))}.`;
 }
 
 export interface BatchProgressInfo {
@@ -918,6 +1021,8 @@ export interface CreateInvoiceResult {
     isBlockedProvider?: boolean;
     batchId?: string; // Add batch ID to results
     isDuplicate?: boolean; // Flag to indicate if this is a duplicate invoice
+    hasTotalsMismatch?: boolean;
+    validationErrors?: BatchErrorDetail[];
 }
 
 // Type for items after initial extraction and validation, before sorting
@@ -935,6 +1040,34 @@ interface TransactionOperationResult {
     invoiceId?: string;
     alertsCreated?: number;
     isExisting?: boolean; // To distinguish from new invoices
+    hasTotalsMismatch?: boolean;
+    validationErrors?: BatchErrorDetail[];
+}
+
+export interface UpdateInvoiceItemInput {
+    id: string;
+    materialId: string;
+    materialName: string;
+    quantity: number;
+    listPrice?: number | null;
+    discountPercentage?: number | null;
+    discountRaw?: string | null;
+    unitPrice: number;
+    totalPrice: number;
+    workOrder?: string | null;
+}
+
+export interface UpdateInvoiceInput {
+    invoiceId: string;
+    totalAmount: number;
+    items: UpdateInvoiceItemInput[];
+}
+
+export interface UpdateInvoiceActionResult {
+    success: boolean;
+    message: string;
+    hasTotalsMismatch: boolean;
+    errors?: string[];
 }
 
 
@@ -997,535 +1130,126 @@ function buildExtractionPrompt(startFromItemNumber?: number): string {
 
     return `Extract invoice data from this PDF document (consolidate all pages into a single invoice). Only extract visible data.${itemStartInstruction}
 
-CRITICAL REQUIREMENTS - READ CAREFULLY:
-- ALWAYS extract the PROVIDER information first - this is MANDATORY
-- PROVIDER is the invoice issuer (company at top), NOT the client/customer
-- If you cannot find provider info, use reasonable defaults but NEVER omit the PROVIDER line
-- Process ALL line items you can find, even if uncertain about some fields
-- ⚠️ CRITICAL: Extract items in the EXACT ORDER they appear on the invoice (top to bottom, left to right)
-- ⚠️ CRITICAL: Maintain the original sequence - do NOT reorder items alphabetically or by any other criteria
-- ⚠️ CRITICAL: If items span multiple pages, extract them in the order they appear across all pages
-
-PROVIDER (MANDATORY - Invoice Issuer):
-- Company name at TOP of invoice, labeled "Vendedor/Proveedor/Emisor/Emitido por"
-- NEVER use client/customer names like "Constraula" or "Sorigué" as provider
-- Extract: name, tax ID (CIF/NIF/NIE), email, phone, address
-- If any field is missing, use ~ but ALWAYS include the PROVIDER line
-
-TAX ID (CIF/NIF/NIE) - CRITICAL for provider identification:
-- CIF: Letter + 8 digits (A12345678)
-- NIF: 8 digits + Letter (12345678A)  
-- NIE: X/Y/Z + 7 digits + Letter (X1234567A)
-- Look for: "CIF:", "NIF:", "Cód. Fiscal:", "Tax ID:", "RFC:"
-- VERIFY digit count matches format exactly
-
-PHONE NUMBER:
-- Spanish format: 6/7/8/9 + 8 digits total (9 digits)
-- May have +34 prefix
-- Look for: "Tel:", "Teléfono:", "Phone:", "Tlf:"
-
-INVOICE HEADER:
-- Invoice code/number (from top of document, usually near "FACTURA Nº" or "INVOICE NO.")
-- Issue date in YYYY-MM-DD format
-- Total amount (FINAL TOTAL at bottom of invoice INCLUDING 21% IVA/tax)
-  * CRITICAL: Look for the FINAL TOTAL at the BOTTOM of the last page
-  * Common labels: "TOTAL", "TOTAL FACTURA", "IMPORTE TOTAL", "R. EQUIV.", "TOTAL €"
-  * Usually appears in a box or bold text at the very end
-  * The totalAmount should equal: (sum of all item totalPrice values) × 1.21
-  * DO NOT confuse invoice number with total amount (invoice numbers are usually shorter, e.g., 272916 vs 743.75)
-  * DO NOT confuse subtotals ("IMP. BRUTO", "BASE IMPONIBLE") with the final TOTAL
-  * CRITICAL: For credit notes (devoluciones), the totalAmount MUST be negative
-  * If invoice shows negative total or is labeled "DEVOLUCIÓN/ABONO/NOTA DE CRÉDITO", totalAmount must be negative
-- Work Order (OT): Leave as ~ in HEADER (work orders are specified per-item, not at invoice level)
-
-LINE ITEMS - CRITICAL TABLE STRUCTURE RULES:
-⚠️ INVOICE TABLES ARE GRIDS - Each row is independent, each cell must align with its column header
-
-🚨 SIMPLIFIED EXTRACTION - Let code handle calculations!
-We only extract what's VISIBLE on the invoice. Calculations (unitPrice, listPrice) are done by code.
-
-🚨 MANDATORY OUTPUT FORMAT FOR EACH ITEM (10 fields after ITEM prefix):
-ITEM|materialName|materialCode|isMaterial|quantity|discountRaw|totalPrice|itemDate|workOrder|description|lineNumber
-
-🔢 CRITICAL: You MUST output EXACTLY 10 fields per ITEM line (11 total parts including ITEM prefix)
-   Position 1: materialName (text) - Product/service name from CONCEPTO column
-   Position 2: materialCode (text or ~) - Code from CÓDIGO column
-   Position 3: isMaterial (true/false) - true for products, false for services
-   Position 4: quantity (number) - From CANTIDAD/Uds column - NEVER skip this!
-   Position 5: discountRaw (text) - From %DTO column EXACTLY as shown:
-      * Single discount: "10" or "5.5" → extract as-is
-      * Sequential discounts: "50 5" (50% then 5%) → extract as "50 5"
-      * No discount: blank/"NETO" → extract as "0"
-      * Code will calculate combined discount automatically
-   Position 6: totalPrice (number) - From TOTAL/IMPORTE column - THIS IS THE MOST IMPORTANT!
-   Position 7: itemDate (date or ~) - Date if different from invoice date
-   Position 8: workOrder (text or ~) - Work order for this specific item (if different from invoice-level OT)
-   Position 9: description (text or ~) - Additional notes
-   Position 10: lineNumber (number or ~) - Line number if visible
-
-🎁 SPECIAL ITEMS (PACKS, KITS, ACCESSORIES):
-Items like "PACK 6 UDS", "KIT G FIJACION", "KIT FIJACION LAVABO-PARED" commonly have NO prices - this is NORMAL.
-- These are bundled items, accessories, or complementary products not priced individually
-- ALWAYS output: discountRaw=0, totalPrice=0.00
-- Still extract quantity if visible (e.g., "PACK 6 UDS" may show quantity=1.00 or 6.00)
-- DO NOT try to find prices from other rows - if the row has blank price cells, use 0.00
-- Examples: "PACK", "KIT", "FIJACION", "ACCESORIO", "COMPLEMENTO"
-
-🚨 CRITICAL CELL-BY-CELL EXTRACTION PROCESS:
-When you see a table row, you must extract data by following these steps EXACTLY:
-
-STEP 1: Identify the row you're processing (e.g., Row 1, Row 2, Row 3)
-STEP 2: Read material name/code from the LEFTMOST columns of THAT SPECIFIC ROW
-STEP 3: For THAT SAME ROW, look for the CANTIDAD/UNIDADES/Uds column → extract as QUANTITY (field 4)
-STEP 4: For THAT SAME ROW, find % DTO/DESCUENTO column → extract as discountRaw (field 5)
-   - Extract EXACTLY what you see: "10", "5.5", "50 5", "20 10", etc.
-   - Sequential discounts: "50 5" means 50% discount, then 5% on the discounted price
-   - If % DTO cell is BLANK/EMPTY or shows "NETO" → write "0"
-   - DO NOT calculate combined discount - just extract the text as-is
-   - DO NOT look down to the next row
-STEP 5: For THAT SAME ROW, find TOTAL/IMPORTE column → extract as totalPrice (field 6)
-   - This is the MOST IMPORTANT field - extract it carefully!
-   - If TOTAL cell is BLANK/EMPTY → write 0.00
-   - DO NOT look down to the next row
-STEP 6: If ANY cell is blank/empty in that row → write 0 or 0.00 for that field
-STEP 7: NEVER look at cells from different rows to "fill in" missing values
-STEP 8: VERIFY you have all 10 fields before outputting the line (count them!)
-STEP 9: Move to the NEXT row and repeat from STEP 1
-
-NOTE: We do NOT extract PRECIO BASE or PRECIO FINAL/P.U. columns anymore!
-      The code will calculate unitPrice and listPrice from quantity, discountRaw, and totalPrice.
-
-🔍 VISUAL READING TECHNIQUE (USE A MENTAL RULER):
-Imagine you're using a physical ruler placed HORIZONTALLY across the page.
-- Place the ruler on Row 1 → read ALL values from Row 1 only (material, quantity, prices)
-- If any cell under the ruler is BLANK → that value is 0.00
-- Move the ruler DOWN to Row 2 → read ALL values from Row 2 only
-- If any cell under the ruler is BLANK → that value is 0.00
-- NEVER slide the ruler up/down while reading a single row
-- NEVER "peek" above or below the ruler to fill in missing data
-
-💡 THINK OF IT LIKE THIS:
-- Each row is a separate invoice line with its own independent data
-- Blank cells in a row mean that specific value is 0.00 for THAT item
-- The price in Row 2 belongs ONLY to Row 2's item, NOT to Row 1's item
-- Common scenario: PACKs/KITs (Row 1) have blank prices, regular items (Row 2) have prices
-  → Row 1 must output all zeros, Row 2 must output its actual prices
-
-🔍 VISUAL READING TECHNIQUE:
-Imagine you're using a ruler placed HORIZONTALLY across the page.
-- Place the ruler on Row 1 → read ALL values from Row 1 only
-- Move the ruler down to Row 2 → read ALL values from Row 2 only
-- If a cell under the ruler is BLANK → that value is 0.00
-- NEVER slide the ruler up/down while reading a single row
-
-TABLE EXTRACTION PROCESS (follow in order):
-1. IDENTIFY column headers FIRST: CÓDIGO, CANTIDAD/Uds, CONCEPTO/DESCRIPCIÓN, % DTO, TOTAL/IMPORTE
-   - NOTE: We skip PRECIO BASE and PRECIO FINAL columns - not needed!
-2. SKIP non-item rows (see exclusion list below)
-3. For EACH row in the table:
-   a. Read the material name/code from leftmost columns (fields 1-2)
-   b. Find CANTIDAD/Uds column in that row → extract as quantity (field 4) - DO NOT SKIP!
-   c. Find % DTO column in that row → extract as discountPercentage (field 5)
-   d. Find TOTAL/IMPORTE column in that row → extract as totalPrice (field 6) - MOST IMPORTANT!
-   e. If a cell in that row is BLANK/EMPTY → use 0.00 for that field
-   f. NEVER look up or down to other rows for missing values
-   g. Count your fields - you must have EXACTLY 11 total (10 after ITEM prefix)
-4. Move to the next row and repeat
-
-🚫 CRITICAL: SKIP THESE ROWS (NOT INVOICE ITEMS):
-DO NOT extract rows that contain ONLY promotional notes, accumulations, or metadata:
-- "EUROS ACUMULADOS" or "Lleva acumulados" (loyalty points tracking)
-- "PROMOCION" or "Promo" (promotional campaign names)
-- "Fecha límite promoc" (promotion deadline notes)
-- "Hacer:" or "Hager:" followed by promotional text
-- "Exclusivas" (exclusive offers notes)
-- Any row where CONCEPTO contains only metadata and has NO material/service name
-- Rows with asterisks (****) marking section dividers
-
-⚠️ IMPORTANT: DO EXTRACT delivery note references - these contain Work Order (OT) information:
-✅ "ALBARAN Nº 300.199 FECHA 23-11-2020" → EXTRACT AS SECTION HEADER (not as item)
-✅ "S/REF: 074129/001942" or "S/REF:4060-1799-146710 ESCOLA EL SEC" → EXTRACT AS SECTION HEADER
-
-WORK ORDER (OT) EXTRACTION - CRITICAL INSTRUCTIONS:
-📋 Invoices often have MULTIPLE work orders, with items grouped under section headers.
-
-SECTION HEADER DETECTION:
-- Look for rows containing: "ALBARAN Nº", "S/REF:", "Obra:", "OT:", "CECO:"
-- These are NOT line items - they are section dividers that indicate a new work order
-- Common patterns:
-  * "ALBARAN Nº 1 096.232 FECHA 7-04-2025" 
-  * "S/REF: 074129/001941" or "S/REF:4060-1799-146710 ESCOLA EL SEC"
-  * "Obra: OT-4129" or "OT: 4129"
-
-EXTRACTING OT FROM SECTION HEADERS:
-1. When you see "S/REF: 074129/001941":
-   - Extract the work order code: "074129" (first part before the slash)
-   - Normalize format: keep as "OT-074129" or "074129" (be consistent)
-2. When you see "ALBARAN Nº" followed by "S/REF:":
-   - The S/REF line contains the work order - extract from there
-3. When you see "Obra: OT-4129" or "OT: 4129":
-   - Extract the work order: "OT-4129" or "4129"
-
-APPLYING OT TO ITEMS (MOST IMPORTANT RULE):
-- When you encounter a section header with an OT, remember that OT code
-- Apply that OT to ALL subsequent items until you see a new section header with a different OT
-- Each item's workOrder field (position 8) should contain the OT from its section
-- DO NOT leave workOrder as ~ unless there is truly no OT information anywhere
-
-EXAMPLE INVOICE STRUCTURE (text format output):
-  HEADER|FAC-2024-001|2024-01-15|1512.55|~
-  
-  PROVIDER|ACME S.L.|A12345678|info@acme.com|+34912345678|Calle Principal 123
-  
-  [Section Header - not an item line]
-  ALBARAN Nº 1 096.232 FECHA 7-04-2025
-  S/REF: 074129/001941  ← Extract OT: "074129"
-  
-  ITEM|Cemento Portland|CEM001|true|10.00|50 5|255.00|~|074129|~|1  ← Apply OT "074129"
-  ITEM|Arena|ARENA01|true|5.00|38|125.00|~|074129|~|2  ← Apply OT "074129"
-  
-  [Section Header - not an item line]  
-  ALBARAN Nº 1 097.126 FECHA 7-04-2025
-  S/REF: 074129/001942  ← Extract OT: "074129" (same OT, different albaran)
-  
-  ITEM|Ladrillos|LAD001|true|100.00|40|280.00|~|074129|~|3  ← Apply OT "074129"
-  ITEM|Transporte|~|false|1.00|0|150.00|~|074129|~|4  ← Apply OT "074129"
-
-KEY POINTS:
-- Section headers are NOT output as ITEM lines
-- Extract OT from section headers and apply to following items
-- If invoice has NO section headers and NO OT anywhere, use ~ for all item workOrder fields
-- If you see "S/REF: 074129/001941", extract "074129" as the work order
-- Keep the OT normalized (e.g., always add "OT-" prefix or always omit it - be consistent)
-
-📋 STEP-BY-STEP PROCESSING ALGORITHM:
-When processing the invoice, follow these steps IN ORDER:
-
-1. INITIALIZE: Set currentWorkOrder = ~ (no work order yet)
-
-2. READ EACH LINE from top to bottom:
-   a. Is this line a section header (contains "ALBARAN", "S/REF:", "Obra:", "OT:")?
-      → YES: Extract the work order code and update currentWorkOrder
-             Example: "S/REF: 074129/001941" → currentWorkOrder = "074129"
-             DO NOT output an ITEM line for this
-      → NO: Continue to step b
-   
-   b. Is this line a table row with material/product information?
-      → YES: Extract the item data and set its workOrder field (position 8) to currentWorkOrder
-             Example: If currentWorkOrder = "074129", then output:
-             ITEM|Material Name|CODE|true|5.00|10|50.00|~|074129|~|1
-      → NO: Skip this line (it's metadata, totals, or other non-item content)
-
-3. REPEAT step 2 for all lines in the invoice
-
-EXAMPLE WALKTHROUGH:
-Given this invoice content:
-  Line 1: "FACTURA Nº FAC-001"
-  Line 2: "PROVIDER INFO..."
-  Line 3: "ALBARAN Nº 1 096.232 FECHA 7-04-2025"
-  Line 4: "S/REF: 074129/001941"
-  Line 5: "Cemento Portland | 10.00 | 255.00"
-  Line 6: "Arena | 5.00 | 125.00"
-  Line 7: "ALBARAN Nº 1 097.126 FECHA 7-04-2025"
-  Line 8: "S/REF: 082341/002001"
-  Line 9: "Ladrillos | 100.00 | 280.00"
-
-Processing:
-  Line 1-2: Extract HEADER and PROVIDER (currentWorkOrder = ~)
-  Line 3-4: Section header → Extract "074129" → currentWorkOrder = "074129", DO NOT output ITEM
-  Line 5: Item → Output: ITEM|Cemento Portland|...|074129|...
-  Line 6: Item → Output: ITEM|Arena|...|074129|...
-  Line 7-8: Section header → Extract "082341" → currentWorkOrder = "082341", DO NOT output ITEM
-  Line 9: Item → Output: ITEM|Ladrillos|...|082341|...
-
-✅ DO EXTRACT these rows:
-- Rows with material codes (CÓDIGO column has alphanumeric code)
-- Rows with material/service names in CONCEPTO
-- Rows with ECOTASA, fees, or actual charges (even if 0.00)
-- Rows showing actual products/services delivered
-
-EXAMPLE OF WHAT TO SKIP:
-❌ "EUROS ACUMULADOS PROMOCION JAM" → SKIP (promotional note)
-❌ "Lleva acumulados 598.42 Euros/Tubes" → SKIP (accumulated points note)
-❌ "Fecha límite promoc. 31-12-20" → SKIP (promotion deadline)
-❌ "Hacer:Jamon compras acum +500¤" → SKIP (promotional milestone)
-❌ "***** Promo herramienta 2020 *****" → SKIP (section divider)
-❌ "ALBARAN Nº 300.199 FECHA 23-11-2020" → SKIP (delivery note reference in middle of table)
-❌ "S/REF:4060-1799-146710 ESCOLA EL SEC" → SKIP (reference note)
-
-EXAMPLE OF WHAT TO EXTRACT:
-✅ "HAG ESC225 CONTACTOR 230V 25A 2NA" → EXTRACT (actual product)
-✅ "ECOTASA DE RESIDUOS DE APARATO" → EXTRACT (actual fee/charge)
-✅ "TERMO GREENHEISS FIVE 140L VERTICAL SE ERP" → EXTRACT (actual product)
-
-FIELD EXTRACTION GUIDE (extract in this exact order - 10 fields total):
-1. materialName: Descriptive product/service name exactly as written from "CONCEPTO/DESCRIPCIÓN" column
-2. materialCode: Reference code from "CÓDIGO/REF/ARTÍCULO" column (use ~ if column missing/empty)
-3. isMaterial: true for physical goods, false for services/fees
-4. quantity: ⚠️ CRITICAL - Units from "CANTIDAD/Uds/UNIDADES" column (use 0.00 if missing, NEVER skip this field!)
-   * NEVER confuse quantity with totalPrice - they are in different columns!
-   * Quantity is typically a small number (1, 2, 5, 10) or decimal (2.5, 4.5)
-   * If you see a larger number like 33.78 in the quantity position, it's likely totalPrice - check the column headers!
-5. discountRaw: Discount text from "% DTO/DESCUENTO %/DTO%" column - extract EXACTLY as shown:
-   * Single discount: "10", "5.5", "15" → extract as-is (e.g., "10")
-   * Sequential discounts: "50 5" (50% then 5%), "20 10" (20% then 10%) → extract as-is (e.g., "50 5")
-   * No discount: blank/"NETO" → extract as "0"
-   * Examples: "10", "50 5", "20 10 5", "0", "NETO" → all valid
-   * Code will calculate: 52.5% for "50 5", 32.6% for "20 10 5", 10% for "10"
-6. totalPrice: ⚠️ MOST IMPORTANT - Line total from "TOTAL/IMPORTE/TOTAL LÍNEA" column (use 0.00 if missing)
-   * This is the line item total - extract it carefully and accurately!
-   * Example: If invoice shows 33.74 or 33.78, extract exactly as shown
-   * NEVER put the quantity value here by mistake!
-   * The code will calculate: unitPrice = totalPrice / quantity
-   * The code will calculate: listPrice = unitPrice / (1 - discountPercentage/100)
-7. itemDate: Date if different from invoice date in YYYY-MM-DD format (use ~ if same as invoice date)
-8. workOrder: Work order for this specific item if shown (use ~ if not present or same as invoice-level OT)
-   * Most items will use ~ here since OT is usually at invoice level
-9. description: Brief additional notes (use ~ if none)
-10. lineNumber: Visible line number if present (use ~ if not visible)
-
-⚠️ VISUAL EXAMPLE - How to read a simplified table:
-┌──────┬─────────┬──────────────┬──────┬────────┐
-│ CODE │ QUANTITY│ DESCRIPTION  │ %DTO │ IMPORTE│
-├──────┼─────────┼──────────────┼──────┼────────┤
-│ 001  │ 1.00    │ Item A       │(blank)│(blank)│  ← Output: discountRaw="0"|totalPrice=0.00
-│ 002  │ 8.00    │ Item B       │  5   │ 33.74 │  ← Output: discountRaw="5"|totalPrice=33.74
-│ 003  │ 6.00    │ Item C       │ 50 5 │ 18.00 │  ← Output: discountRaw="50 5"|totalPrice=18.00
-│ 004  │ 2.00    │ Item D       │ NETO │ 25.00 │  ← Output: discountRaw="0"|totalPrice=25.00
-└──────┴─────────┴──────────────┴──────┴────────┘
-
-In this example:
-- Row 1 (Item A) has blank cells → Extract as: discountRaw="0", totalPrice=0.00
-- Row 2 (Item B) has 5% discount and 33.74 total → Extract as: discountRaw="5", totalPrice=33.74
-  * Code will calculate: combined discount=5%, unitPrice=33.74/8=4.22, listPrice=4.22/0.95=4.44
-- Row 3 (Item C) has sequential "50 5" discount and 18.00 total → Extract as: discountRaw="50 5", totalPrice=18.00
-  * Code will calculate: combined discount=52.5% (50% then 5%), unitPrice=18.00/6=3.00, listPrice=3.00/0.475=6.32
-- Row 4 (Item D) has NETO (no discount) and 25.00 total → Extract as: discountRaw="0", totalPrice=25.00
-  * Code will calculate: combined discount=0%, unitPrice=25.00/2=12.50, listPrice=12.50
-
-CRITICAL EXTRACTION RULES:
-⚠️ RULE #1 - NO VERTICAL DISPLACEMENT: When you see a blank cell, write 0 or 0.00 for that exact cell. DO NOT grab the value from the row below or above. Each row is independent.
-⚠️ RULE #2 - EXTRACT DISCOUNT AS TEXT: Always extract discountRaw as text exactly as shown: "10", "50 5", "20 10", "0", etc.
-⚠️ RULE #3 - FOCUS ON TOTAL: The totalPrice is the MOST IMPORTANT field - extract it accurately!
-⚠️ RULE #4 - SKIP PRICE COLUMNS: Do NOT extract from "PRECIO BASE" or "PRECIO FINAL" columns - we don't need them!
-
-- Extract quantity and totalPrice exactly from invoice columns
-- Extract discountRaw as text (not as number) - "10", "50 5", "0", etc.
-- If a cell shows 0.00 or is empty: use "0" for discount, 0.00 for prices
-- If a cell shows a dash (-) or is blank: use "0" for discount, 0.00 for prices
-- NEVER use ~ for numeric values - always use 0.00 for missing/zero numbers
-- For quantity: if empty or shows 0, use 0.00
-
-CRITICAL: PREVENT VERTICAL DATA DISPLACEMENT:
-- Each invoice line is a HORIZONTAL row - NEVER mix data from different rows
-- If a line item has blank/empty cells, use 0.00 for those specific cells
-- DO NOT "borrow" or "shift" values from the row below or above
-- Match each value to its EXACT horizontal row by the line's material name/code
-- VERIFY: Material name in column 1 must align horizontally with its values in other columns
-
-NEGATIVE AMOUNTS (CREDIT NOTES / DEVOLUCIONES):
-🚨 CRITICAL: Credit notes are invoices that REFUND money - typically ALL amounts are NEGATIVE
-
-DETECTING CREDIT NOTES:
-- Look for labels: "DEVOLUCIÓN", "ABONO", "NOTA DE CRÉDITO", "RECTIFICATIVA"
-- Check if the final total on the invoice is negative (e.g., "-650,05 €" or "650,05- €")
-- If you see a negative total or credit note label → THIS IS LIKELY A CREDIT NOTE
-
-EXTRACTING NEGATIVE AMOUNTS:
-- Spanish invoices often show negative amounts with a dash AFTER the number (e.g., "74,40-" means -74.40)
-- IMPORTANT: Convert trailing dash notation to negative numbers: "74,40-" → -74.40
-- Also recognize minus sign BEFORE number: "-74.40" → -74.40
-- Extract the sign EXACTLY as shown in each cell - positive or negative
-- NEVER ignore the trailing dash - it is critical to identify credit notes and returns
-
-CREDIT NOTE EXTRACTION RULES:
-1. If the invoice is a pure credit note (negative total, all returns), ALL item totalPrice values should be negative
-2. For each line item, extract the sign EXACTLY as shown in the TOTAL/IMPORTE column:
-   - If the cell shows "74,40-" or "-74.40" → extract as negative (-74.40)
-   - If the cell shows "74,40" with no sign → extract as positive (74.40)
-   - quantity: Can be positive or negative depending on the invoice
-   - discountPercentage: Usually positive (e.g., 10.00 for 10% discount)
-   - totalPrice: Extract with the sign shown (usually negative in credit notes)
-3. The totalAmount in HEADER must match the sign shown on the invoice
-4. The code will calculate unitPrice and listPrice from totalPrice, quantity, and discount
-
-MIXED POSITIVE/NEGATIVE ITEMS (VALID):
-- Some regular invoices have BOTH positive and negative line items (this is NORMAL!)
-- Example: Product charges (+100.00) and adjustment credits (-10.00) in same invoice
-- Extract EACH line's totalPrice sign EXACTLY as shown - do NOT assume all must be the same sign
-- The totalAmount can be positive even if some items are negative (net result)
-
-EXAMPLE PURE CREDIT NOTE:
-If invoice shows: "TOTAL: -650,05 €" or "TOTAL: 650,05-" and ALL items show negative amounts
-Then HEADER totalAmount = -650.05
-And all items should have negative totalPrice to sum to -650.05 ÷ 1.21 = -537.23 (before tax)
-
-EXAMPLE MIXED INVOICE:
-If invoice shows: "TOTAL: 108,90 €" with items showing: 150.00, -60.00, 0.00
-Then HEADER totalAmount = 108.90
-Items sum: 150.00 + (-60.00) + 0.00 = 90.00
-Calculation: 90.00 × 1.21 = 108.90 ✓
-
-CRITICAL: Extract each totalPrice with its EXACT sign as shown in the invoice
-Do NOT assume all items must have the same sign - mixed positive/negative is valid!
-
-CRITICAL NUMBER ACCURACY & PRECISION:
-- Distinguish: 5 vs S, 8 vs B, 0 vs O vs 6
-- Double-check CIF/NIF digit sequences
-- Prices: use dot as decimal (1234.56 not 1,234.56)
-- Extract totalPrice exactly as shown with 2 decimal precision (e.g., 33.74 not 33.744)
-- Extract discountPercentage as shown (e.g., 5 or 5.00 for 5%)
-- DO NOT add extra precision where it doesn't exist
-
-OUTPUT FORMAT - STRICT REQUIREMENTS:
-Use pipe (|) as delimiter, tilde (~) for missing values.
-
-MANDATORY STRUCTURE (NEVER omit any line type):
-Line 1 - HEADER (exactly 5 fields): HEADER|invoiceCode|issueDate|totalAmount|workOrder
-Line 2 - PROVIDER (exactly 6 fields): PROVIDER|name|cif|email|phone|address  
-Lines 3+ - ITEMS (exactly 10 fields each): ITEM|materialName|materialCode|isMaterial|quantity|discountRaw|totalPrice|itemDate|workOrder|description|lineNumber
-  * Field positions: 1=materialName, 2=materialCode, 3=isMaterial, 4=quantity, 5=discountRaw, 6=totalPrice, 7=itemDate, 8=workOrder, 9=description, 10=lineNumber
-  * NOTE: HEADER workOrder (field 5) is DEPRECATED - always use ~ there. Work orders are specified per-item in field 8.
-
-FORMATTING RULES:
-- Output ONLY the structured lines, no explanations
-- Each line starts with HEADER, PROVIDER, or ITEM
-- EXACTLY the specified field counts (5 for HEADER, 6 for PROVIDER, 10 for ITEM)
-- Use | between fields (no spaces around pipes)
-- Use ~ for missing fields (no spaces around tildes)
-- No thousand separators, no commas as decimals
-- Boolean isMaterial: "true" or "false" (lowercase, no quotes)
-- discountRaw is TEXT: "10", "50 5", "0" (not numbers with decimals like 10.00)
-- NEVER include | or newlines within field values
-- NEVER output incomplete lines - all fields required
-
-EXAMPLE OUTPUT (simplified format - code calculates combined discount, unitPrice, and listPrice):
-HEADER|FAC-2024-001|2024-01-15|1526.16|~
-PROVIDER|ACME S.L.|A12345678|info@acme.com|+34912345678|Calle Principal 123, Madrid
-ITEM|Cemento Portland|CEM001|true|10.00|10|255.00|~|OT-4077|Cemento gris 50kg|1
-ITEM|Transporte|~|false|1.00|0|995.50|2024-01-15|OT-4077|Envío especial|2
-
-Explanation:
-- Item 1: qty=10, discount="10", total=255.00 → Code calculates: combined=10%, unitPrice=255/10=25.50, listPrice=25.50/0.90=28.33
-- Item 2: qty=1, discount="0", total=995.50 → Code calculates: combined=0%, unitPrice=995.50/1=995.50, listPrice=995.50
-- Both items belong to work order OT-4077 (specified per-item, not at invoice level)
-- Invoice total: (255.00 + 995.50) × 1.21 = 1526.16
-
-SEQUENTIAL DISCOUNT EXAMPLE (discount shows "50 5" - 50% then 5%):
-HEADER|FAC-2024-002|2024-01-16|145.53|~
-PROVIDER|MATERIALS INC.|B87654321|~|~|~
-ITEM|Special Offer Item|SPEC001|true|10.00|50 5|95.00|~|~|Promotional product|1
-
-Explanation:
-- Item 1: qty=10, discount="50 5", total=95.00 → Code calculates: combined=52.5%, unitPrice=95/10=9.50, listPrice=9.50/0.475=20.00
-- No work order for this item (~ in field 8)
-- Invoice total: 95.00 × 1.21 = 114.95 (but invoice shows 145.53 including tax)
-
-CREDIT NOTE EXAMPLE (devolución - ALL totalPrice values negative):
-HEADER|DEV-2024-002|2024-01-16|-308.55|~
-PROVIDER|ACME S.L.|A12345678|info@acme.com|+34912345678|Calle Principal 123, Madrid
-ITEM|Cemento Portland|CEM001|true|10.00|10|-255.00|~|OT-4077|Devolución cemento gris 50kg|1
-
-Explanation:
-- qty=10, discount="10", total=-255.00 → Code calculates: combined=10%, unitPrice=-255/10=-25.50, listPrice=-25.50/0.90=-28.33
-- Item belongs to work order OT-4077
-- Invoice total: -255.00 × 1.21 = -308.55
-CRITICAL: When invoice total is negative, ALL item totalPrice values must be negative!
-
-MIXED INVOICE EXAMPLE (positive total with both positive and negative items):
-HEADER|FAC-2024-003|2024-01-17|108.90|OT-4088
-PROVIDER|ACME S.L.|A12345678|info@acme.com|+34912345678|Calle Principal 123, Madrid
-ITEM|Cemento Portland|CEM001|true|5.00|0|150.00|~|~|Cemento gris 50kg|1
-ITEM|Ajuste precio anterior|~|false|1.00|0|-60.00|~|~|Descuento por error facturación|2
-ITEM|Servicio adicional|~|false|0.00|0|0.00|~|~|Servicio sin cargo|3
-
-Explanation:
-- Item 1: qty=5, discount="0", total=150.00 → Code calculates: combined=0%, unitPrice=150/5=30.00, listPrice=30.00
-- Item 2: qty=1, discount="0", total=-60.00 → Code calculates: combined=0%, unitPrice=-60/1=-60.00, listPrice=-60.00
-- Item 3: qty=0, discount="0", total=0.00 → Free service
-- Invoice total: (150.00 - 60.00 + 0.00) × 1.21 = 108.90
-This is VALID - extract each line's totalPrice sign EXACTLY as shown, positive OR negative!
-
-DISCOUNT EXAMPLE (showing single and sequential discounts):
-HEADER|FAC-2024-004|2024-01-18|40.81|~
-PROVIDER|ACME S.L.|A12345678|info@acme.com|+34912345678|Calle Principal 123, Madrid
-ITEM|FASDEL ATL80 TIRA 5 ADHESIVOS RIESGO ELECTRICO 8CM|ATL80|true|8.00|5|33.74|~|~|~|~
-ITEM|Material with sequential discount|MAT123|true|10.00|50 5|237.50|~|~|Promotional item|~
-
-Explanation:
-- Item 1: Extract from invoice: qty=8, discount="5", total=33.74
-  * Code calculates: combined=5%, unitPrice=33.74/8=4.22, listPrice=4.22/0.95=4.44
-- Item 2: Extract from invoice: qty=10, discount="50 5", total=237.50
-  * Code calculates: combined=52.5%, unitPrice=237.50/10=23.75, listPrice=23.75/0.475=50.00
-- Invoice total: (33.74 + 237.50) × 1.21 = 328.60
-
-FIELD EXPLANATION FOR EXAMPLES:
-- HEADER totalAmount: Sum of all item totalPrice values × 1.21 (including 21% IVA/tax)
-- HEADER workOrder: Applies to ALL items unless item has its own workOrder (field 8)
-- Sequential discount "50 5" means: 50% off list price, then 5% off the discounted price → combined 52.5%
-- Sequential discount "20 10" means: 20% off list price, then 10% off the discounted price → combined 28%
-- Cemento Portland example: qty=10, discount=10%, total=255.00
-  * Code calculates: unitPrice = 255.00/10 = 25.50
-  * Code calculates: listPrice = 25.50 / (1 - 0.10) = 25.50 / 0.90 = 28.33
-- Transporte example: qty=1, discount=0%, total=995.50
-  * Code calculates: unitPrice = 995.50/1 = 995.50
-  * Code calculates: listPrice = 995.50 / (1 - 0) = 995.50
-- CREDIT NOTE: quantity=10.00 (positive), but totalPrice=-255.00 (negative refund)
-
-🚨 CRITICAL EXAMPLE - Simplified table (extract row by row):
-┌────────┬──────┬──────────────────────────────┬──────┬────────┐
-│ CÓDIGO │ CANT │ CONCEPTO                     │ %DTO │ IMPORTE│
-├────────┼──────┼──────────────────────────────┼──────┼────────┤
-│ 9900   │ 1.00 │ PACK 6 UDS SILICONA FUNGICIDA│(blank)│(blank)│  ← Row 1: PACK has NO prices (normal!)
-│ 2182   │ 6.00 │ PATTEX SILICON 5 SILICONA    │ NETO │ 18,00 │  ← Row 2: Has actual prices
-│ 2801   │12.00 │ MASCARILLA STEELPRO FFP2     │ 50 5 │  6,66 │  ← Row 3: Sequential discount!
-└────────┴──────┴──────────────────────────────┴──────┴────────┘
-
-CORRECT extraction (reading horizontally, row by row, simplified format):
-HEADER|1.300.940|2025-06-30|24.66|~
-PROVIDER|SALTOKI CORNELLÀ S.A.|A64207400|~|~|Registre Mercantil de Barcelona
-ITEM|PACK 6 UDS SILICONA FUNGICIDA BLANCA|9900101019|true|1.00|0|0.00|~|~|~|~
-ITEM|PATTEX SILICON 5 SILICONA BLANCA CON FUNGICIDA CART. 280ML|2182020001|true|6.00|0|18.00|~|~|~|~
-ITEM|MASCARILLA STEELPRO FFP2 VALVULA|2801010800|true|12.00|50 5|6.66|~|~|~|~
-
-🎯 KEY POINTS:
-- Row 1 (PACK): Blank cells → Output: discountRaw="0", total=0.00
-- Row 2 (PATTEX): NETO (no discount), 18.00 total → Output: discountRaw="0", total=18.00
-  * Code calculates: combined=0%, unitPrice=18.00/6=3.00, listPrice=3.00
-- Row 3 (MASCARILLA): "50 5" discount, 6.66 total → Output: discountRaw="50 5", total=6.66
-  * Code calculates: combined=52.5%, unitPrice=6.66/12=0.56, listPrice=0.56/0.475=1.18
-- Each row is independent - NEVER borrow values from other rows
-
-❌ WRONG extraction (DO NOT DO THIS - shifting values from row below):
-ITEM|PACK 6 UDS SILICONA FUNGICIDA BLANCA|9900101019|true|1.00|0.00|18.00|~|~|~|~  ← ERROR: borrowed total from row 2
-ITEM|PATTEX SILICON 5 SILICONA BLANCA CON FUNGICIDA CART. 280ML|2182020001|true|6.00|25.00|6.66|~|~|~|~  ← ERROR: borrowed values from row 3
-ITEM|MASCARILLA STEELPRO FFP2 VALVULA|2801010800|true|12.00|...                                                    ← ERROR: missing prices
-
-🚨 REAL EXAMPLE - KIT items with blank prices:
-Invoice shows:
-- Row 1: "NEW VICTORIA LAVABO 52X42,5 BLANCO" → Quantity: 1.00 → Price: 46,300 → 38% discount → Total: 28,71
-- Row 2: "KIT G FIJACION LAVABO-PARED" → Quantity: 1.00 → Price: (blank) → Discount: (blank) → Total: (blank)
-- Row 3: "NEW VICTORIA TAZA INODORO TANQUE BAJO S/H BLANCO" → Quantity: 1.00 → Price: 69,900 → 38% discount → Total: 43,34
-
-CORRECT extraction (each row independent):
-✅ ITEM|NEW VICTORIA LAVABO 52X42,5 BLANCO|code1|true|1.00|46.30|38.00|28.71|28.71|~|~|~
-✅ ITEM|KIT G FIJACION LAVABO-PARED|code2|true|1.00|0.00|0.00|0.00|0.00|~|~|~  ← KIT has blank prices = 0.00
-✅ ITEM|NEW VICTORIA TAZA INODORO TANQUE BAJO S/H BLANCO|code3|true|1.00|69.90|38.00|43.34|43.34|~|~|~
-
-❌ WRONG extraction (DO NOT borrow prices from adjacent rows):
-❌ ITEM|KIT G FIJACION LAVABO-PARED|code2|true|1.00|69.90|38.00|43.34|43.34|~|~|~  ← ERROR: took prices from row 3!
-
-REMEMBER: 
-- Read each row independently using the "horizontal ruler" technique
-- If a cell is blank, use 0.00 (NEVER borrow from other rows)
-- Never take values from a different row (NO vertical displacement)
-- Work Order (OT) can go in HEADER (applies to all items) or per ITEM line (overrides HEADER)
-- PROVIDER line is MANDATORY - always include it even with partial data
-- OUTPUT ITEMS IN THE EXACT SAME ORDER they appear on the invoice (top to bottom)
-- Do NOT reorder items alphabetically, by price, or by any other criteria
-- Each ITEM line must have EXACTLY 10 fields (11 parts total including "ITEM|" prefix)
-- PACKs and KITs commonly have blank prices - output 0.00 for discountPercentage and totalPrice
-- Maintain the original sequence from the document to preserve invoice structure`;
+═══════════════════════════════════════════════════════════════════════════════
+CRITICAL RULES - ORDER IS SACRED!
+═══════════════════════════════════════════════════════════════════════════════
+✓ Extract PROVIDER first (MANDATORY): Company name, CIF/NIF, email, phone, address
+✓ Extract HEADER: invoiceCode, issueDate (YYYY-MM-DD), totalAmount (with IVA), ivaPercentage (REQUIRED), retentionAmount (REQUIRED), workOrder
+✓ Extract items in EXACT VISUAL ORDER AS THEY APPEAR ON THE INVOICE
+✓ Each table row is INDEPENDENT - never mix data between rows
+✓ Output format: HEADER|7 fields, PROVIDER|6 fields, ITEM|11 fields per line
+
+═══════════════════════════════════════════════════════════════════════════════
+🚨 CRITICAL: PRESERVE EXACT ITEM ORDER - DO NOT REORDER!
+═══════════════════════════════════════════════════════════════════════════════
+
+❌ NEVER reorder items by price, code, or any other criteria
+❌ NEVER sort items alphabetically or numerically
+❌ NEVER group similar items together
+❌ NEVER skip items that seem "unimportant"
+
+✅ Extract items in the EXACT SEQUENCE they appear on the invoice
+✅ If invoice shows: Item A, Item B, Item C → Output: Item A, Item B, Item C
+✅ Order preservation is MORE IMPORTANT than data accuracy
+
+🚨 RULE #1 - ABSOLUTE NO VERTICAL DISPLACEMENT (MOST COMMON ERROR!)
+Each row is 100% INDEPENDENT. Think of each row as a separate invoice line.
+• If Row 1 has blank price cells → Row 1 outputs 0.00 for those prices
+• If Row 2 has actual prices → Row 2 outputs those actual prices
+• NEVER take Row 2's prices and put them in Row 1's output
+• NEVER "shift" values up from lower rows
+
+WRONG: PACK item (Row 1 blank) gets prices from Row 2
+CORRECT: PACK item (Row 1 blank) outputs 0.00, Row 2 outputs its actual prices
+
+🚨 RULE #2 - STEP-BY-STEP EXTRACTION (FOLLOW EXACT VISUAL ORDER)
+For each table row IN THE ORDER THEY APPEAR:
+1. Read material name/code from THAT SPECIFIC ROW
+2. Extract quantity from CANTIDAD/Uds column (0.00 if blank)
+3. Extract discountRaw from %DTO column ("0" if blank/"NETO")
+4. Extract unitPrice from PRECIO UNITARIO column (0.00 if blank)
+5. Extract totalPrice from TOTAL/IMPORTE column (0.00 if blank)
+6. NEVER look at cells from different rows to "fill in" missing values
+7. OUTPUT ITEM IMMEDIATELY - do not batch or reorder
+
+🚨 RULE #3 - PACKS/KITS HAVE NO PRICES (NORMAL!)
+Items like "PACK 6 UDS", "KIT G FIJACION LAVABO-PARED" commonly have NO prices.
+• These are bundled items not priced individually
+• ALWAYS output: discountRaw="0", unitPrice=0.00, totalPrice=0.00
+• Extract quantity if visible, but prices are ALWAYS 0.00
+• DO NOT take prices from adjacent rows
+
+═══════════════════════════════════════════════════════════════════════════════
+OUTPUT FORMAT
+═══════════════════════════════════════════════════════════════════════════════
+Use pipe (|) delimiter, tilde (~) for missing values.
+
+HEADER|invoiceCode|issueDate|totalAmount|ivaPercentage|retentionAmount|workOrder
+PROVIDER|name|cif|email|phone|address
+ITEM|materialName|materialCode|isMaterial|quantity|discountRaw|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber
+
+Field details:
+• isMaterial: "true" (products) or "false" (services)
+• discountRaw: "10", "50 5", "0" (text as shown)
+• ivaPercentage: REQUIRED - IVA rate (e.g., "21.00" for 21%, "10.00" for 10%)
+• retentionAmount: REQUIRED - Withholding amount (e.g., "15.00", "0.00" if none)
+• Numbers: dot decimal (1234.56), no thousand separators
+• Dates: YYYY-MM-DD
+• workOrder: OT codes from section headers like "S/REF: 074129/001941"
+
+═══════════════════════════════════════════════════════════════════════════════
+WORK ORDERS
+═══════════════════════════════════════════════════════════════════════════════
+Section headers like "S/REF: 074129/001941" → extract OT: "074129"
+Apply current OT to ALL subsequent items until new section header.
+
+═══════════════════════════════════════════════════════════════════════════════
+SKIP THESE (NOT ITEMS)
+═══════════════════════════════════════════════════════════════════════════════
+❌ Loyalty points, promotions, metadata, asterisk dividers
+✅ Only actual products/services with material names/codes
+
+═══════════════════════════════════════════════════════════════════════════════
+IVA AND RETENTIONS (REQUIRED FIELDS)
+═══════════════════════════════════════════════════════════════════════════════
+• IVA PERCENTAGE: Look for tax rate in invoice summary or header
+  - Common Spanish rates: 21.00, 10.00, 4.00, 0.00
+  - Look for: "IVA 21%", "21% IVA", "Tipo IVA: 21%", "IVA: 21.00%"
+  - If multiple rates exist, extract the PRIMARY rate used
+  - If unclear, use 21.00 (standard Spanish VAT rate)
+  - Format: decimal number (21.00 not 21%)
+
+• RETENTION AMOUNT: Withholding tax amount (IRPF/RETENCIONES)
+  - Look for: "Retención", "IRPF", "Ret. IRPF", "Retenciones"
+  - Extract the MONETARY AMOUNT withheld, not percentage
+  - Examples: "Retención IRPF: 15.00€" → 15.00
+  - If none mentioned, use 0.00
+  - Format: decimal number with 2 decimals
+
+═══════════════════════════════════════════════════════════════════════════════
+CREDIT NOTES
+═══════════════════════════════════════════════════════════════════════════════
+Labels: "DEVOLUCIÓN", "ABONO", "NOTA DE CRÉDITO"
+Extract signs exactly: "74,40-" → -74.40, "-74.40" → -74.40
+
+═══════════════════════════════════════════════════════════════════════════════
+EXAMPLE - PACK/KIT items with blank prices:
+┌────────┬──────┬──────────────────────────────┬──────┬────────┬────────┐
+│ CÓDIGO │ CANT │ CONCEPTO                     │ %DTO │ PRECIO │ IMPORTE│
+├────────┼──────┼──────────────────────────────┼──────┼────────┼────────┤
+│ 9900   │ 1.00 │ PACK 6 UDS SILICONA FUNGICIDA│      │        │        │ ← PACK: NO prices
+│ KIT001 │ 2.00 │ KIT G FIJACION LAVABO-PARED  │      │        │        │ ← KIT: NO prices
+│ 2182   │ 6.00 │ PATTEX SILICON 5 SILICONA    │ NETO │  3.00  │ 18.00  │ ← Regular: HAS prices
+│ 2801   │12.00 │ MASCARILLA STEELPRO FFP2     │ 50 5 │  0.56  │  6.66  │ ← Sequential discount
+└────────┴──────┴──────────────────────────────┴──────┴────────┴────────┘
+
+CORRECT OUTPUT:
+ITEM|PACK 6 UDS SILICONA FUNGICIDA BLANCA|9900|true|1.00|0|0.00|0.00|~|~|~|~
+ITEM|KIT G FIJACION LAVABO-PARED|KIT001|true|2.00|0|0.00|0.00|~|~|~|~
+ITEM|PATTEX SILICON 5 SILICONA|2182|true|6.00|0|3.00|18.00|~|~|~|~
+ITEM|MASCARILLA STEELPRO FFP2|2801|true|12.00|50 5|0.56|6.66|~|~|~|~
+
+Begin extraction now. Output ONLY structured lines (no explanations).`;
 }
 
 async function callPdfExtractAPI(file: File, batchErrors: BatchErrorDetail[]): Promise<CallPdfExtractAPIResponse> {
@@ -1643,7 +1367,7 @@ async function callPdfExtractAPI(file: File, batchErrors: BatchErrorDetail[]): P
                 const looksLikeTruncation = text.includes('ITEM|') &&
                     (text.split('\n').some(line => {
                         const trimmed = line.trim();
-                        return trimmed.startsWith('ITEM|') && trimmed.split('|').length < 13;
+                        return trimmed.startsWith('ITEM|') && trimmed.split('|').length < 12;
                     }) || !text.trim().endsWith('}'));
 
                 const errorMsg = looksLikeTruncation
@@ -2200,11 +1924,11 @@ async function processInvoiceItemTx(
         throw new Error(`Invalid item data: quantity=${quantity}, unitPrice=${unitPrice}, totalPrice=${totalPrice}`);
     }
 
-    const quantityDecimal = new Prisma.Decimal(quantity.toFixed(2));
-    const currentUnitPriceDecimal = new Prisma.Decimal(unitPrice.toFixed(2));
-    const totalPriceDecimal = new Prisma.Decimal(totalPrice.toFixed(2));
+    const quantityDecimal = new Prisma.Decimal(quantity.toFixed(3));
+    const currentUnitPriceDecimal = new Prisma.Decimal(unitPrice.toFixed(3));
+    const totalPriceDecimal = new Prisma.Decimal(totalPrice.toFixed(3));
     const listPriceDecimal = typeof listPrice === 'number' && !isNaN(listPrice)
-        ? new Prisma.Decimal(listPrice.toFixed(2))
+        ? new Prisma.Decimal(listPrice.toFixed(3))
         : null;
     const discountPercentageDecimal = typeof discountPercentage === 'number' && !isNaN(discountPercentage)
         ? new Prisma.Decimal(discountPercentage.toFixed(2))
@@ -2710,6 +2434,17 @@ export async function createInvoiceFromFiles(
                     if (isLargeInvoice) {
                     }
 
+                    const totalsCheck = evaluateTotalsMismatch(extractedData.items ?? [], extractedData.totalAmount, { ivaPercentage: extractedData.ivaPercentage, retentionAmount: extractedData.retentionAmount });
+                    const validationWarnings: BatchErrorDetail[] = totalsCheck.hasMismatch ? [
+                        {
+                            kind: 'VALIDATION_ERROR',
+                            message: buildTotalsMismatchMessage(extractedData.invoiceCode, totalsCheck, extractedData.totalAmount),
+                            fileName,
+                            invoiceCode: extractedData.invoiceCode,
+                            timestamp: new Date().toISOString(),
+                        }
+                    ] : [];
+
                     const operationResult: TransactionOperationResult = await prisma.$transaction(async (tx) => {
                         // Use cached provider if available, otherwise fall back to findOrCreateProviderTx
                         let provider;
@@ -2770,8 +2505,11 @@ export async function createInvoiceFromFiles(
                                 providerId: provider.id,
                                 issueDate: new Date(extractedData.issueDate),
                                 totalAmount: new Prisma.Decimal(extractedData.totalAmount.toFixed(2)),
+                                ivaPercentage: new Prisma.Decimal(extractedData.ivaPercentage.toFixed(2)),
+                                retentionAmount: new Prisma.Decimal(extractedData.retentionAmount.toFixed(2)),
                                 originalFileName: fileName,
                                 status: "PROCESSED",
+                                hasTotalsMismatch: totalsCheck.hasMismatch,
                             },
                         });
 
@@ -2855,15 +2593,15 @@ export async function createInvoiceFromFiles(
                                 const isMaterialItem = typeof itemData.isMaterial === 'boolean' ? itemData.isMaterial : true;
 
                                 if (!isMaterialItem) {
-                                    const quantityDecimal = new Prisma.Decimal(itemData.quantity.toFixed(2));
+                                    const quantityDecimal = new Prisma.Decimal(itemData.quantity.toFixed(3));
                                     const listPriceDecimal = typeof itemData.listPrice === 'number' && !isNaN(itemData.listPrice)
-                                        ? new Prisma.Decimal(itemData.listPrice.toFixed(2))
+                                        ? new Prisma.Decimal(itemData.listPrice.toFixed(3))
                                         : null;
                                     const discountPercentageDecimal = typeof itemData.discountPercentage === 'number' && !isNaN(itemData.discountPercentage)
                                         ? new Prisma.Decimal(itemData.discountPercentage.toFixed(2))
                                         : null;
-                                    const currentUnitPriceDecimal = new Prisma.Decimal(itemData.unitPrice.toFixed(2));
-                                    const totalPriceDecimal = new Prisma.Decimal(itemData.totalPrice.toFixed(2));
+                                    const currentUnitPriceDecimal = new Prisma.Decimal(itemData.unitPrice.toFixed(3));
+                                    const totalPriceDecimal = new Prisma.Decimal(itemData.totalPrice.toFixed(3));
                                     const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
 
                                     await tx.invoiceItem.create({
@@ -2891,7 +2629,7 @@ export async function createInvoiceFromFiles(
                                     throw new Error(`Failed to process material '${itemData.materialName}': ${materialError instanceof Error ? materialError.message : 'Unknown error'}`);
                                 }
                                 const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
-                                const currentItemUnitPrice = new Prisma.Decimal(itemData.unitPrice.toFixed(2));
+                                const currentItemUnitPrice = new Prisma.Decimal(itemData.unitPrice.toFixed(3));
 
                                 const lastSeenPriceRecordInThisInvoice = intraInvoiceMaterialPriceHistory.get(material.id);
 
@@ -2960,7 +2698,9 @@ export async function createInvoiceFromFiles(
                             message: `Invoice ${invoice.invoiceCode} created successfully.`,
                             invoiceId: invoice.id,
                             alertsCreated: alertsCounter,
-                            isExisting: false
+                            isExisting: false,
+                            hasTotalsMismatch: totalsCheck.hasMismatch,
+                            validationErrors: validationWarnings.length > 0 ? validationWarnings : undefined,
                         };
                     }, {
                         timeout: transactionTimeout, // Use dynamic timeout based on invoice size
@@ -2968,22 +2708,30 @@ export async function createInvoiceFromFiles(
                     });
 
                     // Success! Return the result
+                    const baseResult: CreateInvoiceResult = {
+                        success: operationResult.success,
+                        message: operationResult.message,
+                        invoiceId: operationResult.invoiceId,
+                        alertsCreated: operationResult.alertsCreated,
+                        fileName,
+                        hasTotalsMismatch: operationResult.hasTotalsMismatch ?? false,
+                    };
+
                     if (operationResult.isExisting) {
-                        return {
-                            success: true,
-                            message: operationResult.message,
-                            invoiceId: operationResult.invoiceId,
-                            fileName: fileName
-                        };
-                    } else {
-                        return {
-                            success: operationResult.success,
-                            message: operationResult.message,
-                            invoiceId: operationResult.invoiceId,
-                            alertsCreated: operationResult.alertsCreated,
-                            fileName: fileName
-                        };
+                        baseResult.isDuplicate = true;
                     }
+
+                    if (operationResult.validationErrors?.length) {
+                        baseResult.validationErrors = operationResult.validationErrors;
+                        if (!baseResult.message.toLowerCase().includes('descuadre')) {
+                            baseResult.message = `${baseResult.message} (Revisión requerida: descuadre detectado)`;
+                        }
+                        for (const warning of operationResult.validationErrors) {
+                            pushBatchError(batchErrors, warning);
+                        }
+                    }
+
+                    return baseResult;
 
                 } catch (error) {
                     lastError = error;
@@ -3204,6 +2952,8 @@ export interface ManualInvoiceData {
     };
     invoiceCode: string;
     issueDate: string;
+    ivaPercentage?: number;
+    retentionAmount?: number;
     items: Array<{
         materialName: string;
         materialCode?: string;
@@ -3238,6 +2988,11 @@ export async function createManualInvoice(data: ManualInvoiceData): Promise<Crea
                 phone: data.provider.phone || undefined,
             }, user.id);
 
+            const totalsCheck = evaluateTotalsMismatch(
+                data.items.map(item => ({ totalPrice: item.totalPrice })),
+                data.totalAmount
+            );
+
             // 3. Check if invoice already exists
             const existingInvoice = await tx.invoice.findFirst({
                 where: {
@@ -3260,7 +3015,10 @@ export async function createManualInvoice(data: ManualInvoiceData): Promise<Crea
                     providerId: provider.id,
                     issueDate: new Date(data.issueDate),
                     totalAmount: new Prisma.Decimal(data.totalAmount.toFixed(2)),
+                    ivaPercentage: new Prisma.Decimal((data.ivaPercentage ?? 21.00).toFixed(2)),
+                    retentionAmount: new Prisma.Decimal((data.retentionAmount ?? 0.00).toFixed(2)),
                     status: "PROCESSED",
+                    hasTotalsMismatch: totalsCheck.hasMismatch,
                 },
             });
 
@@ -3304,15 +3062,15 @@ export async function createManualInvoice(data: ManualInvoiceData): Promise<Crea
                 // Find or create material
                 const material = await findOrCreateMaterialTx(tx, itemData.materialName, itemData.materialCode, provider.type, user.id);
 
-                const quantityDecimal = new Prisma.Decimal(itemData.quantity.toFixed(2));
+                const quantityDecimal = new Prisma.Decimal(itemData.quantity.toFixed(3));
                 const listPriceDecimal = typeof itemData.listPrice === 'number' && !isNaN(itemData.listPrice)
-                    ? new Prisma.Decimal(itemData.listPrice.toFixed(2))
+                    ? new Prisma.Decimal(itemData.listPrice.toFixed(3))
                     : null;
                 const discountPercentageDecimal = typeof itemData.discountPercentage === 'number' && !isNaN(itemData.discountPercentage)
                     ? new Prisma.Decimal(itemData.discountPercentage.toFixed(2))
                     : null;
-                const unitPriceDecimal = new Prisma.Decimal(itemData.unitPrice.toFixed(2));
-                const totalPriceDecimal = new Prisma.Decimal(itemData.totalPrice.toFixed(2));
+                const unitPriceDecimal = new Prisma.Decimal(itemData.unitPrice.toFixed(3));
+                const totalPriceDecimal = new Prisma.Decimal(itemData.totalPrice.toFixed(3));
 
                 // Create invoice item
                 const invoiceItem = await tx.invoiceItem.create({
@@ -3401,13 +3159,13 @@ export async function createManualInvoice(data: ManualInvoiceData): Promise<Crea
                         },
                         update: {
                             lastPriceDate: currentInvoiceIssueDate,
-                            lastPrice: new Prisma.Decimal(itemData.unitPrice.toFixed(2)),
+                            lastPrice: new Prisma.Decimal(itemData.unitPrice.toFixed(3)),
                         },
                         create: {
                             materialId: material.id,
                             providerId: provider.id,
                             lastPriceDate: currentInvoiceIssueDate,
-                            lastPrice: new Prisma.Decimal(itemData.unitPrice.toFixed(2)),
+                            lastPrice: new Prisma.Decimal(itemData.unitPrice.toFixed(3)),
                         },
                     });
                 }
@@ -3418,6 +3176,7 @@ export async function createManualInvoice(data: ManualInvoiceData): Promise<Crea
                 message: `Manual invoice ${invoice.invoiceCode} created successfully.`,
                 invoiceId: invoice.id,
                 alertsCreated: alertsCounter,
+                hasTotalsMismatch: totalsCheck.hasMismatch,
             };
         });
 
@@ -3427,6 +3186,13 @@ export async function createManualInvoice(data: ManualInvoiceData): Promise<Crea
             if (result.alertsCreated && result.alertsCreated > 0) {
                 revalidatePath("/alertas");
             }
+        }
+
+        if (result.hasTotalsMismatch) {
+            return {
+                ...result,
+                message: `${result.message} (Revisión requerida: descuadre detectado)`,
+            };
         }
 
         return result;
@@ -3494,9 +3260,9 @@ async function prepareBatchLine(file: File): Promise<string> {
             generationConfig: {
                 // temperature: 0.8,
                 candidateCount: 1,
-                thinkingConfig: {
-                    thinkingBudget: 0
-                }
+                // thinkingConfig: {
+                //     thinkingBudget: 0
+                // }
             }
         }
     };
@@ -3639,6 +3405,17 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
                 };
             }
 
+            const totalsCheck = evaluateTotalsMismatch(extractedData.items ?? [], extractedData.totalAmount, { ivaPercentage: extractedData.ivaPercentage, retentionAmount: extractedData.retentionAmount });
+            const validationWarnings: BatchErrorDetail[] = totalsCheck.hasMismatch ? [
+                {
+                    kind: 'VALIDATION_ERROR',
+                    message: buildTotalsMismatchMessage(extractedData.invoiceCode, totalsCheck, extractedData.totalAmount),
+                    fileName: fileName ?? 'unknown',
+                    invoiceCode: extractedData.invoiceCode,
+                    timestamp: new Date().toISOString(),
+                }
+            ] : [];
+
             // ✅ Invoice
             const invoice = await tx.invoice.create({
                 data: {
@@ -3646,8 +3423,11 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
                     providerId: provider.id,
                     issueDate: new Date(extractedData.issueDate),
                     totalAmount: new Prisma.Decimal(extractedData.totalAmount.toFixed(2)),
+                    ivaPercentage: new Prisma.Decimal(extractedData.ivaPercentage.toFixed(2)),
+                    retentionAmount: new Prisma.Decimal(extractedData.retentionAmount.toFixed(2)),
                     originalFileName: fileName,
                     status: "PROCESSED",
+                    hasTotalsMismatch: totalsCheck.hasMismatch,
                 },
             });
 
@@ -3710,7 +3490,7 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
                 }
                 if (typeof item.totalPrice !== "number" || isNaN(item.totalPrice)) {
                     console.warn(`[saveExtractedInvoice][Invoice ${extractedData.invoiceCode}] Invalid or missing totalPrice for '${item.materialName}'. Defaulting to unitPrice * quantity (file: ${fileName ?? "unknown"})`);
-                    (item as unknown as { totalPrice: number }).totalPrice = Number(((item.unitPrice ?? 0) * item.quantity).toFixed(2));
+                    (item as unknown as { totalPrice: number }).totalPrice = Number(((item.unitPrice ?? 0) * item.quantity).toFixed(3));
                 }
 
                 try {
@@ -3739,8 +3519,17 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
                 message: `Invoice ${invoice.invoiceCode} created (${itemsProcessed} items, ${alertsCreated} alerts)`,
                 invoiceId: invoice.id,
                 alertsCreated,
+                hasTotalsMismatch: totalsCheck.hasMismatch,
+                validationErrors: validationWarnings.length > 0 ? validationWarnings : undefined,
             };
         });
+
+        if (result.validationErrors?.length) {
+            return {
+                ...result,
+                message: result.message.includes('descuadre') ? result.message : `${result.message} (Revisión requerida: descuadre detectado)`,
+            };
+        }
 
         return result;
     } catch (err) {
@@ -3804,6 +3593,239 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
             message: `Database error: ${error.message}`,
             fileName
         } as CreateInvoiceResult;
+    }
+}
+
+export async function updateInvoiceAction(payload: UpdateInvoiceInput): Promise<UpdateInvoiceActionResult> {
+    const user = await requireAuth();
+
+    const validationErrors: string[] = [];
+
+    if (!payload.invoiceId) {
+        validationErrors.push('Identificador de factura no proporcionado.');
+    }
+
+    if (!Array.isArray(payload.items) || payload.items.length === 0) {
+        validationErrors.push('La factura debe contener al menos una línea.');
+    }
+
+    const parsedTotalAmount = Number(payload.totalAmount);
+    if (!Number.isFinite(parsedTotalAmount)) {
+        validationErrors.push('El total de la factura no es válido.');
+    }
+
+    const normalizedItems = (payload.items ?? []).map<UpdateInvoiceItemInput>((item, index) => {
+        const materialName = (item.materialName ?? '').trim();
+        if (!materialName) {
+            validationErrors.push(`La línea ${index + 1} debe tener un nombre de material.`);
+        }
+
+        const quantity = Number(item.quantity);
+        if (!Number.isFinite(quantity)) {
+            validationErrors.push(`La cantidad de la línea ${index + 1} no es válida.`);
+        }
+
+        const unitPrice = Number(item.unitPrice);
+        if (!Number.isFinite(unitPrice)) {
+            validationErrors.push(`El precio unitario de la línea ${index + 1} no es válido.`);
+        }
+
+        const totalPrice = Number(item.totalPrice);
+        if (!Number.isFinite(totalPrice)) {
+            validationErrors.push(`El total de la línea ${index + 1} no es válido.`);
+        }
+
+        const listPrice = item.listPrice === null || item.listPrice === undefined ? null : Number(item.listPrice);
+        if (listPrice !== null && !Number.isFinite(listPrice)) {
+            validationErrors.push(`El precio base de la línea ${index + 1} no es válido.`);
+        }
+
+        const discountPercentage = item.discountPercentage === null || item.discountPercentage === undefined
+            ? null
+            : Number(item.discountPercentage);
+        if (discountPercentage !== null && !Number.isFinite(discountPercentage)) {
+            validationErrors.push(`El descuento de la línea ${index + 1} no es válido.`);
+        }
+
+        return {
+            id: item.id,
+            materialId: item.materialId,
+            materialName,
+            quantity,
+            listPrice,
+            discountPercentage,
+            discountRaw: item.discountRaw ?? null,
+            unitPrice,
+            totalPrice,
+            workOrder: item.workOrder?.trim() ? item.workOrder.trim() : null,
+        } satisfies UpdateInvoiceItemInput;
+    });
+
+    if (validationErrors.length > 0) {
+        return {
+            success: false,
+            message: 'Errores de validación detectados.',
+            hasTotalsMismatch: false,
+            errors: validationErrors,
+        };
+    }
+
+    const totalsCheck = evaluateTotalsMismatch(
+        normalizedItems.map(item => ({ totalPrice: item.totalPrice })),
+        parsedTotalAmount
+    );
+
+    try {
+        const result = await prisma.$transaction(async (tx) => {
+            const invoice = await tx.invoice.findFirst({
+                where: {
+                    id: payload.invoiceId,
+                    provider: { userId: user.id },
+                },
+                include: {
+                    provider: true,
+                    items: {
+                        include: { material: true },
+                    },
+                },
+            });
+
+            if (!invoice) {
+                throw new Error('Factura no encontrada o sin permisos para editarla.');
+            }
+
+            const existingItemsMap = new Map(invoice.items.map(item => [item.id, item]));
+
+            for (const input of normalizedItems) {
+                const existingItem = existingItemsMap.get(input.id);
+                if (!existingItem) {
+                    throw new Error(`La línea con id ${input.id} no pertenece a la factura.`);
+                }
+
+                const quantityDecimal = new Prisma.Decimal(input.quantity.toFixed(3));
+                const unitPriceDecimal = new Prisma.Decimal(input.unitPrice.toFixed(3));
+                const totalPriceDecimal = new Prisma.Decimal(input.totalPrice.toFixed(3));
+                const listPriceDecimal = input.listPrice !== null && input.listPrice !== undefined
+                    ? new Prisma.Decimal(input.listPrice.toFixed(3))
+                    : null;
+                const discountPercentageDecimal = input.discountPercentage !== null && input.discountPercentage !== undefined
+                    ? new Prisma.Decimal(input.discountPercentage.toFixed(2))
+                    : null;
+
+                await tx.invoiceItem.update({
+                    where: { id: existingItem.id },
+                    data: {
+                        quantity: quantityDecimal,
+                        listPrice: listPriceDecimal,
+                        discountPercentage: discountPercentageDecimal,
+                        discountRaw: input.discountRaw ?? existingItem.discountRaw,
+                        unitPrice: unitPriceDecimal,
+                        totalPrice: totalPriceDecimal,
+                        workOrder: input.workOrder,
+                    }
+                });
+
+                const normalizedMaterialName = input.materialName.trim();
+                if (normalizedMaterialName && normalizedMaterialName !== existingItem.material.name) {
+                    await tx.material.update({
+                        where: { id: existingItem.materialId },
+                        data: {
+                            name: normalizedMaterialName,
+                        }
+                    });
+                }
+
+                const invoiceIssueDate = invoice.issueDate;
+                const materialProvider = await tx.materialProvider.findUnique({
+                    where: {
+                        materialId_providerId: {
+                            materialId: existingItem.materialId,
+                            providerId: invoice.providerId,
+                        }
+                    }
+                });
+
+                if (!materialProvider || !materialProvider.lastPriceDate || invoiceIssueDate.getTime() >= materialProvider.lastPriceDate.getTime()) {
+                    await tx.materialProvider.upsert({
+                        where: {
+                            materialId_providerId: {
+                                materialId: existingItem.materialId,
+                                providerId: invoice.providerId,
+                            }
+                        },
+                        update: {
+                            lastPrice: unitPriceDecimal,
+                            lastPriceDate: invoiceIssueDate,
+                        },
+                        create: {
+                            materialId: existingItem.materialId,
+                            providerId: invoice.providerId,
+                            lastPrice: unitPriceDecimal,
+                            lastPriceDate: invoiceIssueDate,
+                        }
+                    });
+                }
+
+                const existingAlert = await tx.priceAlert.findFirst({
+                    where: {
+                        invoiceId: invoice.id,
+                        materialId: existingItem.materialId,
+                    }
+                });
+
+                if (existingAlert) {
+                    let percentageDecimal: Prisma.Decimal;
+                    if (existingAlert.oldPrice.isZero()) {
+                        percentageDecimal = unitPriceDecimal.isZero()
+                            ? new Prisma.Decimal(0)
+                            : new Prisma.Decimal(unitPriceDecimal.isPositive() ? 9999 : -9999);
+                    } else {
+                        percentageDecimal = unitPriceDecimal.minus(existingAlert.oldPrice)
+                            .dividedBy(existingAlert.oldPrice)
+                            .times(100);
+                    }
+
+                    await tx.priceAlert.update({
+                        where: { id: existingAlert.id },
+                        data: {
+                            newPrice: unitPriceDecimal,
+                            percentage: percentageDecimal,
+                        }
+                    });
+                }
+            }
+
+            await tx.invoice.update({
+                where: { id: invoice.id },
+                data: {
+                    totalAmount: new Prisma.Decimal(parsedTotalAmount.toFixed(2)),
+                    hasTotalsMismatch: totalsCheck.hasMismatch,
+                }
+            });
+
+            return {
+                hasTotalsMismatch: totalsCheck.hasMismatch,
+            };
+        });
+
+        await revalidatePath('/facturas');
+        await revalidatePath(`/facturas/${payload.invoiceId}`);
+
+        return {
+            success: true,
+            message: result.hasTotalsMismatch
+                ? 'Factura actualizada. Aún existe un descuadre entre líneas y total.'
+                : 'Factura actualizada correctamente.',
+            hasTotalsMismatch: result.hasTotalsMismatch,
+        };
+    } catch (error) {
+        console.error('[updateInvoiceAction] Error updating invoice', error);
+        return {
+            success: false,
+            message: error instanceof Error ? error.message : 'No se pudo actualizar la factura.',
+            hasTotalsMismatch: totalsCheck.hasMismatch,
+            errors: validationErrors.length > 0 ? validationErrors : undefined,
+        };
     }
 }
 
@@ -4205,6 +4227,7 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
         result?: CreateInvoiceResult;
         itemsExtracted?: number;
         finishReason?: string;
+        batchError?: BatchErrorDetail;
     }
 
     async function processOutputLines(entries: unknown[]): Promise<{ hasActualErrors: boolean; hasOnlyDuplicates: boolean; totalProcessed: number; successCount: number; failedCount: number }> {
@@ -4304,6 +4327,16 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                 const result = await saveExtractedInvoice(extractedData, key ?? undefined);
                 if (result.success) {
                     success++;
+                    if (result.validationErrors?.length) {
+                        for (const warning of result.validationErrors) {
+                            errors.push({
+                                lineIndex,
+                                error: warning.message,
+                                context: { batchError: warning, result },
+                            });
+                            actualErrors++;
+                        }
+                    }
                 } else {
                     // Check if this is a duplicate invoice error (check message content for backward compatibility with old results)
                     const isDuplicateError = result.isDuplicate ||
@@ -4364,6 +4397,7 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
             const structuredErrors = errors.map(({ lineIndex, error, context }) => {
                 const fileName = context?.custom_id || `line-${lineIndex}`;
                 const maybeResult = context?.result as CreateInvoiceResult | undefined;
+                const directBatchError = context?.batchError;
 
                 // Detect if this is a duplicate error
                 const isDuplicateError = maybeResult?.isDuplicate ||
@@ -4401,6 +4435,15 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                     if (invoiceMatch) {
                         invoiceCode = invoiceMatch[1];
                     }
+                }
+
+                if (directBatchError) {
+                    return {
+                        ...directBatchError,
+                        fileName: directBatchError.fileName ?? fileName,
+                        invoiceCode: directBatchError.invoiceCode ?? invoiceCode,
+                        timestamp: directBatchError.timestamp ?? new Date().toISOString(),
+                    } satisfies BatchErrorDetail;
                 }
 
                 const kind: BatchErrorDetail['kind'] = context?.rawLine

@@ -13,6 +13,7 @@ interface InvoiceListProps {
     id: string
     invoiceCode: string
     totalAmount: number
+    hasTotalsMismatch: boolean
     provider: {
       id: string
       name: string
@@ -86,7 +87,11 @@ export function InvoiceList({ invoices, totalPages, currentPage, pageSize, total
             {invoices.length > 0 ? (
               invoices.map((invoice) => {
                 return (
-                  <TableRow key={invoice.id}>
+                  <TableRow
+                    key={invoice.id}
+                    className={invoice.hasTotalsMismatch ? "bg-destructive/10 hover:bg-destructive/20" : undefined}
+                    title={invoice.hasTotalsMismatch ? "Descuadre detectado: revisa la factura" : undefined}
+                  >
                     <TableCell className="font-mono text-sm">{invoice.invoiceCode}</TableCell>
                     <TableCell>
                       <Link
