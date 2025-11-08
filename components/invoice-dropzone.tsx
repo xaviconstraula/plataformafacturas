@@ -99,7 +99,7 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
         // 🚧  Split huge selections into smaller requests so Next.js does not
         //     need to buffer hundreds of MB in a single multipart body. Each
         //     sub-batch will be processed independently by the server.
-        const MAX_FILES_PER_REQUEST = 80; // 80 × 5 MB  ≈ 400 MB (worst-case)
+        const MAX_FILES_PER_REQUEST = 150; // 150 × 5 MB  ≈ 750 MB (worst-case)
         const chunks: File[][] = [];
         for (let i = 0; i < filesToProcess.length; i += MAX_FILES_PER_REQUEST) {
             chunks.push(filesToProcess.slice(i, i + MAX_FILES_PER_REQUEST));

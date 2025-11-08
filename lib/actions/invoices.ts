@@ -2055,8 +2055,9 @@ async function processInvoiceItemTx(
         ? new Prisma.Decimal(discountPercentage.toFixed(2))
         : null;
 
-    // Use itemDate if provided, otherwise use invoice issue date
-    const effectiveDate = itemDate ? new Date(itemDate) : invoiceIssueDate;
+    // Use itemDate if provided and valid, otherwise use invoice issue date
+    const parsedItemDate = itemDate ? new Date(itemDate) : null;
+    const effectiveDate = parsedItemDate && !isNaN(parsedItemDate.getTime()) ? parsedItemDate : invoiceIssueDate;
 
 
 
@@ -3021,13 +3022,13 @@ export async function createInvoiceFromFiles(
 
     // For statistical purposes, treat duplicates as separate category but ensure errors are saved
     // Duplicates are "successful" (no error occurred) but still need to be tracked
-    const totalFailedOrDuplicate = failedInvoices.length + duplicateInvoices.length;
+    const totalFailed = failedInvoices.length + blockedInvoices.length;
 
     await updateBatchProgress(batchId, {
         status: finalStatus,
         processedFiles: files.length,
-        successfulFiles: successfulInvoices.length,
-        failedFiles: totalFailedOrDuplicate,
+        successfulFiles: successfulInvoices.length + duplicateInvoices.length,
+        failedFiles: totalFailed,
         blockedFiles: blockedInvoices.length,
         completedAt: new Date(),
         errors: batchErrors.length > 0 ? batchErrors : undefined,
@@ -4604,13 +4605,21 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
         console.log(`[ingestBatchOutput] Persisted ${success} invoices, ${failed} errors for batch ${batchId}`);
 
         if (errors.length > 0) {
-            console.error(`[ingestBatchOutput] Detailed errors for batch ${batchId}:`);
-            errors.forEach(({ lineIndex, error, context }) => {
-                console.error(`  Line ${lineIndex}: ${error}`);
-                if (context) {
-                    console.error(`    Context:`, context);
-                }
+            // Filter out descuadre validation errors from console.error logging
+            const errorsToLog = errors.filter(({ context }) => {
+                const batchError = context?.batchError;
+                return batchError?.kind !== 'VALIDATION_ERROR';
             });
+
+            if (errorsToLog.length > 0) {
+                console.error(`[ingestBatchOutput] Detailed errors for batch ${batchId}:`);
+                errorsToLog.forEach(({ lineIndex, error, context }) => {
+                    console.error(`  Line ${lineIndex}: ${error}`);
+                    if (context) {
+                        console.error(`    Context:`, context);
+                    }
+                });
+            }
 
             const structuredErrors = errors.map(({ lineIndex, error, context }) => {
                 const fileName = context?.custom_id || `line-${lineIndex}`;
