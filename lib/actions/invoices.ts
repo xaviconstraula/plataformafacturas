@@ -146,7 +146,7 @@ interface ChatCompletionBody {
 }
 
 // Gemini configuration
-const GEMINI_MODEL = "gemini-2.5-pro";
+const GEMINI_MODEL = "gemini-2.5-flash";
 
 // Regex helpers used to keep Gemini outputs constrained and avoid noisy payloads
 const CIF_REGEX = "^(?:ES)?[A-Z0-9][A-Z0-9\\-]{5,15}$";
@@ -1045,8 +1045,8 @@ interface TransactionOperationResult {
 }
 
 export interface UpdateInvoiceItemInput {
-    id: string;
-    materialId: string;
+    id?: string | null;
+    materialId?: string | null;
     materialName: string;
     quantity: number;
     listPrice?: number | null;
@@ -1061,6 +1061,7 @@ export interface UpdateInvoiceInput {
     invoiceId: string;
     totalAmount: number;
     items: UpdateInvoiceItemInput[];
+    deletedItemIds?: string[];
 }
 
 export interface UpdateInvoiceActionResult {
@@ -1068,6 +1069,126 @@ export interface UpdateInvoiceActionResult {
     message: string;
     hasTotalsMismatch: boolean;
     errors?: string[];
+}
+
+type InvoiceWithProvider = Invoice & { provider: Provider };
+type InvoiceWithProviderAndItems = InvoiceWithProvider & { items: (InvoiceItem & { material: Material })[] };
+
+async function syncMaterialPricingForInvoiceItem(
+    tx: Prisma.TransactionClient,
+    invoice: InvoiceWithProvider,
+    materialId: string,
+    unitPriceDecimal: Prisma.Decimal,
+): Promise<void> {
+    const invoiceIssueDate = invoice.issueDate;
+
+    const materialProvider = await tx.materialProvider.findUnique({
+        where: {
+            materialId_providerId: {
+                materialId,
+                providerId: invoice.providerId,
+            },
+        },
+    });
+
+    if (!materialProvider || !materialProvider.lastPriceDate || invoiceIssueDate.getTime() >= materialProvider.lastPriceDate.getTime()) {
+        await tx.materialProvider.upsert({
+            where: {
+                materialId_providerId: {
+                    materialId,
+                    providerId: invoice.providerId,
+                },
+            },
+            update: {
+                lastPrice: unitPriceDecimal,
+                lastPriceDate: invoiceIssueDate,
+            },
+            create: {
+                materialId,
+                providerId: invoice.providerId,
+                lastPrice: unitPriceDecimal,
+                lastPriceDate: invoiceIssueDate,
+            },
+        });
+    }
+
+    const existingAlert = await tx.priceAlert.findFirst({
+        where: {
+            invoiceId: invoice.id,
+            materialId,
+        },
+    });
+
+    if (existingAlert) {
+        let percentageDecimal: Prisma.Decimal;
+
+        if (existingAlert.oldPrice.isZero()) {
+            percentageDecimal = unitPriceDecimal.isZero()
+                ? new Prisma.Decimal(0)
+                : new Prisma.Decimal(unitPriceDecimal.isPositive() ? 9999 : -9999);
+        } else {
+            percentageDecimal = unitPriceDecimal.minus(existingAlert.oldPrice)
+                .dividedBy(existingAlert.oldPrice)
+                .times(100);
+        }
+
+        await tx.priceAlert.update({
+            where: { id: existingAlert.id },
+            data: {
+                newPrice: unitPriceDecimal,
+                percentage: percentageDecimal,
+            },
+        });
+
+        return;
+    }
+
+    const lastPurchase = await tx.invoiceItem.findFirst({
+        where: {
+            materialId,
+            invoice: {
+                providerId: invoice.providerId,
+                issueDate: {
+                    lt: invoiceIssueDate,
+                },
+            },
+        },
+        orderBy: {
+            itemDate: 'desc',
+        },
+    });
+
+    if (!lastPurchase) {
+        return;
+    }
+
+    const lastPrice = lastPurchase.unitPrice;
+    let percentageChange: Prisma.Decimal;
+
+    if (!lastPrice.isZero()) {
+        percentageChange = unitPriceDecimal.minus(lastPrice)
+            .dividedBy(lastPrice)
+            .times(100);
+    } else {
+        percentageChange = unitPriceDecimal.isZero()
+            ? new Prisma.Decimal(0)
+            : new Prisma.Decimal(unitPriceDecimal.isPositive() ? 9999 : -9999);
+    }
+
+    if (percentageChange.abs().gte(5)) {
+        await tx.priceAlert.create({
+            data: {
+                materialId,
+                providerId: invoice.providerId,
+                oldPrice: lastPrice,
+                newPrice: unitPriceDecimal,
+                percentage: percentageChange,
+                status: "PENDING",
+                effectiveDate: invoiceIssueDate,
+                invoiceId: invoice.id,
+            },
+        });
+    }
 }
 
 
@@ -3260,9 +3381,9 @@ async function prepareBatchLine(file: File): Promise<string> {
             generationConfig: {
                 // temperature: 0.8,
                 candidateCount: 1,
-                // thinkingConfig: {
-                //     thinkingBudget: 0
-                // }
+                thinkingConfig: {
+                    thinkingBudget: 0
+                }
             }
         }
     };
@@ -3614,7 +3735,29 @@ export async function updateInvoiceAction(payload: UpdateInvoiceInput): Promise<
         validationErrors.push('El total de la factura no es válido.');
     }
 
-    const normalizedItems = (payload.items ?? []).map<UpdateInvoiceItemInput>((item, index) => {
+    interface NormalizedInvoiceUpdateItem {
+        clientId: string;
+        existingId: string | null;
+        materialId: string | null;
+        materialName: string;
+        quantity: number;
+        listPrice: number | null;
+        discountPercentage: number | null;
+        discountRaw: string | null;
+        unitPrice: number;
+        totalPrice: number;
+        workOrder: string | null;
+    }
+
+    const normalizedItems = (payload.items ?? []).map<NormalizedInvoiceUpdateItem>((item, index) => {
+        const rawId = typeof item.id === 'string' ? item.id.trim() : '';
+        const clientId = rawId || `temp-${index}`;
+        const existingId = rawId || null;
+
+        const materialId = typeof item.materialId === 'string' && item.materialId.trim() !== ''
+            ? item.materialId.trim()
+            : null;
+
         const materialName = (item.materialName ?? '').trim();
         if (!materialName) {
             validationErrors.push(`La línea ${index + 1} debe tener un nombre de material.`);
@@ -3647,18 +3790,26 @@ export async function updateInvoiceAction(payload: UpdateInvoiceInput): Promise<
             validationErrors.push(`El descuento de la línea ${index + 1} no es válido.`);
         }
 
+        const discountRaw = typeof item.discountRaw === 'string' && item.discountRaw.trim() !== ''
+            ? item.discountRaw.trim()
+            : null;
+        const workOrder = typeof item.workOrder === 'string' && item.workOrder.trim() !== ''
+            ? item.workOrder.trim()
+            : null;
+
         return {
-            id: item.id,
-            materialId: item.materialId,
+            clientId,
+            existingId,
+            materialId,
             materialName,
             quantity,
             listPrice,
             discountPercentage,
-            discountRaw: item.discountRaw ?? null,
+            discountRaw,
             unitPrice,
             totalPrice,
-            workOrder: item.workOrder?.trim() ? item.workOrder.trim() : null,
-        } satisfies UpdateInvoiceItemInput;
+            workOrder,
+        };
     });
 
     if (validationErrors.length > 0) {
@@ -3677,7 +3828,7 @@ export async function updateInvoiceAction(payload: UpdateInvoiceInput): Promise<
 
     try {
         const result = await prisma.$transaction(async (tx) => {
-            const invoice = await tx.invoice.findFirst({
+            const invoiceRecord = await tx.invoice.findFirst({
                 where: {
                     id: payload.invoiceId,
                     provider: { userId: user.id },
@@ -3690,17 +3841,46 @@ export async function updateInvoiceAction(payload: UpdateInvoiceInput): Promise<
                 },
             });
 
-            if (!invoice) {
+            if (!invoiceRecord) {
                 throw new Error('Factura no encontrada o sin permisos para editarla.');
             }
 
+            const invoice = invoiceRecord as InvoiceWithProviderAndItems;
             const existingItemsMap = new Map(invoice.items.map(item => [item.id, item]));
 
-            for (const input of normalizedItems) {
-                const existingItem = existingItemsMap.get(input.id);
-                if (!existingItem) {
-                    throw new Error(`La línea con id ${input.id} no pertenece a la factura.`);
+            const deletedItemIds = Array.isArray(payload.deletedItemIds)
+                ? payload.deletedItemIds
+                    .filter((id): id is string => typeof id === 'string' && id.trim() !== '')
+                    .map((id) => id.trim())
+                : [];
+            const deletedSet = new Set<string>(deletedItemIds);
+
+            for (const id of deletedSet) {
+                if (!existingItemsMap.has(id)) {
+                    throw new Error(`La línea con id ${id} no pertenece a la factura.`);
                 }
+            }
+
+            for (const item of normalizedItems) {
+                if (item.existingId && deletedSet.has(item.existingId)) {
+                    throw new Error('No se puede actualizar una línea marcada para eliminar.');
+                }
+            }
+
+            const newItemsCount = normalizedItems.filter(
+                (item) => !item.existingId || !existingItemsMap.has(item.existingId),
+            ).length;
+            const remainingExistingCount = invoice.items.length - deletedSet.size;
+            const finalCount = remainingExistingCount + newItemsCount;
+
+            if (finalCount <= 0) {
+                throw new Error('La factura debe contener al menos una línea.');
+            }
+
+            const createdItems: (InvoiceItem & { material: Material })[] = [];
+
+            for (const input of normalizedItems) {
+                const existingItem = input.existingId ? existingItemsMap.get(input.existingId) : undefined;
 
                 const quantityDecimal = new Prisma.Decimal(input.quantity.toFixed(3));
                 const unitPriceDecimal = new Prisma.Decimal(input.unitPrice.toFixed(3));
@@ -3712,85 +3892,123 @@ export async function updateInvoiceAction(payload: UpdateInvoiceInput): Promise<
                     ? new Prisma.Decimal(input.discountPercentage.toFixed(2))
                     : null;
 
-                await tx.invoiceItem.update({
-                    where: { id: existingItem.id },
+                if (existingItem) {
+                    await tx.invoiceItem.update({
+                        where: { id: existingItem.id },
+                        data: {
+                            quantity: quantityDecimal,
+                            listPrice: listPriceDecimal,
+                            discountPercentage: discountPercentageDecimal,
+                            discountRaw: input.discountRaw ?? existingItem.discountRaw ?? null,
+                            unitPrice: unitPriceDecimal,
+                            totalPrice: totalPriceDecimal,
+                            workOrder: input.workOrder,
+                        },
+                    });
+
+                    const normalizedMaterialName = input.materialName;
+                    if (normalizedMaterialName && normalizedMaterialName !== existingItem.material.name) {
+                        await tx.material.update({
+                            where: { id: existingItem.materialId },
+                            data: {
+                                name: normalizedMaterialName,
+                            },
+                        });
+                    }
+
+                    await syncMaterialPricingForInvoiceItem(tx, invoice, existingItem.materialId, unitPriceDecimal);
+                    continue;
+                }
+
+                const normalizedMaterialName = input.materialName;
+                let material: Material;
+
+                if (input.materialId) {
+                    const existingMaterial = await tx.material.findFirst({
+                        where: {
+                            id: input.materialId,
+                            userId: invoice.provider.userId,
+                        },
+                    });
+
+                    if (!existingMaterial) {
+                        throw new Error('El material seleccionado para la nueva línea no existe o no pertenece al usuario.');
+                    }
+
+                    material = existingMaterial;
+                } else {
+                    material = await findOrCreateMaterialTx(
+                        tx,
+                        normalizedMaterialName,
+                        undefined,
+                        invoice.provider.type ?? undefined,
+                        invoice.provider.userId ?? undefined,
+                    );
+                }
+
+                if (normalizedMaterialName && normalizedMaterialName !== material.name) {
+                    await tx.material.update({
+                        where: { id: material.id },
+                        data: {
+                            name: normalizedMaterialName,
+                        },
+                    });
+                    material = { ...material, name: normalizedMaterialName };
+                }
+
+                const created = await tx.invoiceItem.create({
                     data: {
+                        invoiceId: invoice.id,
+                        materialId: material.id,
                         quantity: quantityDecimal,
                         listPrice: listPriceDecimal,
                         discountPercentage: discountPercentageDecimal,
-                        discountRaw: input.discountRaw ?? existingItem.discountRaw,
+                        discountRaw: input.discountRaw,
                         unitPrice: unitPriceDecimal,
                         totalPrice: totalPriceDecimal,
+                        itemDate: invoice.issueDate,
                         workOrder: input.workOrder,
-                    }
+                    },
+                    include: {
+                        material: true,
+                    },
                 });
 
-                const normalizedMaterialName = input.materialName.trim();
-                if (normalizedMaterialName && normalizedMaterialName !== existingItem.material.name) {
-                    await tx.material.update({
-                        where: { id: existingItem.materialId },
-                        data: {
-                            name: normalizedMaterialName,
-                        }
-                    });
-                }
+                createdItems.push(created);
+                await syncMaterialPricingForInvoiceItem(tx, invoice, created.materialId, unitPriceDecimal);
+            }
 
-                const invoiceIssueDate = invoice.issueDate;
-                const materialProvider = await tx.materialProvider.findUnique({
+            if (deletedSet.size > 0) {
+                const deletedItems = invoice.items.filter((item) => deletedSet.has(item.id));
+                const deletedMaterialIds = new Set<string>(deletedItems.map((item) => item.materialId));
+
+                await tx.invoiceItem.deleteMany({
                     where: {
-                        materialId_providerId: {
-                            materialId: existingItem.materialId,
-                            providerId: invoice.providerId,
-                        }
-                    }
-                });
-
-                if (!materialProvider || !materialProvider.lastPriceDate || invoiceIssueDate.getTime() >= materialProvider.lastPriceDate.getTime()) {
-                    await tx.materialProvider.upsert({
-                        where: {
-                            materialId_providerId: {
-                                materialId: existingItem.materialId,
-                                providerId: invoice.providerId,
-                            }
-                        },
-                        update: {
-                            lastPrice: unitPriceDecimal,
-                            lastPriceDate: invoiceIssueDate,
-                        },
-                        create: {
-                            materialId: existingItem.materialId,
-                            providerId: invoice.providerId,
-                            lastPrice: unitPriceDecimal,
-                            lastPriceDate: invoiceIssueDate,
-                        }
-                    });
-                }
-
-                const existingAlert = await tx.priceAlert.findFirst({
-                    where: {
+                        id: { in: Array.from(deletedSet) },
                         invoiceId: invoice.id,
-                        materialId: existingItem.materialId,
-                    }
+                    },
                 });
 
-                if (existingAlert) {
-                    let percentageDecimal: Prisma.Decimal;
-                    if (existingAlert.oldPrice.isZero()) {
-                        percentageDecimal = unitPriceDecimal.isZero()
-                            ? new Prisma.Decimal(0)
-                            : new Prisma.Decimal(unitPriceDecimal.isPositive() ? 9999 : -9999);
-                    } else {
-                        percentageDecimal = unitPriceDecimal.minus(existingAlert.oldPrice)
-                            .dividedBy(existingAlert.oldPrice)
-                            .times(100);
+                const remainingMaterialIds = new Set<string>();
+                for (const item of invoice.items) {
+                    if (!deletedSet.has(item.id)) {
+                        remainingMaterialIds.add(item.materialId);
                     }
+                }
+                for (const item of createdItems) {
+                    remainingMaterialIds.add(item.materialId);
+                }
 
-                    await tx.priceAlert.update({
-                        where: { id: existingAlert.id },
-                        data: {
-                            newPrice: unitPriceDecimal,
-                            percentage: percentageDecimal,
-                        }
+                const materialIdsToRemoveAlerts = Array.from(deletedMaterialIds).filter(
+                    (materialId) => !remainingMaterialIds.has(materialId),
+                );
+
+                if (materialIdsToRemoveAlerts.length > 0) {
+                    await tx.priceAlert.deleteMany({
+                        where: {
+                            invoiceId: invoice.id,
+                            materialId: { in: materialIdsToRemoveAlerts },
+                        },
                     });
                 }
             }
@@ -3800,7 +4018,7 @@ export async function updateInvoiceAction(payload: UpdateInvoiceInput): Promise<
                 data: {
                     totalAmount: new Prisma.Decimal(parsedTotalAmount.toFixed(2)),
                     hasTotalsMismatch: totalsCheck.hasMismatch,
-                }
+                },
             });
 
             return {
