@@ -2028,6 +2028,56 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
     return material;
 }
 
+// Helper function to safely parse item dates from various formats
+function parseItemDate(itemDateString: string | null | undefined, invoiceIssueDate: Date): Date {
+    if (!itemDateString || typeof itemDateString !== 'string') {
+        return invoiceIssueDate;
+    }
+
+    const trimmed = itemDateString.trim();
+    if (!trimmed) {
+        return invoiceIssueDate;
+    }
+
+    // Try parsing as ISO date first (e.g., "2020-10-16")
+    const isoDate = new Date(trimmed);
+    if (!isNaN(isoDate.getTime()) && isoDate.getFullYear() >= 1900 && isoDate.getFullYear() <= 2100) {
+        return isoDate;
+    }
+
+    // Try parsing common European formats
+    // DD/MM/YYYY or DD-MM-YYYY
+    const europeanDateMatch = trimmed.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+    if (europeanDateMatch) {
+        const [, day, month, year] = europeanDateMatch;
+        const parsed = new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`);
+        if (!isNaN(parsed.getTime()) && parsed.getFullYear() >= 1900 && parsed.getFullYear() <= 2100) {
+            return parsed;
+        }
+    }
+
+    // Try parsing as YYMMDD (common in some systems)
+    if (trimmed.length === 6 && /^\d{6}$/.test(trimmed)) {
+        const year = parseInt(trimmed.substring(0, 2));
+        const month = parseInt(trimmed.substring(2, 4));
+        const day = parseInt(trimmed.substring(4, 6));
+
+        // Handle year ambiguity: assume 20xx for years 00-50, 19xx for 51-99
+        const fullYear = year <= 50 ? 2000 + year : 1900 + year;
+
+        if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+            const parsed = new Date(fullYear, month - 1, day);
+            if (!isNaN(parsed.getTime())) {
+                return parsed;
+            }
+        }
+    }
+
+    // If all parsing attempts fail, log warning and use invoice date
+    console.warn(`[parseItemDate] Could not parse item date '${trimmed}', using invoice date ${invoiceIssueDate.toISOString().split('T')[0]}`);
+    return invoiceIssueDate;
+}
+
 async function processInvoiceItemTx(
     tx: Prisma.TransactionClient,
     itemData: ExtractedPdfItemData,
@@ -2056,8 +2106,7 @@ async function processInvoiceItemTx(
         : null;
 
     // Use itemDate if provided and valid, otherwise use invoice issue date
-    const parsedItemDate = itemDate ? new Date(itemDate) : null;
-    const effectiveDate = parsedItemDate && !isNaN(parsedItemDate.getTime()) ? parsedItemDate : invoiceIssueDate;
+    const effectiveDate = parseItemDate(itemDate, invoiceIssueDate);
 
 
 
@@ -3557,9 +3606,32 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
             let itemsProcessed = 0;
             let itemsSkipped = 0;
 
+            // Create material cache for performance optimization
+            const materialCache = new Map<string, { id: string; name: string; code: string; referenceCode: string | null; category: string | null }>();
+
+            // Detect credit notes: if totalAmount is negative but items are positive, negate all item prices
+            const isCreditNote = extractedData.totalAmount < 0;
+            let processedItems = extractedData.items;
+            if (isCreditNote) {
+                const itemsSum = extractedData.items.reduce((sum, item) => sum + (item.totalPrice || 0), 0);
+                const allItemsPositive = extractedData.items.every(item => (item.totalPrice || 0) >= 0);
+
+                if (allItemsPositive && itemsSum > 0) {
+                    console.warn(`[Credit Note Sign Error] Invoice ${extractedData.invoiceCode} has negative totalAmount (${extractedData.totalAmount}) but ALL ${extractedData.items.length} items are positive! Items sum: ${itemsSum.toFixed(2)}, Expected total: ${extractedData.totalAmount}. Correcting by negating all item prices.`);
+
+                    // Create corrected items with negated prices
+                    processedItems = extractedData.items.map(item => ({
+                        ...item,
+                        unitPrice: -(Math.abs(item.unitPrice || 0)),
+                        totalPrice: -(Math.abs(item.totalPrice || 0)),
+                        listPrice: item.listPrice ? -(Math.abs(item.listPrice)) : item.listPrice,
+                    }));
+                }
+            }
+
             // Pre-process work orders: if any item has an OT, apply it to ALL items
             const workOrdersInInvoice = new Set<string>();
-            for (const item of extractedData.items) {
+            for (const item of processedItems) {
                 if (item.workOrder && item.workOrder.trim()) {
                     workOrdersInInvoice.add(item.workOrder.trim());
                 }
@@ -3576,14 +3648,14 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
 
             // Apply the invoice work order to all items
             if (invoiceWorkOrder) {
-                for (const item of extractedData.items) {
+                for (const item of processedItems) {
                     if (!item.workOrder || item.workOrder.trim() === '') {
                         item.workOrder = invoiceWorkOrder;
                     }
                 }
             }
 
-            for (const item of extractedData.items) {
+            for (const item of processedItems) {
                 // 🚦 Validate item data to prevent runtime errors
                 if (!item.materialName) {
                     console.warn(`[saveExtractedInvoice][Invoice ${extractedData.invoiceCode}] Skipping line item due to missing material name (file: ${fileName ?? "unknown"}). Item data:`, item);
@@ -3615,8 +3687,15 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
                     (item as unknown as { totalPrice: number }).totalPrice = Number(((item.unitPrice ?? 0) * item.quantity).toFixed(3));
                 }
 
+                // Validate material code - skip items with obviously invalid codes
+                if (item.materialCode && (item.materialCode === 'true' || item.materialCode === 'false' || item.materialCode.length < 3 || !/^[a-zA-Z0-9\-_\.]+$/.test(item.materialCode))) {
+                    console.warn(`[saveExtractedInvoice][Invoice ${extractedData.invoiceCode}] Skipping item '${item.materialName}' due to invalid material code: '${item.materialCode}' (file: ${fileName ?? "unknown"})`);
+                    itemsSkipped++;
+                    continue;
+                }
+
                 try {
-                    const material = await findOrCreateMaterialTx(tx, item.materialName, item.materialCode, provider.type, user.id);
+                    const material = await findOrCreateMaterialTxWithCache(tx, item.materialName, item.materialCode, provider.type, materialCache, user.id);
                     await processInvoiceItemTx(
                         tx,
                         item,
@@ -3644,6 +3723,9 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
                 hasTotalsMismatch: totalsCheck.hasMismatch,
                 validationErrors: validationWarnings.length > 0 ? validationWarnings : undefined,
             };
+        }, {
+            timeout: 30000, // 30 seconds timeout for complex invoice processing
+            maxWait: 300000 // 5 minutes max wait
         });
 
         if (result.validationErrors?.length) {
