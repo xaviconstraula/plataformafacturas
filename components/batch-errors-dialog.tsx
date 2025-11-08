@@ -122,7 +122,7 @@ export function BatchErrorsDialog({
                             </div>
                             <div className="bg-red-50 p-3 rounded-lg">
                                 <p className="text-sm text-gray-600">Fallidos</p>
-                                <p className="text-2xl font-bold text-red-600">{actualErrorCount}</p>
+                                <p className="text-2xl font-bold text-red-600">{failedFiles - duplicateCount}</p>
                             </div>
                             <div className="bg-orange-50 p-3 rounded-lg">
                                 <p className="text-sm text-gray-600">Duplicadas</p>
