@@ -329,6 +329,7 @@ export function BatchProgressBanner() {
                     batchId={selectedBatchIdForErrors}
                     errors={selectedBatchForErrors?.errors || []}
                     failedFiles={selectedBatchForErrors?.failedFiles || 0}
+                    successfulFiles={selectedBatchForErrors?.successfulFiles || 0}
                     totalFiles={selectedBatchForErrors?.totalFiles || 0}
                 />
             ) : null}

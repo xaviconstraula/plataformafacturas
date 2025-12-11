@@ -240,6 +240,7 @@ export function BatchHistoryCard() {
                     batchId={selectedBatchData.id}
                     errors={selectedBatchData.errors || []}
                     failedFiles={selectedBatchData.failedFiles || 0}
+                    successfulFiles={selectedBatchData.successfulFiles || 0}
                     totalFiles={selectedBatchData.totalFiles || 0}
                 />
             )}

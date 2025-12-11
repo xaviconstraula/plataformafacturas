@@ -16,6 +16,7 @@ interface BatchErrorsDialogProps {
     batchId: string
     errors?: BatchErrorDetail[]
     failedFiles: number
+    successfulFiles: number
     totalFiles: number
 }
 
@@ -25,6 +26,7 @@ export function BatchErrorsDialog({
     batchId,
     errors = [],
     failedFiles,
+    successfulFiles,
     totalFiles,
 }: BatchErrorsDialogProps) {
     const [expandedErrors, setExpandedErrors] = useState<Set<number>>(new Set())
@@ -47,7 +49,7 @@ export function BatchErrorsDialog({
     // Handle loading state when data is still being fetched
     const isLoadingData = totalFiles === 0 && failedFiles === 0 && errors.length === 0
 
-    const successRate = totalFiles > 0 ? Math.round(((totalFiles - failedFiles) / totalFiles) * 100) : 0
+    const successRate = totalFiles > 0 ? Math.round((successfulFiles / totalFiles) * 100) : 0
 
     const duplicates = errors.filter(error => error.kind === 'DUPLICATE_INVOICE')
     const parsingErrors = errors.filter(error => error.kind === 'PARSING_ERROR' || error.kind === 'EXTRACTION_ERROR')
@@ -117,12 +119,12 @@ export function BatchErrorsDialog({
                             <div className="bg-green-50 p-3 rounded-lg">
                                 <p className="text-sm text-gray-600">Exitosos</p>
                                 <p className="text-2xl font-bold text-green-600">
-                                    {totalFiles - actualErrorCount - duplicateCount}
+                                    {successfulFiles}
                                 </p>
                             </div>
                             <div className="bg-red-50 p-3 rounded-lg">
                                 <p className="text-sm text-gray-600">Fallidos</p>
-                                <p className="text-2xl font-bold text-red-600">{failedFiles - duplicateCount}</p>
+                                <p className="text-2xl font-bold text-red-600">{actualErrorCount}</p>
                             </div>
                             <div className="bg-orange-50 p-3 rounded-lg">
                                 <p className="text-sm text-gray-600">Duplicadas</p>
