@@ -280,6 +280,11 @@ model BatchProcessing {
   // Error tracking
   errors Json? // Array of error messages
 
+  // Retry system with Cloudflare R2
+  r2Keys        Json? // Array of R2 object keys for retry capability
+  retryAttempts Int   @default(0) // Total number of retries performed
+  retriedFiles  Int   @default(0) // Number of files that were retried
+
   // Timestamps
   startedAt   DateTime?
   completedAt DateTime?

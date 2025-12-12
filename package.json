@@ -20,6 +20,7 @@
     "migration:production-safe": "tsx scripts/production-safe-migration.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.948.0",
     "@google/genai": "^1.22.0",
     "@hookform/resolvers": "^5.2.2",
     "@prisma/client": "^6.16.3",

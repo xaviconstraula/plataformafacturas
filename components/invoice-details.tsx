@@ -27,6 +27,7 @@ export interface InvoiceDetailsData {
   ivaPercentage: number
   retentionAmount: number
   originalFileName?: string | null
+  pdfUrl?: string | null
   hasTotalsMismatch: boolean
   provider: {
     id: string

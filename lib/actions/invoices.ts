@@ -9,6 +9,7 @@ import { GoogleGenAI } from "@google/genai";
 import { normalizeMaterialCode, areMaterialCodesSimilar, normalizeCifForComparison, buildCifVariants } from "@/lib/utils";
 import { parseJsonLinesFromFile } from "@/lib/utils/jsonl-parser";
 import { requireAuth } from "@/lib/auth-utils";
+import { uploadPdfToR2, downloadPdfFromR2, isR2Configured, getPdfUrlFromKey } from '@/lib/storage/r2-client';
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -3529,7 +3530,7 @@ async function buildBatchJsonlChunks(files: File[]): Promise<JsonlChunk[]> {
 // 🏗️  Helper: Persist extracted JSON response (used by webhook)
 // ---------------------------------------------------------------------------
 
-export async function saveExtractedInvoice(extractedData: ExtractedPdfData, fileName?: string): Promise<CreateInvoiceResult> {
+export async function saveExtractedInvoice(extractedData: ExtractedPdfData, fileName?: string, pdfUrl?: string): Promise<CreateInvoiceResult> {
     const user = await requireAuth()
 
     try {
@@ -3597,6 +3598,7 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
                     ivaPercentage: new Prisma.Decimal(extractedData.ivaPercentage.toFixed(2)),
                     retentionAmount: new Prisma.Decimal(extractedData.retentionAmount.toFixed(2)),
                     originalFileName: fileName,
+                    pdfUrl: pdfUrl || null, // Store R2 URL for viewing
                     status: "PROCESSED",
                     hasTotalsMismatch: totalsCheck.hasMismatch,
                 },
@@ -4180,6 +4182,33 @@ async function processBatchInBackground(files: File[], userId: string) {
     let batchId: string | null = null;
 
     try {
+        // STEP 0 – Upload PDFs to R2 for retry capability (if configured)
+        const r2Keys: string[] = [];
+        const r2Urls: Record<string, string> = {}; // Map fileName -> URL
+        const r2Enabled = isR2Configured();
+
+        if (r2Enabled) {
+            console.log('[processBatchInBackground] R2 configured, uploading PDFs for permanent storage');
+            // Create temporary batch ID for R2 organization
+            const tempBatchId = `batch-${Date.now()}`;
+
+            try {
+                const uploadPromises = files.map(async (file) => {
+                    const result = await uploadPdfToR2(file, tempBatchId);
+                    r2Urls[file.name] = result.url;
+                    return result.key;
+                });
+                const keys = await Promise.all(uploadPromises);
+                r2Keys.push(...keys);
+                console.log(`[processBatchInBackground] Uploaded ${r2Keys.length} PDFs to R2 for permanent storage`);
+            } catch (r2Error) {
+                console.error('[processBatchInBackground] Failed to upload PDFs to R2:', r2Error);
+                // Continue without retry capability if R2 upload fails
+            }
+        } else {
+            console.log('[processBatchInBackground] R2 not configured, skipping PDF upload (no retry capability)');
+        }
+
         // STEP A – Build JSONL chunks
         const tmpDir = path.join(process.env.NODE_ENV === 'development' ? path.join(process.cwd(), 'tmp') : os.tmpdir(), 'facturas-batch');
         try {
@@ -4260,6 +4289,14 @@ async function processBatchInBackground(files: File[], userId: string) {
             if (isFirstChunk && remoteId !== 'unknown') {
                 batchId = await createBatchProcessing(files.length, remoteId, userId);
                 isFirstChunk = false;
+
+                // Save R2 keys to database for retry capability
+                if (r2Keys.length > 0) {
+                    await prisma.batchProcessing.update({
+                        where: { id: batchId },
+                        data: { r2Keys: r2Keys },
+                    });
+                }
 
                 // Update to PROCESSING state
                 await updateBatchProgress(batchId, {
@@ -4538,6 +4575,25 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
         let duplicateErrors = 0;
         let actualErrors = 0;
 
+        // Get R2 keys and map to URLs for saving with invoices
+        const batch = await prisma.batchProcessing.findUnique({
+            where: { id: batchId },
+            select: { r2Keys: true },
+        });
+        const r2Keys = (batch?.r2Keys as string[] | null) || [];
+
+        // Create a map of fileName -> URL for quick lookup
+        const fileUrlMap = new Map<string, string>();
+        if (r2Keys.length > 0) {
+            for (const key of r2Keys) {
+                const fileName = key.split('/').pop();
+                if (fileName) {
+                    const url = getPdfUrlFromKey(key);
+                    if (url) fileUrlMap.set(fileName, url);
+                }
+            }
+        }
+
         for (let index = 0; index < entries.length; index++) {
             const entry = entries[index];
             const lineIndex = index + 1;
@@ -4625,7 +4681,92 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                     continue;
                 }
 
-                const result = await saveExtractedInvoice(extractedData, key ?? undefined);
+                // Get PDF URL for this file from map
+                const pdfUrl = fileUrlMap.get(key || '') || undefined;
+                const result = await saveExtractedInvoice(extractedData, key ?? undefined, pdfUrl);
+
+                // 🔄 Retry system: If mismatch detected and R2 is available, retry up to 3 more times
+                if (result.hasTotalsMismatch && !result.success) {
+                    console.log(`[Retry] Descuadre detectado en ${key}, verificando si es posible reintentar...`);
+
+                    try {
+                        // Get R2 keys from batch
+                        const batch = await prisma.batchProcessing.findUnique({
+                            where: { id: batchId },
+                            select: { r2Keys: true, retryAttempts: true, retriedFiles: true },
+                        });
+
+                        const r2Keys = (batch?.r2Keys as string[] | null) || [];
+                        const pdfKey = r2Keys.find(k => k.endsWith(key || ''));
+
+                        if (pdfKey) {
+                            let retrySuccess = false;
+                            let finalResult = result;
+
+                            // Up to 3 additional retry attempts (attempts 2, 3, 4)
+                            for (let attempt = 2; attempt <= 4 && !retrySuccess; attempt++) {
+                                console.log(`[Retry] Intento ${attempt}/4 para ${key}...`);
+
+                                try {
+                                    // Download PDF from R2
+                                    const retryFile = await downloadPdfFromR2(pdfKey);
+
+                                    // Re-extract with enhanced prompt (attempt number)
+                                    const retryExtraction = await callPdfExtractAPI(retryFile, []);
+
+                                    if (retryExtraction.extractedData && !retryExtraction.error) {
+                                        // Validate new result (reuse same PDF URL)
+                                        const retryResult = await saveExtractedInvoice(
+                                            retryExtraction.extractedData,
+                                            key,
+                                            pdfUrl
+                                        );
+
+                                        if (retryResult.success && !retryResult.hasTotalsMismatch) {
+                                            console.log(`[Retry] ✓ Éxito en intento ${attempt} para ${key}`);
+                                            finalResult = retryResult;
+                                            retrySuccess = true;
+
+                                            // Update retry statistics
+                                            await prisma.batchProcessing.update({
+                                                where: { id: batchId },
+                                                data: {
+                                                    retryAttempts: { increment: attempt - 1 },
+                                                    retriedFiles: { increment: 1 },
+                                                },
+                                            });
+                                        } else if (retryResult.hasTotalsMismatch) {
+                                            console.log(`[Retry] Intento ${attempt} aún tiene descuadre para ${key}`);
+                                            finalResult = retryResult;
+                                        }
+                                    }
+                                } catch (retryError) {
+                                    console.error(`[Retry] Error en intento ${attempt} para ${key}:`, retryError);
+                                }
+
+                                // Wait before next attempt (exponential backoff)
+                                if (!retrySuccess && attempt < 4) {
+                                    await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+                                }
+                            }
+
+                            if (!retrySuccess) {
+                                console.warn(`[Retry] Agotados reintentos para ${key}, usando último resultado`);
+                            }
+
+                            // Use final result (either successful retry or last attempt)
+                            result.success = finalResult.success;
+                            result.hasTotalsMismatch = finalResult.hasTotalsMismatch;
+                            result.message = finalResult.message;
+                        } else {
+                            console.log(`[Retry] No se encontró PDF en R2 para ${key}, omitiendo reintentos`);
+                        }
+                    } catch (retryError) {
+                        console.error(`[Retry] Error durante sistema de reintentos:`, retryError);
+                        // Continue with original result if retry system fails
+                    }
+                }
+
                 if (result.success) {
                     success++;
                     if (result.validationErrors?.length) {
@@ -4685,6 +4826,9 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
         });
 
         console.log(`[ingestBatchOutput] Persisted ${success} invoices, ${failed} errors for batch ${batchId}`);
+
+        // Note: PDFs are now stored permanently in R2 for viewing in the UI
+        // No automatic cleanup - files remain accessible via invoice detail pages
 
         if (errors.length > 0) {
             // Filter out descuadre validation errors from console.error logging

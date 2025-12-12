@@ -481,6 +481,7 @@ export async function getInvoiceDetails(id: string) {
             ivaPercentage: invoice.ivaPercentage?.toNumber() ?? 21.00,
             retentionAmount: invoice.retentionAmount?.toNumber() ?? 0.00,
             originalFileName: invoice.originalFileName,
+            pdfUrl: invoice.pdfUrl,
             hasTotalsMismatch: invoice.hasTotalsMismatch,
             provider: {
                 id: invoice.provider.id,

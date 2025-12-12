@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState, useTransition } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { toast } from 'sonner'
-import { ArrowLeftIcon, FileTextIcon, PencilIcon, SaveIcon, XIcon, AlertTriangle, PlusIcon, TrashIcon } from 'lucide-react'
+import { ArrowLeftIcon, FileTextIcon, PencilIcon, SaveIcon, XIcon, AlertTriangle, PlusIcon, TrashIcon, ExternalLinkIcon } from 'lucide-react'
 
 import type { InvoiceDetailsData, InvoiceDetailsItem } from '@/components/invoice-details'
 import type { UpdateInvoiceInput, UpdateInvoiceActionResult } from '@/lib/actions/invoices'
@@ -304,6 +304,20 @@ export function InvoiceDetailsClient({ invoice, updateInvoice }: InvoiceDetailsC
           </Button>
         </Link>
         <div className="flex items-center gap-2">
+          {invoiceState.pdfUrl && (
+            <Button
+              variant="outline"
+              size="sm"
+              asChild
+              className="gap-1"
+            >
+              <a href={invoiceState.pdfUrl} target="_blank" rel="noopener noreferrer">
+                <FileTextIcon className="h-4 w-4" />
+                Ver PDF
+                <ExternalLinkIcon className="h-3 w-3" />
+              </a>
+            </Button>
+          )}
           {invoiceState.hasTotalsMismatch && !isEditing ? (
             <Badge variant="destructive" className="uppercase tracking-wide">Descuadre</Badge>
           ) : null}
@@ -428,114 +442,114 @@ export function InvoiceDetailsClient({ invoice, updateInvoice }: InvoiceDetailsC
                 <tbody>
                   {isEditing
                     ? draftItems.map((draft) => {
-                        const original = invoiceItemsMap.get(draft.id)
+                      const original = invoiceItemsMap.get(draft.id)
 
-                        return (
-                          <tr key={draft.id} className="border-b last:border-0">
-                            <td className="p-3 align-top">
-                              <div className="space-y-1.5">
-                                <Input
-                                  value={draft.materialName}
-                                  onChange={(event) => updateDraftItem(draft.id, 'materialName', event.target.value)}
-                                  placeholder="Nombre del material"
-                                  disabled={isPending}
-                                />
-                                {original?.material.code ? (
-                                  <p className="text-xs text-muted-foreground">Código: {original.material.code}</p>
-                                ) : null}
-                              </div>
-                            </td>
-                            <td className="p-3 align-top font-mono text-xs">
-                              <Input
-                                value={draft.workOrder}
-                                onChange={(event) => updateDraftItem(draft.id, 'workOrder', event.target.value)}
-                                placeholder="OT/CECO"
-                                disabled={isPending}
-                              />
-                            </td>
-                            <td className="p-3 align-top text-right">
-                              <Input
-                                value={draft.quantity}
-                                onChange={(event) => updateDraftItem(draft.id, 'quantity', event.target.value)}
-                                type="number"
-                                inputMode="decimal"
-                                step="0.001"
-                                disabled={isPending}
-                                className="text-right"
-                              />
-                            </td>
-                            <td className="p-3 align-top text-right">
-                              <Input
-                                value={draft.unitPrice}
-                                onChange={(event) => updateDraftItem(draft.id, 'unitPrice', event.target.value)}
-                                type="number"
-                                inputMode="decimal"
-                                step="0.001"
-                                placeholder="Ej. 15.75"
-                                disabled={isPending}
-                                className="text-right"
-                              />
-                            </td>
-                            <td className="p-3 align-top text-right">
-                              <Input
-                                value={draft.discountPercentage}
-                                onChange={(event) => updateDraftItem(draft.id, 'discountPercentage', event.target.value)}
-                                type="number"
-                                inputMode="decimal"
-                                step="0.01"
-                                placeholder="%"
-                                disabled={isPending}
-                                className="text-right"
-                              />
-                            </td>
-                            <td className="p-3 align-top text-right font-medium">
-                              <Input
-                                value={draft.totalPrice}
-                                onChange={(event) => updateDraftItem(draft.id, 'totalPrice', event.target.value)}
-                                type="number"
-                                inputMode="decimal"
-                                step="0.001"
-                                disabled={isPending}
-                                className="text-right"
-                              />
-                            </td>
-                            <td className="p-3 align-top text-right">
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="icon"
-                                onClick={() => handleRemoveLine(draft.id)}
-                                disabled={isPending}
-                                aria-label="Eliminar línea"
-                                className="text-muted-foreground hover:text-destructive"
-                              >
-                                <TrashIcon className="h-4 w-4" />
-                              </Button>
-                            </td>
-                          </tr>
-                        )
-                      })
-                    : invoiceState.items.map((item) => (
-                        <tr key={item.id} className="border-b last:border-0">
+                      return (
+                        <tr key={draft.id} className="border-b last:border-0">
                           <td className="p-3 align-top">
-                            <div className="space-y-0.5">
-                              <p className="font-medium">{item.material.name}</p>
-                              {item.material.code ? (
-                                <p className="text-xs text-muted-foreground">Código: {item.material.code}</p>
+                            <div className="space-y-1.5">
+                              <Input
+                                value={draft.materialName}
+                                onChange={(event) => updateDraftItem(draft.id, 'materialName', event.target.value)}
+                                placeholder="Nombre del material"
+                                disabled={isPending}
+                              />
+                              {original?.material.code ? (
+                                <p className="text-xs text-muted-foreground">Código: {original.material.code}</p>
                               ) : null}
                             </div>
                           </td>
-                          <td className="p-3 align-top font-mono text-xs">{item.workOrder || '-'}</td>
-                          <td className="p-3 align-top text-right">{item.quantity}</td>
-                          <td className="p-3 align-top text-right">{formatCurrency(item.unitPrice)}</td>
-                          <td className="p-3 align-top text-right">
-                            {item.discountPercentage !== null && item.discountPercentage !== undefined
-                              ? `${item.discountPercentage.toFixed(2)}%`
-                              : '0.00%'}
+                          <td className="p-3 align-top font-mono text-xs">
+                            <Input
+                              value={draft.workOrder}
+                              onChange={(event) => updateDraftItem(draft.id, 'workOrder', event.target.value)}
+                              placeholder="OT/CECO"
+                              disabled={isPending}
+                            />
                           </td>
-                          <td className="p-3 align-top text-right font-medium">{formatCurrency(item.totalPrice)}</td>
+                          <td className="p-3 align-top text-right">
+                            <Input
+                              value={draft.quantity}
+                              onChange={(event) => updateDraftItem(draft.id, 'quantity', event.target.value)}
+                              type="number"
+                              inputMode="decimal"
+                              step="0.001"
+                              disabled={isPending}
+                              className="text-right"
+                            />
+                          </td>
+                          <td className="p-3 align-top text-right">
+                            <Input
+                              value={draft.unitPrice}
+                              onChange={(event) => updateDraftItem(draft.id, 'unitPrice', event.target.value)}
+                              type="number"
+                              inputMode="decimal"
+                              step="0.001"
+                              placeholder="Ej. 15.75"
+                              disabled={isPending}
+                              className="text-right"
+                            />
+                          </td>
+                          <td className="p-3 align-top text-right">
+                            <Input
+                              value={draft.discountPercentage}
+                              onChange={(event) => updateDraftItem(draft.id, 'discountPercentage', event.target.value)}
+                              type="number"
+                              inputMode="decimal"
+                              step="0.01"
+                              placeholder="%"
+                              disabled={isPending}
+                              className="text-right"
+                            />
+                          </td>
+                          <td className="p-3 align-top text-right font-medium">
+                            <Input
+                              value={draft.totalPrice}
+                              onChange={(event) => updateDraftItem(draft.id, 'totalPrice', event.target.value)}
+                              type="number"
+                              inputMode="decimal"
+                              step="0.001"
+                              disabled={isPending}
+                              className="text-right"
+                            />
+                          </td>
+                          <td className="p-3 align-top text-right">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => handleRemoveLine(draft.id)}
+                              disabled={isPending}
+                              aria-label="Eliminar línea"
+                              className="text-muted-foreground hover:text-destructive"
+                            >
+                              <TrashIcon className="h-4 w-4" />
+                            </Button>
+                          </td>
                         </tr>
-                      ))}
+                      )
+                    })
+                    : invoiceState.items.map((item) => (
+                      <tr key={item.id} className="border-b last:border-0">
+                        <td className="p-3 align-top">
+                          <div className="space-y-0.5">
+                            <p className="font-medium">{item.material.name}</p>
+                            {item.material.code ? (
+                              <p className="text-xs text-muted-foreground">Código: {item.material.code}</p>
+                            ) : null}
+                          </div>
+                        </td>
+                        <td className="p-3 align-top font-mono text-xs">{item.workOrder || '-'}</td>
+                        <td className="p-3 align-top text-right">{item.quantity}</td>
+                        <td className="p-3 align-top text-right">{formatCurrency(item.unitPrice)}</td>
+                        <td className="p-3 align-top text-right">
+                          {item.discountPercentage !== null && item.discountPercentage !== undefined
+                            ? `${item.discountPercentage.toFixed(2)}%`
+                            : '0.00%'}
+                        </td>
+                        <td className="p-3 align-top text-right font-medium">{formatCurrency(item.totalPrice)}</td>
+                      </tr>
+                    ))}
                 </tbody>
               </table>
               {isEditing ? (
