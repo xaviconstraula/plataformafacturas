@@ -4683,10 +4683,11 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
 
                 // Get PDF URL for this file from map
                 const pdfUrl = fileUrlMap.get(key || '') || undefined;
-                const result = await saveExtractedInvoice(extractedData, key ?? undefined, pdfUrl);
+                let result = await saveExtractedInvoice(extractedData, key ?? undefined, pdfUrl);
 
                 // 🔄 Retry system: If mismatch detected and R2 is available, retry up to 3 more times
-                if (result.hasTotalsMismatch && !result.success) {
+                // Note: Retry even if success=true because we want to fix the mismatch
+                if (result.hasTotalsMismatch) {
                     console.log(`[Retry] Descuadre detectado en ${key}, verificando si es posible reintentar...`);
 
                     try {
@@ -4702,6 +4703,7 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                         if (pdfKey) {
                             let retrySuccess = false;
                             let finalResult = result;
+                            const invoiceIdToDelete = result.invoiceId; // Save ID if we need to delete and recreate
 
                             // Up to 3 additional retry attempts (attempts 2, 3, 4)
                             for (let attempt = 2; attempt <= 4 && !retrySuccess; attempt++) {
@@ -4715,7 +4717,19 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                                     const retryExtraction = await callPdfExtractAPI(retryFile, []);
 
                                     if (retryExtraction.extractedData && !retryExtraction.error) {
-                                        // Validate new result (reuse same PDF URL)
+                                        // If first retry attempt succeeded in saving, delete the old invoice with mismatch
+                                        if (attempt === 2 && invoiceIdToDelete && result.success) {
+                                            try {
+                                                await prisma.invoice.delete({
+                                                    where: { id: invoiceIdToDelete }
+                                                });
+                                                console.log(`[Retry] Factura antigua con descuadre eliminada: ${invoiceIdToDelete}`);
+                                            } catch (deleteError) {
+                                                console.error(`[Retry] Error eliminando factura antigua:`, deleteError);
+                                            }
+                                        }
+
+                                        // Try to save new extraction (reuse same PDF URL)
                                         const retryResult = await saveExtractedInvoice(
                                             retryExtraction.extractedData,
                                             key,
@@ -4737,6 +4751,16 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                                             });
                                         } else if (retryResult.hasTotalsMismatch) {
                                             console.log(`[Retry] Intento ${attempt} aún tiene descuadre para ${key}`);
+                                            // If this retry also has mismatch but was saved, delete it for next attempt
+                                            if (retryResult.success && retryResult.invoiceId) {
+                                                try {
+                                                    await prisma.invoice.delete({
+                                                        where: { id: retryResult.invoiceId }
+                                                    });
+                                                } catch (deleteError) {
+                                                    console.error(`[Retry] Error eliminando reintento con descuadre:`, deleteError);
+                                                }
+                                            }
                                             finalResult = retryResult;
                                         }
                                     }
@@ -4755,9 +4779,7 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                             }
 
                             // Use final result (either successful retry or last attempt)
-                            result.success = finalResult.success;
-                            result.hasTotalsMismatch = finalResult.hasTotalsMismatch;
-                            result.message = finalResult.message;
+                            result = finalResult;
                         } else {
                             console.log(`[Retry] No se encontró PDF en R2 para ${key}, omitiendo reintentos`);
                         }
