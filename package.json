@@ -12,7 +12,7 @@
     "delete:user": "tsx scripts/delete-user.ts",
     "delete:user-by-email": "tsx scripts/delete-user-by-email.ts",
     "list:users": "tsx scripts/list-users.ts",
-    "deploy": "sudo git pull origin main && sudo npm install && sudo npx prisma db push && sudo npm run build && pm2 restart ctboxapp && pm2 flush",
+    "deploy": "git pull origin main && npm install && npx prisma db push && npm run build && pm2 restart ctboxapp && pm2 flush",
     "migration:test": "tsx scripts/test-connection.ts",
     "migration:list-users": "tsx scripts/list-users.ts",
     "migration:migrate-to-user": "tsx scripts/migrate-data-to-user.ts",
