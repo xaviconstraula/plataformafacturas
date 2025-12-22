@@ -305,7 +305,7 @@ const MAX_BATCH_FILE_SIZE = 90 * 1024 * 1024; // 90 MB por chunk
 const DEFAULT_MISMATCH_TOLERANCE = 0.5; // 0.50€
 
 // Modelo utilizado
-const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_MODEL = "gemini-3-flash-preview";
 ```
 
 ## Monitoreo

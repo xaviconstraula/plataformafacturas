@@ -147,7 +147,7 @@ interface ChatCompletionBody {
 }
 
 // Gemini configuration
-const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_MODEL = "gemini-3-flash-preview";
 
 // Regex helpers used to keep Gemini outputs constrained and avoid noisy payloads
 const CIF_REGEX = "^(?:ES)?[A-Z0-9][A-Z0-9\\-]{5,15}$";
