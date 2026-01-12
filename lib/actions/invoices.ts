@@ -3595,8 +3595,8 @@ async function buildBatchJsonlChunks(files: File[]): Promise<JsonlChunk[]> {
 // 🏗️  Helper: Persist extracted JSON response (used by webhook)
 // ---------------------------------------------------------------------------
 
-export async function saveExtractedInvoice(extractedData: ExtractedPdfData, fileName?: string, pdfUrl?: string): Promise<CreateInvoiceResult> {
-    const user = await requireAuth()
+export async function saveExtractedInvoice(extractedData: ExtractedPdfData, fileName?: string, pdfUrl?: string, userId?: string): Promise<CreateInvoiceResult> {
+    const user = userId ? { id: userId } : await requireAuth()
 
     try {
         const result = await prisma.$transaction(async (tx) => {
@@ -4640,12 +4640,13 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
         let duplicateErrors = 0;
         let actualErrors = 0;
 
-        // Get R2 keys and map to URLs for saving with invoices
+        // Get R2 keys, userId and map to URLs for saving with invoices
         const batch = await prisma.batchProcessing.findUnique({
             where: { id: batchId },
-            select: { r2Keys: true },
+            select: { r2Keys: true, userId: true },
         });
         const r2Keys = (batch?.r2Keys as string[] | null) || [];
+        const userId: string | undefined = batch?.userId ?? undefined;
 
         // Create a map of fileName -> URL for quick lookup
         const fileUrlMap = new Map<string, string>();
@@ -4748,7 +4749,7 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
 
                 // Get PDF URL for this file from map
                 const pdfUrl = fileUrlMap.get(key || '') || undefined;
-                let result = await saveExtractedInvoice(extractedData, key ?? undefined, pdfUrl);
+                let result = await saveExtractedInvoice(extractedData, key ?? undefined, pdfUrl, userId);
 
                 // 🔄 Retry system: If mismatch detected and R2 is available, retry up to 3 more times
                 // Note: Retry even if success=true because we want to fix the mismatch
@@ -4798,7 +4799,8 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                                         const retryResult = await saveExtractedInvoice(
                                             retryExtraction.extractedData,
                                             key,
-                                            pdfUrl
+                                            pdfUrl,
+                                            userId
                                         );
 
                                         if (retryResult.success && !retryResult.hasTotalsMismatch) {
