@@ -162,15 +162,72 @@ const TEXT_FORMAT_DELIMITER = '|';
 const TEXT_FORMAT_NESTED_DELIMITER = ';';
 
 /**
- * Calculate combined discount from sequential discount string
- * Examples:
- * - "50 5" → 52.5% (50% then 5% on discounted price)
- * - "10" → 10% (single discount)
- * - "20 10 5" → 32.6% (20%, then 10%, then 5% sequentially)
+ * Validate and fix common date format errors from AI extraction.
+ * Handles cases where AI outputs YYYY-DD-MM instead of YYYY-MM-DD.
  * 
- * Formula: finalMultiplier = (1-d1) × (1-d2) × (1-d3)...
- * Combined discount = 1 - finalMultiplier
+ * @param dateStr - The date string to validate and potentially fix
+ * @returns A valid date string in YYYY-MM-DD format, or the original if it's already valid
+ * 
+ * Examples:
+ * - "2024-31-12" → "2024-12-31" (fixes reversed day/month)
+ * - "2024-12-31" → "2024-12-31" (already valid, no change)
+ * - "2024-02-30" → "2024-02-30" (invalid but can't auto-fix ambiguous cases)
  */
+function validateAndFixDate(dateStr: string): string {
+    if (!dateStr || typeof dateStr !== 'string') {
+        return dateStr;
+    }
+
+    // Check if it's in YYYY-MM-DD or YYYY-DD-MM format
+    const datePattern = /^(\d{4})-(\d{2})-(\d{2})$/;
+    const match = dateStr.match(datePattern);
+
+    if (!match) {
+        // Not in expected format, return as-is
+        return dateStr;
+    }
+
+    const [, year, middle, end] = match;
+    const yearNum = parseInt(year, 10);
+    const middleNum = parseInt(middle, 10);
+    const endNum = parseInt(end, 10);
+
+    // Try to parse as YYYY-MM-DD first
+    const asIsDate = new Date(`${year}-${middle}-${end}`);
+    const isValid = !isNaN(asIsDate.getTime());
+
+    // If the date is valid as-is, return it
+    if (isValid && asIsDate.getFullYear() === yearNum &&
+        (asIsDate.getMonth() + 1) === middleNum &&
+        asIsDate.getDate() === endNum) {
+        return dateStr;
+    }
+
+    // If middle > 12, it's clearly the day (YYYY-DD-MM format)
+    if (middleNum > 12 && endNum >= 1 && endNum <= 12) {
+        const correctedDate = `${year}-${end.padStart(2, '0')}-${middle.padStart(2, '0')}`;
+        const testDate = new Date(correctedDate);
+
+        // Verify the corrected date is valid
+        if (!isNaN(testDate.getTime()) &&
+            testDate.getFullYear() === yearNum &&
+            (testDate.getMonth() + 1) === endNum &&
+            testDate.getDate() === middleNum) {
+            console.warn(`[Date Fix] Corrected malformed date: "${dateStr}" → "${correctedDate}"`);
+            return correctedDate;
+        }
+    }
+
+    // If end > 12, it might be in YYYY-MM-DD but with day > 12, which is valid
+    // Or if both middle and end are <= 12, we can't determine which is month/day
+    // In ambiguous cases, try to parse and if it fails, log a warning
+    if (!isValid) {
+        console.error(`[Date Validation] Invalid date detected: "${dateStr}". Cannot automatically fix ambiguous date.`);
+    }
+
+    return dateStr;
+}
+
 function calculateCombinedDiscount(discountRaw: string): number {
     const trimmed = discountRaw.trim();
     if (!trimmed || trimmed === '~' || trimmed.toLowerCase() === 'neto') {
@@ -286,7 +343,8 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
                 continue;
             }
             invoiceCode = parseField(parts[1]);
-            issueDate = parseField(parts[2]);
+            const rawIssueDate = parseField(parts[2]);
+            issueDate = rawIssueDate ? validateAndFixDate(rawIssueDate) : undefined;
             totalAmount = parseNumber(parts[3]);
             // Extract IVA percentage (field 4, required - default to 21% for Spain)
             ivaPercentage = parts.length >= 5 ? parseNumber(parts[4]) : 21.00;
@@ -385,7 +443,7 @@ function parseTextBasedExtraction(text: string, options?: { suppressWarnings?: b
                 discountRaw, // Store raw discount text
                 unitPrice, // Calculated
                 totalPrice,
-                itemDate: rawItemDate,
+                itemDate: rawItemDate ? validateAndFixDate(rawItemDate) : undefined,
                 workOrder: itemWorkOrder, // Per-item work order (no fallback to invoice-level anymore)
                 description: rawDescription,
                 lineNumber: rawLineNumber
@@ -1257,6 +1315,9 @@ CRITICAL RULES - ORDER IS SACRED!
 ═══════════════════════════════════════════════════════════════════════════════
 ✓ Extract PROVIDER first (MANDATORY): Company name, CIF/NIF, email, phone, address
 ✓ Extract HEADER: invoiceCode, issueDate (YYYY-MM-DD), totalAmount (with IVA), ivaPercentage (REQUIRED), retentionAmount (REQUIRED), workOrder
+✓ DATE FORMAT IS CRITICAL: Always use YYYY-MM-DD (e.g., 2024-12-31). 
+  - Spanish invoices use DD/MM/YYYY (31/12/2024) -> YOU MUST CONVERT TO YYYY-MM-DD (2024-12-31).
+  - NEVER output YYYY-DD-MM (e.g., NEVER 2024-31-12).
 ✓ Extract items in EXACT VISUAL ORDER AS THEY APPEAR ON THE INVOICE
 ✓ Each table row is INDEPENDENT - never mix data between rows
 ✓ Output format: HEADER|7 fields, PROVIDER|6 fields, ITEM|11 fields per line
@@ -1316,7 +1377,11 @@ Field details:
 • ivaPercentage: REQUIRED - IVA rate (e.g., "21.00" for 21%, "10.00" for 10%)
 • retentionAmount: REQUIRED - Withholding amount (e.g., "15.00", "0.00" if none)
 • Numbers: dot decimal (1234.56), no thousand separators
-• Dates: YYYY-MM-DD
+• Dates: YYYY-MM-DD format (e.g., "2024-12-31" for December 31, 2024, NOT "2024-31-12")
+  - CRITICAL: First number after year is ALWAYS the MONTH (01-12)
+  - Second number after year is ALWAYS the DAY (01-31)
+  - Example: December 31, 2024 → "2024-12-31" (month=12, day=31)
+  - Example: January 15, 2024 → "2024-01-15" (month=01, day=15)
 • workOrder: OT codes from section headers like "S/REF: 074129/001941"
 
 ═══════════════════════════════════════════════════════════════════════════════
