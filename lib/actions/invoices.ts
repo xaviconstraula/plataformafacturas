@@ -4769,7 +4769,8 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                         if (pdfKey) {
                             let retrySuccess = false;
                             let finalResult = result;
-                            const invoiceIdToDelete = result.invoiceId; // Save ID if we need to delete and recreate
+                            const originalInvoiceId = result.invoiceId; // Save original invoice ID
+                            const invoicesCreatedDuringRetry: string[] = []; // Track all retry attempts to clean up if successful
 
                             // Up to 3 additional retry attempts (attempts 2, 3, 4)
                             for (let attempt = 2; attempt <= 4 && !retrySuccess; attempt++) {
@@ -4783,18 +4784,6 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                                     const retryExtraction = await callPdfExtractAPI(retryFile, []);
 
                                     if (retryExtraction.extractedData && !retryExtraction.error) {
-                                        // If first retry attempt succeeded in saving, delete the old invoice with mismatch
-                                        if (attempt === 2 && invoiceIdToDelete && result.success) {
-                                            try {
-                                                await prisma.invoice.delete({
-                                                    where: { id: invoiceIdToDelete }
-                                                });
-                                                console.log(`[Retry] Factura antigua con descuadre eliminada: ${invoiceIdToDelete}`);
-                                            } catch (deleteError) {
-                                                console.error(`[Retry] Error eliminando factura antigua:`, deleteError);
-                                            }
-                                        }
-
                                         // Try to save new extraction (reuse same PDF URL)
                                         const retryResult = await saveExtractedInvoice(
                                             retryExtraction.extractedData,
@@ -4805,6 +4794,29 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
 
                                         if (retryResult.success && !retryResult.hasTotalsMismatch) {
                                             console.log(`[Retry] ✓ Éxito en intento ${attempt} para ${key}`);
+
+                                            // SUCCESS! Now delete the original invoice and all failed retry attempts
+                                            if (originalInvoiceId && result.success) {
+                                                try {
+                                                    await prisma.invoice.delete({
+                                                        where: { id: originalInvoiceId }
+                                                    });
+                                                    console.log(`[Retry] Factura original con descuadre eliminada: ${originalInvoiceId}`);
+                                                } catch (deleteError) {
+                                                    console.error(`[Retry] Error eliminando factura original:`, deleteError);
+                                                }
+                                            }
+
+                                            // Clean up any failed retry attempts
+                                            for (const invoiceId of invoicesCreatedDuringRetry) {
+                                                try {
+                                                    await prisma.invoice.delete({ where: { id: invoiceId } });
+                                                    console.log(`[Retry] Factura fallida de reintento eliminada: ${invoiceId}`);
+                                                } catch (deleteError) {
+                                                    console.error(`[Retry] Error eliminando reintento fallido:`, deleteError);
+                                                }
+                                            }
+
                                             finalResult = retryResult;
                                             retrySuccess = true;
 
@@ -4818,15 +4830,10 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                                             });
                                         } else if (retryResult.hasTotalsMismatch) {
                                             console.log(`[Retry] Intento ${attempt} aún tiene descuadre para ${key}`);
-                                            // If this retry also has mismatch but was saved, delete it for next attempt
+                                            // Track this failed invoice but DON'T delete it yet
+                                            // Only delete if we eventually succeed
                                             if (retryResult.success && retryResult.invoiceId) {
-                                                try {
-                                                    await prisma.invoice.delete({
-                                                        where: { id: retryResult.invoiceId }
-                                                    });
-                                                } catch (deleteError) {
-                                                    console.error(`[Retry] Error eliminando reintento con descuadre:`, deleteError);
-                                                }
+                                                invoicesCreatedDuringRetry.push(retryResult.invoiceId);
                                             }
                                             finalResult = retryResult;
                                         }
@@ -4842,11 +4849,25 @@ export async function ingestBatchOutputFromGemini(batchId: string, dest: GeminiD
                             }
 
                             if (!retrySuccess) {
-                                console.warn(`[Retry] Agotados reintentos para ${key}, usando último resultado`);
-                            }
+                                console.warn(`[Retry] Agotados reintentos para ${key}, manteniendo factura original con descuadre`);
 
-                            // Use final result (either successful retry or last attempt)
-                            result = finalResult;
+                                // CRITICAL FIX: If all retries failed, delete the failed retry attempts
+                                // but KEEP the original invoice (even with mismatch) so user doesn't lose data
+                                for (const invoiceId of invoicesCreatedDuringRetry) {
+                                    try {
+                                        await prisma.invoice.delete({ where: { id: invoiceId } });
+                                        console.log(`[Retry] Eliminado reintento fallido: ${invoiceId}`);
+                                    } catch (deleteError) {
+                                        console.error(`[Retry] Error eliminando reintento fallido:`, deleteError);
+                                    }
+                                }
+
+                                // Use ORIGINAL result, not the last retry result
+                                result = { ...result, invoiceId: originalInvoiceId };
+                            } else {
+                                // Use successful retry result
+                                result = finalResult;
+                            }
                         } else {
                             console.log(`[Retry] No se encontró PDF en R2 para ${key}, omitiendo reintentos`);
                         }
