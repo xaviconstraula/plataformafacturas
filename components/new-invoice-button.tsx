@@ -53,7 +53,9 @@ export function NewInvoiceButton() {
         setIsProcessing(false)
         setIsOpen(false)
         if (!results || results.length === 0) {
-            toast.error("An unexpected error occurred during processing.");
+            toast.error("Error inesperado", {
+                description: "No se recibió respuesta del servidor. Por favor, revisa los logs del servidor para más detalles."
+            });
             return;
         }
 

@@ -16,7 +16,7 @@ import os from "os";
 // ------------------------------
 // Upload constraints & utilities
 // ------------------------------
-const MAX_UPLOAD_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
+const MAX_UPLOAD_FILE_SIZE = 500 * 1024 * 1024; // 500 MB (increased from 50 MB)
 const ALLOWED_MIME_TYPES = ["application/pdf"] as const;
 const MAX_FILES_PER_UPLOAD = 700;
 const MAX_TOTAL_UPLOAD_BYTES = 700 * 1024 * 1024; // 500 MB per request
@@ -3469,42 +3469,60 @@ export async function createManualInvoice(data: ManualInvoiceData): Promise<Crea
 // ---------------------------------------------------------------------------
 
 async function prepareBatchLine(file: File): Promise<string> {
-    // Validate file before heavy processing
-    const validation = validateUploadFile(file);
-    if (!validation.valid) {
-        throw new Error(validation.error || 'Invalid file');
-    }
-    // 1️⃣  Read original file and compute base64 to send as inlineData to Gemini
-    const buffer = Buffer.from(await file.arrayBuffer());
-    const base64 = buffer.toString('base64');
+    try {
+        // Validate file before heavy processing
+        const validation = validateUploadFile(file);
+        if (!validation.valid) {
+            console.error(`[prepareBatchLine] ❌ File validation failed for ${file.name}:`, validation.error);
+            throw new Error(validation.error || 'Invalid file');
+        }
+        
+        console.log(`[prepareBatchLine] Processing file: ${file.name} (${(file.size / 1024).toFixed(2)} KB)`);
+        
+        // 1️⃣  Read original file and compute base64 to send as inlineData to Gemini
+        const buffer = Buffer.from(await file.arrayBuffer());
+        const base64 = buffer.toString('base64');
 
-    // 2️⃣  Build prompt for direct PDF processing with text-based output
-    const promptText = buildExtractionPrompt();
+        console.log(`[prepareBatchLine] ✅ Converted ${file.name} to base64 (${base64.length} chars)`);
 
-    // Build Gemini JSONL request line
-    const jsonlObject = {
-        key: file.name,
-        request: {
-            contents: [
-                {
-                    role: 'user',
-                    parts: [
-                        { text: promptText },
-                        { inlineData: { mimeType: 'application/pdf', data: base64 } }
-                    ]
-                }
-            ],
-            generationConfig: {
-                // temperature: 0.8,
-                candidateCount: 1,
-                thinkingConfig: {
-                    thinkingBudget: 0
+        // 2️⃣  Build prompt for direct PDF processing with text-based output
+        const promptText = buildExtractionPrompt();
+
+        // Build Gemini JSONL request line
+        const jsonlObject = {
+            key: file.name,
+            request: {
+                contents: [
+                    {
+                        role: 'user',
+                        parts: [
+                            { text: promptText },
+                            { inlineData: { mimeType: 'application/pdf', data: base64 } }
+                        ]
+                    }
+                ],
+                generationConfig: {
+                    // temperature: 0.8,
+                    candidateCount: 1,
+                    thinkingConfig: {
+                        thinkingBudget: 0
+                    }
                 }
             }
-        }
-    };
+        };
 
-    return JSON.stringify(jsonlObject);
+        return JSON.stringify(jsonlObject);
+    } catch (error) {
+        console.error(`[prepareBatchLine] ❌ Error processing ${file.name}:`, error);
+        console.error(`[prepareBatchLine] Error details:`, {
+            fileName: file.name,
+            fileSize: file.size,
+            fileType: file.type,
+            error: error instanceof Error ? error.message : 'Unknown error',
+            stack: error instanceof Error ? error.stack : 'No stack trace',
+        });
+        throw error;
+    }
 }
 
 // Convenience: generate all lines in parallel with limited concurrency (4)
@@ -3543,32 +3561,45 @@ async function buildBatchJsonlChunks(files: File[]): Promise<JsonlChunk[]> {
     let currentLines: string[] = [];
     let currentSize = 0;
     let currentFiles: File[] = [];
+    let processedCount = 0;
+    let errorCount = 0;
 
     for (let i = 0; i < files.length; i += CONCURRENCY) {
         // Slice the next group of files and process them in parallel.
         const slice = files.slice(i, i + CONCURRENCY).filter(f => validateUploadFile(f).valid);
 
-        const results = await Promise.all(
+        const results = await Promise.allSettled(
             slice.map(async (file) => {
                 const line = await prepareBatchLine(file);
                 return { file, line } as const;
             })
         );
 
-        // Append each prepared line, starting new chunks when size would exceed the cap.
-        for (const { file, line } of results) {
-            const lineSize = Buffer.byteLength(line, "utf8") + 1; // +1 for newline
+        // Process results, handling both successes and failures
+        for (let j = 0; j < results.length; j++) {
+            const result = results[j];
+            const file = slice[j];
+            
+            if (result.status === 'fulfilled') {
+                const { file: processedFile, line } = result.value;
+                const lineSize = Buffer.byteLength(line, "utf8") + 1; // +1 for newline
 
-            if (currentSize + lineSize > MAX_BATCH_FILE_SIZE && currentLines.length > 0) {
-                chunks.push({ content: currentLines.join("\n"), files: currentFiles });
-                currentLines = [];
-                currentFiles = [];
-                currentSize = 0;
+                if (currentSize + lineSize > MAX_BATCH_FILE_SIZE && currentLines.length > 0) {
+                    chunks.push({ content: currentLines.join("\n"), files: currentFiles });
+                    currentLines = [];
+                    currentFiles = [];
+                    currentSize = 0;
+                }
+
+                currentLines.push(line);
+                currentFiles.push(processedFile);
+                currentSize += lineSize;
+                processedCount++;
+            } else {
+                errorCount++;
+                console.error(`[buildBatchJsonlChunks] ❌ Failed to process file ${file?.name || 'unknown'}:`, result.reason);
+                // Continue processing other files even if one fails
             }
-
-            currentLines.push(line);
-            currentFiles.push(file);
-            currentSize += lineSize;
         }
 
         // Memory monitoring & opportunistic GC
@@ -3586,6 +3617,12 @@ async function buildBatchJsonlChunks(files: File[]): Promise<JsonlChunk[]> {
 
     if (currentLines.length > 0) {
         chunks.push({ content: currentLines.join("\n"), files: currentFiles });
+    }
+
+    console.log(`[buildBatchJsonlChunks] ✅ Built ${chunks.length} chunks. Processed: ${processedCount}/${files.length}, Errors: ${errorCount}`);
+    
+    if (chunks.length === 0 && errorCount > 0) {
+        throw new Error(`Failed to process any files. ${errorCount} file(s) had errors.`);
     }
 
     return chunks;
@@ -4202,40 +4239,62 @@ export async function updateInvoiceAction(payload: UpdateInvoiceInput): Promise<
 // ---------------------------------------------------------------------------
 
 export async function startInvoiceBatch(formDataWithFiles: FormData): Promise<{ batchId: string }> {
-    const files = formDataWithFiles.getAll('files') as File[];
-    if (!files || files.length === 0) {
-        throw new Error('No files provided.');
+    try {
+        const files = formDataWithFiles.getAll('files') as File[];
+        console.log(`[startInvoiceBatch] Received ${files?.length || 0} files`);
+        
+        if (!files || files.length === 0) {
+            console.error('[startInvoiceBatch] No files provided in FormData');
+            throw new Error('No files provided.');
+        }
+
+        if (files.length > MAX_FILES_PER_UPLOAD) {
+            console.error(`[startInvoiceBatch] Too many files: ${files.length} > ${MAX_FILES_PER_UPLOAD}`);
+            throw new Error(`Too many files. Maximum allowed is ${MAX_FILES_PER_UPLOAD}.`);
+        }
+        const totalBytes = files.reduce((sum, f) => sum + (typeof f.size === 'number' ? f.size : 0), 0);
+        if (totalBytes > MAX_TOTAL_UPLOAD_BYTES) {
+            console.error(`[startInvoiceBatch] Total size exceeds limit: ${totalBytes} > ${MAX_TOTAL_UPLOAD_BYTES}`);
+            throw new Error(`Total upload size exceeds ${Math.round(MAX_TOTAL_UPLOAD_BYTES / 1024 / 1024)}MB.`);
+        }
+
+        // Filter invalid files early
+        const validFiles = files.filter(f => validateUploadFile(f).valid);
+        const invalidCount = files.length - validFiles.length;
+        if (invalidCount > 0) {
+            console.warn(`[startInvoiceBatch] ${invalidCount} invalid files filtered out`);
+        }
+        if (validFiles.length === 0) {
+            console.error('[startInvoiceBatch] No valid files after filtering');
+            throw new Error('No valid files to process. Ensure PDFs under the size limit.');
+        }
+
+        // Get authenticated user for batch ownership
+        const user = await requireAuth();
+        console.log(`[startInvoiceBatch] User authenticated: ${user.id}`);
+
+        // 1️⃣  Generate a temporary id so the client can detect "batch mode". We do
+        //     NOT persist it, thus it will not contribute to banner counts.
+        const { randomUUID } = await import('crypto');
+        const tempId = `temp-${randomUUID()}`;
+
+        // 2️⃣  Launch heavy work in background (no await).
+        void processBatchInBackground(validFiles, user.id).catch((err) => {
+            console.error('[startInvoiceBatch] ❌ Background batch processing failed:', err);
+            console.error('[startInvoiceBatch] Error stack:', err instanceof Error ? err.stack : 'No stack trace');
+        });
+
+        console.log(`[startInvoiceBatch] ✅ Returning tempId ${tempId}, background processing started`);
+        // 3️⃣  Return the temporary id immediately.
+        return { batchId: tempId };
+    } catch (error) {
+        console.error('[startInvoiceBatch] ❌ Error in startInvoiceBatch:', error);
+        console.error('[startInvoiceBatch] Error details:', {
+            message: error instanceof Error ? error.message : 'Unknown error',
+            stack: error instanceof Error ? error.stack : 'No stack trace',
+        });
+        throw error;
     }
-
-    if (files.length > MAX_FILES_PER_UPLOAD) {
-        throw new Error(`Too many files. Maximum allowed is ${MAX_FILES_PER_UPLOAD}.`);
-    }
-    const totalBytes = files.reduce((sum, f) => sum + (typeof f.size === 'number' ? f.size : 0), 0);
-    if (totalBytes > MAX_TOTAL_UPLOAD_BYTES) {
-        throw new Error(`Total upload size exceeds ${Math.round(MAX_TOTAL_UPLOAD_BYTES / 1024 / 1024)}MB.`);
-    }
-
-    // Filter invalid files early
-    const validFiles = files.filter(f => validateUploadFile(f).valid);
-    if (validFiles.length === 0) {
-        throw new Error('No valid files to process. Ensure PDFs under the size limit.');
-    }
-
-    // Get authenticated user for batch ownership
-    const user = await requireAuth();
-
-    // 1️⃣  Generate a temporary id so the client can detect "batch mode". We do
-    //     NOT persist it, thus it will not contribute to banner counts.
-    const { randomUUID } = await import('crypto');
-    const tempId = `temp-${randomUUID()}`;
-
-    // 2️⃣  Launch heavy work in background (no await).
-    void processBatchInBackground(validFiles, user.id).catch((err) => {
-        console.error('[startInvoiceBatch] Background batch failed', err);
-    });
-
-    // 3️⃣  Return the temporary id immediately.
-    return { batchId: tempId };
 }
 
 // ---------------------------------------------------------------------------
@@ -4243,10 +4302,13 @@ export async function startInvoiceBatch(formDataWithFiles: FormData): Promise<{ 
 // ---------------------------------------------------------------------------
 
 async function processBatchInBackground(files: File[], userId: string) {
+    console.log(`[processBatchInBackground] 🚀 Starting background processing for ${files.length} files, userId: ${userId}`);
+    
     // Create an initial batch record that will be updated as processing happens
     let batchId: string | null = null;
 
     try {
+        console.log('[processBatchInBackground] Step 0: Checking R2 configuration...');
         // STEP 0 – Upload PDFs to R2 for retry capability (if configured)
         const r2Keys: string[] = [];
         const r2Urls: Record<string, string> = {}; // Map fileName -> URL
@@ -4275,6 +4337,7 @@ async function processBatchInBackground(files: File[], userId: string) {
         }
 
         // STEP A – Build JSONL chunks
+        console.log('[processBatchInBackground] Step A: Building JSONL chunks...');
         const tmpDir = path.join(process.env.NODE_ENV === 'development' ? path.join(process.cwd(), 'tmp') : os.tmpdir(), 'facturas-batch');
         try {
             if (!fs.existsSync(tmpDir)) {
@@ -4282,12 +4345,16 @@ async function processBatchInBackground(files: File[], userId: string) {
             }
         } catch (mkdirError) {
             const errorMsg = mkdirError instanceof Error ? mkdirError.message : 'Unknown error creating tmp directory';
-            console.error('[processBatchInBackground] Failed to create tmp directory:', mkdirError);
+            console.error('[processBatchInBackground] ❌ Failed to create tmp directory:', mkdirError);
             throw new Error(`Failed to create temporary directory: ${errorMsg}`);
         }
 
+        console.log('[processBatchInBackground] Building JSONL chunks from files...');
         const chunks = await buildBatchJsonlChunks(files);
+        console.log(`[processBatchInBackground] Built ${chunks.length} JSONL chunks`);
+        
         if (chunks.length === 0) {
+            console.error('[processBatchInBackground] ❌ No JSONL chunks built from files');
             throw new Error('No JSONL chunks built.');
         }
 

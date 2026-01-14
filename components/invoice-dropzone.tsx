@@ -53,11 +53,11 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
             }
 
             const validFiles = acceptedFiles.filter(file => {
-                if (file.size > 5 * 1024 * 1024) {
+                if (file.size > 500 * 1024 * 1024) { // Increased from 5MB to 500MB
                     // This initial validation toast can stay or be moved to parent
                     // For now, keeping it here for immediate feedback on drop.
                     toast.error(`El archivo ${file.name} es demasiado grande`, {
-                        description: "El tamaño máximo permitido es 5MB"
+                        description: "El tamaño máximo permitido es 500MB"
                     })
                     return false
                 }
@@ -74,7 +74,7 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
         accept: {
             'application/pdf': ['.pdf'],
         },
-        maxSize: 5 * 1024 * 1024, // 5MB limit per file
+        maxSize: 500 * 1024 * 1024, // Increased from 5MB to 500MB per file
     })
 
     function removeFile(index: number) {
@@ -142,9 +142,18 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
                 });
 
             } catch (error) {
-                console.error(`Error creating sub-batch ${idx + 1}:`, error);
-                toast.info("Sub-lote en segundo plano", {
-                    description: "La carga continúa en segundo plano.",
+                const errorMessage = error instanceof Error ? error.message : 'Error desconocido';
+                console.error(`❌ Error creating sub-batch ${idx + 1}/${chunks.length}:`, errorMessage, error);
+                
+                // Add error result to the array so parent knows what happened
+                operationResults.push({
+                    success: false,
+                    message: `Error en sub-lote ${idx + 1}: ${errorMessage}`,
+                    fileName: `${chunk.length} archivos (sub-batch ${idx + 1})`,
+                });
+
+                toast.error("Error procesando sub-lote", {
+                    description: errorMessage,
                 });
             } finally {
                 // Update progress for the UI loader (“Procesando lote …”)
