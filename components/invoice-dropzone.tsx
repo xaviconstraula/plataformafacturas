@@ -99,7 +99,7 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
         // 🚧  Split huge selections into smaller requests so Next.js does not
         //     need to buffer hundreds of MB in a single multipart body. Each
         //     sub-batch will be processed independently by the server.
-        const MAX_FILES_PER_REQUEST = 150; // 150 × 5 MB  ≈ 750 MB (worst-case)
+        const MAX_FILES_PER_REQUEST = 150; // 150 × 500 MB ≈ 75 GB (worst-case)
         const chunks: File[][] = [];
         for (let i = 0; i < filesToProcess.length; i += MAX_FILES_PER_REQUEST) {
             chunks.push(filesToProcess.slice(i, i + MAX_FILES_PER_REQUEST));
@@ -144,7 +144,7 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
             } catch (error) {
                 const errorMessage = error instanceof Error ? error.message : 'Error desconocido';
                 console.error(`❌ Error creating sub-batch ${idx + 1}/${chunks.length}:`, errorMessage, error);
-                
+
                 // Add error result to the array so parent knows what happened
                 operationResults.push({
                     success: false,
@@ -224,7 +224,7 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
                     </p>
                 )}
                 <p className="mt-1 text-xs text-muted-foreground/80">
-                    Archivos PDF, hasta 5MB cada uno
+                    Archivos PDF, hasta 500MB cada uno
                 </p>
             </div>
 

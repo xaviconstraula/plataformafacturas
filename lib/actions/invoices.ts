@@ -3476,9 +3476,9 @@ async function prepareBatchLine(file: File): Promise<string> {
             console.error(`[prepareBatchLine] ❌ File validation failed for ${file.name}:`, validation.error);
             throw new Error(validation.error || 'Invalid file');
         }
-        
+
         console.log(`[prepareBatchLine] Processing file: ${file.name} (${(file.size / 1024).toFixed(2)} KB)`);
-        
+
         // 1️⃣  Read original file and compute base64 to send as inlineData to Gemini
         const buffer = Buffer.from(await file.arrayBuffer());
         const base64 = buffer.toString('base64');
@@ -3579,7 +3579,7 @@ async function buildBatchJsonlChunks(files: File[]): Promise<JsonlChunk[]> {
         for (let j = 0; j < results.length; j++) {
             const result = results[j];
             const file = slice[j];
-            
+
             if (result.status === 'fulfilled') {
                 const { file: processedFile, line } = result.value;
                 const lineSize = Buffer.byteLength(line, "utf8") + 1; // +1 for newline
@@ -3620,7 +3620,7 @@ async function buildBatchJsonlChunks(files: File[]): Promise<JsonlChunk[]> {
     }
 
     console.log(`[buildBatchJsonlChunks] ✅ Built ${chunks.length} chunks. Processed: ${processedCount}/${files.length}, Errors: ${errorCount}`);
-    
+
     if (chunks.length === 0 && errorCount > 0) {
         throw new Error(`Failed to process any files. ${errorCount} file(s) had errors.`);
     }
@@ -4242,7 +4242,7 @@ export async function startInvoiceBatch(formDataWithFiles: FormData): Promise<{ 
     try {
         const files = formDataWithFiles.getAll('files') as File[];
         console.log(`[startInvoiceBatch] Received ${files?.length || 0} files`);
-        
+
         if (!files || files.length === 0) {
             console.error('[startInvoiceBatch] No files provided in FormData');
             throw new Error('No files provided.');
@@ -4303,7 +4303,7 @@ export async function startInvoiceBatch(formDataWithFiles: FormData): Promise<{ 
 
 async function processBatchInBackground(files: File[], userId: string) {
     console.log(`[processBatchInBackground] 🚀 Starting background processing for ${files.length} files, userId: ${userId}`);
-    
+
     // Create an initial batch record that will be updated as processing happens
     let batchId: string | null = null;
 
@@ -4352,7 +4352,7 @@ async function processBatchInBackground(files: File[], userId: string) {
         console.log('[processBatchInBackground] Building JSONL chunks from files...');
         const chunks = await buildBatchJsonlChunks(files);
         console.log(`[processBatchInBackground] Built ${chunks.length} JSONL chunks`);
-        
+
         if (chunks.length === 0) {
             console.error('[processBatchInBackground] ❌ No JSONL chunks built from files');
             throw new Error('No JSONL chunks built.');
