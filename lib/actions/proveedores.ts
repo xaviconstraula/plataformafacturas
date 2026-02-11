@@ -422,7 +422,19 @@ export async function mergeProvidersAction(sourceProviderId: string, targetProvi
         return { success: true, message: 'Proveedores fusionados correctamente.' }
     } catch (error) {
         console.error('Error merging providers:', error)
-        return { success: false, message: 'Error al fusionar proveedores.' }
+
+        if (error instanceof Error && error.message) {
+            // Surface the specific cause to the UI (e.g. códigos de factura duplicados)
+            return {
+                success: false,
+                message: `Error al fusionar proveedores: ${error.message}`,
+            }
+        }
+
+        return {
+            success: false,
+            message: 'Error al fusionar proveedores (error desconocido).',
+        }
     }
 }
 
