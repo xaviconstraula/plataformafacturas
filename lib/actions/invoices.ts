@@ -7,6 +7,7 @@ import { groupBatchesByTimeWindow as groupBatchesUtil } from "@/lib/utils/batch-
 import { revalidatePath } from "next/cache";
 import { GoogleGenAI } from "@google/genai";
 import { normalizeMaterialCode, areMaterialCodesSimilar, normalizeCifForComparison, buildCifVariants } from "@/lib/utils";
+import { checkVAT, countries } from "jsvat";
 import { parseJsonLinesFromFile } from "@/lib/utils/jsonl-parser";
 import { requireAuth } from "@/lib/auth-utils";
 import { uploadPdfToR2, downloadPdfFromR2, isR2Configured, getPdfUrlFromKey } from '@/lib/storage/r2-client';
@@ -1367,22 +1368,26 @@ OUTPUT FORMAT
 ═══════════════════════════════════════════════════════════════════════════════
 Use pipe (|) delimiter, tilde (~) for missing values.
 
-HEADER|invoiceCode|issueDate|totalAmount|ivaPercentage|retentionAmount|workOrder
-PROVIDER|name|cif|email|phone|address
-ITEM|materialName|materialCode|isMaterial|quantity|discountRaw|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber
+            HEADER|invoiceCode|issueDate|totalAmount|ivaPercentage|retentionAmount|workOrder
+            PROVIDER|name|cif|email|phone|address
+            ITEM|materialName|materialCode|isMaterial|quantity|discountRaw|unitPrice|totalPrice|itemDate|workOrder|description|lineNumber
 
-Field details:
-• isMaterial: "true" (products) or "false" (services)
-• discountRaw: "10", "50 5", "0" (text as shown)
-• ivaPercentage: REQUIRED - IVA rate (e.g., "21.00" for 21%, "10.00" for 10%)
-• retentionAmount: REQUIRED - Withholding amount (e.g., "15.00", "0.00" if none)
-• Numbers: dot decimal (1234.56), no thousand separators
-• Dates: YYYY-MM-DD format (e.g., "2024-12-31" for December 31, 2024, NOT "2024-31-12")
-  - CRITICAL: First number after year is ALWAYS the MONTH (01-12)
-  - Second number after year is ALWAYS the DAY (01-31)
-  - Example: December 31, 2024 → "2024-12-31" (month=12, day=31)
-  - Example: January 15, 2024 → "2024-01-15" (month=01, day=15)
-• workOrder: OT codes from section headers like "S/REF: 074129/001941"
+            Field details:
+            • PROVIDER.cif: must be a VALID VAT identifier with country prefix and NO spaces or separators.
+              - ALWAYS include the country code (e.g., "ESB12345678" for Spanish CIF/NIF, "DE123456789", "FR12345678901").
+              - For Spanish providers, if the invoice shows a bare NIF/CIF (e.g., "B12345678"), OUTPUT it as "ESB12345678".
+              - Do NOT output CIFs with spaces, dots or hyphens (e.g., never "ES B-12345678", always "ESB12345678").
+            • isMaterial: "true" (products) or "false" (services)
+            • discountRaw: "10", "50 5", "0" (text as shown)
+            • ivaPercentage: REQUIRED - IVA rate (e.g., "21.00" for 21%, "10.00" for 10%)
+            • retentionAmount: REQUIRED - Withholding amount (e.g., "15.00", "0.00" if none)
+            • Numbers: dot decimal (1234.56), no thousand separators
+            • Dates: YYYY-MM-DD format (e.g., "2024-12-31" for December 31, 2024, NOT "2024-31-12")
+            - CRITICAL: First number after year is ALWAYS the MONTH (01-12)
+            - Second number after year is ALWAYS the DAY (01-31)
+            - Example: December 31, 2024 → "2024-12-31" (month=12, day=31)
+            - Example: January 15, 2024 → "2024-01-15" (month=01, day=15)
+            • workOrder: OT codes from section headers like "S/REF: 074129/001941"
 
 ═══════════════════════════════════════════════════════════════════════════════
 WORK ORDERS
@@ -1575,6 +1580,48 @@ async function callPdfExtractAPI(file: File, batchErrors: BatchErrorDetail[]): P
             }
             if (!extractedData.items || extractedData.items.length === 0) {
                 console.warn(`File ${file.name} yielded invoice-level data but no line items were extracted by AI.`);
+            }
+
+            // 🔎 Validate provider CIF/VAT using jsvat when present.
+            const rawCif = extractedData.provider?.cif;
+            if (rawCif) {
+                const upper = String(rawCif).toUpperCase().trim();
+                const normalizedCore = normalizeCifForComparison(rawCif);
+
+                if (!normalizedCore) {
+                    const errorMsg = `CIF/NIF/VAT del proveedor tiene un formato inválido: '${rawCif}'.`;
+                    console.warn(`[callPdfExtractAPI] ${errorMsg} (file: ${file.name})`);
+                    pushBatchError(batchErrors, {
+                        kind: 'VALIDATION_ERROR',
+                        message: `${errorMsg} Asegúrate de incluir un identificador fiscal válido (por ejemplo, ESB12345678 o un VAT europeo estándar con prefijo de país).`,
+                        fileName: file.name,
+                        invoiceCode: extractedData.invoiceCode,
+                    });
+                    // Treat invalid format as a hard validation failure for this invoice
+                    return { extractedData: null, error: errorMsg };
+                }
+
+                // If the original value starts with ES, ensure the VAT we validate also carries ES
+                const vatToCheck = /^ES[\s\-_.:]?/i.test(upper)
+                    ? `ES${normalizedCore.replace(/^ES/i, "")}`
+                    : normalizedCore;
+
+                const vatResult = checkVAT(vatToCheck, countries);
+
+                if (!vatResult.isValid) {
+                    const errorMsg = `Identificador fiscal/VAT del proveedor no es válido: '${rawCif}'.`;
+                    console.warn(`[callPdfExtractAPI] ${errorMsg} (file: ${file.name})`);
+                    pushBatchError(batchErrors, {
+                        kind: 'VALIDATION_ERROR',
+                        message: `${errorMsg} (normalizado como '${vatToCheck}'). Asegúrate de que incluya el código de país cuando proceda (por ejemplo, ESB12345678, DE123..., FR123...).`,
+                        fileName: file.name,
+                        invoiceCode: extractedData.invoiceCode,
+                    });
+                    return { extractedData: null, error: errorMsg };
+                }
+
+                // When valid, store canonical VAT value or the normalized VAT we checked
+                extractedData.provider.cif = vatResult.value ?? vatToCheck;
             }
 
             return { extractedData };
