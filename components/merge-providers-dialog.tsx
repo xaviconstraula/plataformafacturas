@@ -11,8 +11,8 @@ import {
     DialogTitle,
     DialogTrigger,
 } from '@/components/ui/dialog'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Label } from '@/components/ui/label'
+import { SearchableSelect } from '@/components/ui/searchable-select'
 import { toast } from 'sonner'
 import { Loader2, Link2Icon } from 'lucide-react'
 import { useRouter } from 'next/navigation'
@@ -71,7 +71,7 @@ export function MergeProvidersDialog({ providers }: MergeProvidersDialogProps) {
                     Fusionar Proveedores
                 </Button>
             </DialogTrigger>
-            <DialogContent className="sm:max-w-md">
+            <DialogContent className="sm:max-w-xl max-h-[min(600px,100vh-4rem)] overflow-y-auto">
                 <DialogHeader>
                     <DialogTitle>Fusionar registros duplicados</DialogTitle>
                     <DialogDescription>
@@ -81,33 +81,33 @@ export function MergeProvidersDialog({ providers }: MergeProvidersDialogProps) {
                 <div className="grid gap-4 py-4">
                     <div className="grid gap-2">
                         <Label>Proveedor duplicado</Label>
-                        <Select value={sourceId} onValueChange={setSourceId}>
-                            <SelectTrigger>
-                                <SelectValue placeholder="Selecciona proveedor duplicado" />
-                            </SelectTrigger>
-                            <SelectContent>
-                                {providers.map(p => (
-                                    <SelectItem key={p.id} value={p.id} disabled={p.id === targetId}>
-                                        {optionLabel(p)}
-                                    </SelectItem>
-                                ))}
-                            </SelectContent>
-                        </Select>
+                        <SearchableSelect
+                            value={sourceId}
+                            onValueChange={setSourceId}
+                            placeholder="Selecciona proveedor duplicado"
+                            searchPlaceholder="Buscar proveedor..."
+                            options={providers
+                                .filter((p) => p.id !== targetId)
+                                .map((p) => ({
+                                    value: p.id,
+                                    label: optionLabel(p),
+                                }))}
+                        />
                     </div>
                     <div className="grid gap-2">
                         <Label>Proveedor correcto</Label>
-                        <Select value={targetId} onValueChange={setTargetId}>
-                            <SelectTrigger>
-                                <SelectValue placeholder="Selecciona proveedor destino" />
-                            </SelectTrigger>
-                            <SelectContent>
-                                {providers.map(p => (
-                                    <SelectItem key={p.id} value={p.id} disabled={p.id === sourceId}>
-                                        {optionLabel(p)}
-                                    </SelectItem>
-                                ))}
-                            </SelectContent>
-                        </Select>
+                        <SearchableSelect
+                            value={targetId}
+                            onValueChange={setTargetId}
+                            placeholder="Selecciona proveedor destino"
+                            searchPlaceholder="Buscar proveedor..."
+                            options={providers
+                                .filter((p) => p.id !== sourceId)
+                                .map((p) => ({
+                                    value: p.id,
+                                    label: optionLabel(p),
+                                }))}
+                        />
                     </div>
                     {sourceId && targetId && sourceId === targetId && (
                         <p className="text-xs text-destructive">El proveedor duplicado y el destino no pueden ser el mismo.</p>
