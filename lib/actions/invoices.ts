@@ -1032,6 +1032,109 @@ export async function getBatchHistory(): Promise<BatchProgressInfo[]> {
     return groupBatchesByTimeWindow(batches);
 }
 
+// Retry processing for a batch session (or single batch) using PDFs stored in R2
+export async function retryBatchSession(batchOrSessionId: string): Promise<{ ok: boolean }> {
+    const user = await requireAuth();
+
+    // Ensure R2 is available before attempting any retry logic
+    if (!isR2Configured()) {
+        throw new Error('La funcionalidad de reintento no está disponible porque R2 no está configurado.');
+    }
+
+    let r2Keys: string[] = [];
+
+    // Session-level retry (grouped batches by time window)
+    if (batchOrSessionId.startsWith('session-')) {
+        const rawTimestamp = batchOrSessionId.replace('session-', '');
+        const timestamp = Number(rawTimestamp);
+
+        if (!Number.isFinite(timestamp)) {
+            throw new Error('Identificador de sesión de proceso inválido.');
+        }
+
+        const TIME_WINDOW_MS = 5 * 60 * 1000; // 5 minutes – must stay in sync with grouping logic
+        const windowStart = new Date(timestamp - TIME_WINDOW_MS);
+        const windowEnd = new Date(timestamp + TIME_WINDOW_MS);
+
+        const sessionBatches = await prisma.batchProcessing.findMany({
+            where: {
+                userId: user.id,
+                createdAt: {
+                    gte: windowStart,
+                    lte: windowEnd,
+                },
+            },
+        });
+
+        if (sessionBatches.length === 0) {
+            throw new Error('No se encontraron procesos asociados a esta sesión.');
+        }
+
+        for (const batch of sessionBatches) {
+            const keys = (batch.r2Keys as string[] | null) ?? [];
+            if (Array.isArray(keys) && keys.length > 0) {
+                r2Keys.push(...keys);
+            }
+        }
+    } else {
+        // Single batch retry using its stored PDFs
+        const batch = await prisma.batchProcessing.findFirst({
+            where: {
+                id: batchOrSessionId,
+                userId: user.id,
+            },
+        });
+
+        if (!batch) {
+            throw new Error('No se encontró el proceso de carga especificado o no tienes permiso para reintentarlo.');
+        }
+
+        const keys = (batch.r2Keys as string[] | null) ?? [];
+        if (Array.isArray(keys) && keys.length > 0) {
+            r2Keys.push(...keys);
+        }
+    }
+
+    // Normalize and deduplicate keys
+    r2Keys = Array.from(new Set(r2Keys.filter((key) => typeof key === 'string' && key.length > 0)));
+
+    if (r2Keys.length === 0) {
+        throw new Error('Este proceso no tiene PDFs guardados para reintento.');
+    }
+
+    // Launch heavy work in background – mirror startInvoiceBatch behaviour
+    void (async () => {
+        try {
+            console.log(`[retryBatchSession] Starting retry for ${r2Keys.length} PDF(s) from R2...`);
+
+            const files: File[] = [];
+
+            for (const key of r2Keys) {
+                try {
+                    const file = await downloadPdfFromR2(key);
+                    files.push(file);
+                } catch (err) {
+                    console.error('[retryBatchSession] Failed to download PDF from R2 for key', key, err);
+                }
+            }
+
+            if (files.length === 0) {
+                console.error('[retryBatchSession] No PDFs could be downloaded from R2, aborting retry.');
+                return;
+            }
+
+            console.log(`[retryBatchSession] Downloaded ${files.length} PDF(s) from R2. Enqueuing new batch...`);
+
+            // Reuse the same background worker that handles normal uploads
+            await processBatchInBackground(files, user.id);
+        } catch (err) {
+            console.error('[retryBatchSession] Unexpected error while retrying batch session:', err);
+        }
+    })();
+
+    return { ok: true };
+}
+
 // Clean up old batch processing records (older than 7 days)
 export async function cleanupOldBatches(): Promise<void> {
     const sevenDaysAgo = new Date();

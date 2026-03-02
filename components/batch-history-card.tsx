@@ -4,12 +4,13 @@ import { useState } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { AlertTriangle, CheckCircle, XCircle, Clock, FileText, ChevronDown, ChevronUp } from "lucide-react"
+import { AlertTriangle, CheckCircle, XCircle, Clock, FileText, ChevronDown, ChevronUp, RotateCcw, Loader2 } from "lucide-react"
 import { formatDateTime } from "@/lib/utils"
 import { BatchErrorsDialog } from "@/components/batch-errors-dialog"
-import { getBatchHistory } from "@/lib/actions/invoices"
-import { useQuery } from "@tanstack/react-query"
+import { getBatchHistory, retryBatchSession } from "@/lib/actions/invoices"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
 import type { BatchProgressInfo } from "@/lib/actions/invoices"
+import { toast } from "sonner"
 
 const statusConfig = {
     PENDING: { label: "Pendiente", icon: Clock, variant: "secondary" as const, color: "text-yellow-600" },
@@ -21,10 +22,14 @@ const statusConfig = {
 
 function BatchHistoryItem({
     batch,
-    onViewErrors
+    onViewErrors,
+    onRetry,
+    isRetrying,
 }: {
     batch: BatchProgressInfo
     onViewErrors: (batch: BatchProgressInfo) => void
+    onRetry?: (batch: BatchProgressInfo) => void
+    isRetrying?: boolean
 }) {
     const [isExpanded, setIsExpanded] = useState(false)
     const config = statusConfig[batch.status]
@@ -35,6 +40,7 @@ function BatchHistoryItem({
     const actualErrorCount = batch.errors?.filter(e => e.kind !== 'DUPLICATE_INVOICE').length ?? 0
     const hasErrors = actualErrorCount > 0 || (batch.failedFiles ?? 0) > 0
     const hasDuplicates = duplicateCount > 0
+    const canRetry = hasErrors && (batch.status === 'FAILED' || batch.status === 'COMPLETED') && !!onRetry
 
     return (
         <div className="border rounded-lg p-4 space-y-3">
@@ -75,6 +81,22 @@ function BatchHistoryItem({
                         >
                             <AlertTriangle className="h-3 w-3 mr-1" />
                             Ver errores
+                        </Button>
+                    )}
+                    {canRetry && (
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => onRetry?.(batch)}
+                            className="text-xs"
+                            disabled={isRetrying}
+                        >
+                            {isRetrying ? (
+                                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                            ) : (
+                                <RotateCcw className="h-3 w-3 mr-1" />
+                            )}
+                            Reintentar
                         </Button>
                     )}
                     {(batch.status === 'COMPLETED' || batch.status === 'FAILED') && (
@@ -135,6 +157,8 @@ export function BatchHistoryCard() {
     const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null)
     const [errorsDialogOpen, setErrorsDialogOpen] = useState(false)
     const [selectedBatchData, setSelectedBatchData] = useState<BatchProgressInfo | null>(null)
+    const [retryingBatchId, setRetryingBatchId] = useState<string | null>(null)
+    const queryClient = useQueryClient()
 
     const { data: batches = [], isLoading, error } = useQuery({
         queryKey: ['batch-history'],
@@ -153,6 +177,26 @@ export function BatchHistoryCard() {
     const handleCloseErrorsDialog = () => {
         setErrorsDialogOpen(false)
         setSelectedBatchData(null)
+    }
+
+    const handleRetryBatch = async (batch: BatchProgressInfo) => {
+        setRetryingBatchId(batch.id)
+        try {
+            await retryBatchSession(batch.id)
+            toast.success("Reintento iniciado", {
+                description: "Se ha iniciado un nuevo procesamiento para este lote. El progreso aparecerá en la parte superior.",
+            })
+            await Promise.all([
+                queryClient.invalidateQueries({ queryKey: ['batch-history'] }),
+                queryClient.invalidateQueries({ queryKey: ['batch-progress'] }),
+            ])
+        } catch (err) {
+            console.error('[BatchHistoryCard] Error retrying batch session', err)
+            const description = err instanceof Error ? err.message : 'Ocurrió un error inesperado al reintentar el lote.'
+            toast.error("No se pudo reintentar el proceso", { description })
+        } finally {
+            setRetryingBatchId(null)
+        }
     }
 
     if (isLoading) {
@@ -226,6 +270,8 @@ export function BatchHistoryCard() {
                                     key={batch.id}
                                     batch={batch}
                                     onViewErrors={handleViewErrors}
+                                    onRetry={handleRetryBatch}
+                                    isRetrying={retryingBatchId === batch.id}
                                 />
                             ))}
                         </div>
