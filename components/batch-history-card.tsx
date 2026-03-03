@@ -40,7 +40,7 @@ function BatchHistoryItem({
     const actualErrorCount = batch.errors?.filter(e => e.kind !== 'DUPLICATE_INVOICE').length ?? 0
     const hasErrors = actualErrorCount > 0 || (batch.failedFiles ?? 0) > 0
     const hasDuplicates = duplicateCount > 0
-    const canRetry = hasErrors && (batch.status === 'FAILED' || batch.status === 'COMPLETED') && !!onRetry
+    const canRetry = !!onRetry && (batch.status === 'FAILED' || (batch.status === 'COMPLETED' && hasErrors))
 
     return (
         <div className="border rounded-lg p-4 space-y-3">
