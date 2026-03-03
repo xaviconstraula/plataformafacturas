@@ -2,7 +2,7 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   /* config options here */
-  serverExternalPackages: ["pdf-to-png-converter", "pdf-parse", "canvas", "@napi-rs", "@napi-rs/canvas", "@napi-rs/canvas-win32-x64-msvc"],
+  serverExternalPackages: ["pdf-to-png-converter", "pdf-parse", "canvas", "@napi-rs", "@napi-rs/canvas", "@napi-rs/canvas-win32-x64-msvc", "unzipper"],
   compiler: {
     // Allow console logs in all environments so we can debug batch processing
     removeConsole: false

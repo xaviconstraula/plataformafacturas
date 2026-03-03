@@ -14,16 +14,30 @@ import { uploadPdfToR2, downloadPdfFromR2, isR2Configured, getPdfUrlFromKey } fr
 import fs from "fs";
 import path from "path";
 import os from "os";
+import { Readable } from "stream";
+import * as unzipper from "unzipper";
 // ------------------------------
 // Upload constraints & utilities
 // ------------------------------
 const MAX_UPLOAD_FILE_SIZE = 500 * 1024 * 1024; // 500 MB (increased from 50 MB)
-const ALLOWED_MIME_TYPES = ["application/pdf"] as const;
 const MAX_FILES_PER_UPLOAD = 700;
 const MAX_TOTAL_UPLOAD_BYTES = 700 * 1024 * 1024; // 500 MB per request
+const MAX_PDFS_PER_ZIP = 2000; // Safety cap to avoid exploding memory on giant archives
+
+function isPdfFile(file: File): boolean {
+    const name = (file.name || "").toLowerCase();
+    return file.type === "application/pdf" || name.endsWith(".pdf");
+}
+
+function isZipFile(file: File): boolean {
+    const name = (file.name || "").toLowerCase();
+    return file.type === "application/zip"
+        || file.type === "application/x-zip-compressed"
+        || name.endsWith(".zip");
+}
 
 function validateUploadFile(file: File): { valid: boolean; error?: string } {
-    if (!ALLOWED_MIME_TYPES.includes(file.type as (typeof ALLOWED_MIME_TYPES)[number])) {
+    if (!isPdfFile(file)) {
         return { valid: false, error: `File is not a PDF.` };
     }
     if (typeof file.size === 'number' && file.size > MAX_UPLOAD_FILE_SIZE) {
@@ -33,6 +47,78 @@ function validateUploadFile(file: File): { valid: boolean; error?: string } {
         return { valid: false, error: `File is empty.` };
     }
     return { valid: true };
+}
+
+function validateZipFile(file: File): { valid: boolean; error?: string } {
+    if (!isZipFile(file)) {
+        return { valid: false, error: `File is not a ZIP archive.` };
+    }
+    if (typeof file.size === 'number' && file.size > MAX_UPLOAD_FILE_SIZE) {
+        return { valid: false, error: `ZIP file exceeds ${Math.round(MAX_UPLOAD_FILE_SIZE / 1024 / 1024)}MB limit.` };
+    }
+    if (typeof file.size === 'number' && file.size === 0) {
+        return { valid: false, error: `ZIP file is empty.` };
+    }
+    return { valid: true };
+}
+
+async function extractPdfsFromZip(zipFile: File, maxEntries: number): Promise<File[]> {
+    console.log(`[extractPdfsFromZip] Extracting PDFs from ${zipFile.name} (size: ${zipFile.size} bytes, maxEntries: ${maxEntries})`);
+
+    if (maxEntries <= 0) {
+        console.warn(`[extractPdfsFromZip] maxEntries is 0 for ${zipFile.name}, skipping extraction.`);
+        return [];
+    }
+
+    const pdfFiles: File[] = [];
+    try {
+        // Convert Web ReadableStream from File into a Node.js Readable stream
+        const nodeStream: Readable = (Readable as unknown as { fromWeb(stream: ReadableStream): Readable }).fromWeb(
+            zipFile.stream() as unknown as ReadableStream
+        );
+
+        const directory = nodeStream.pipe((unzipper as unknown as typeof unzipper).Parse({ forceStream: true })) as unknown as AsyncIterable<{
+            path: string;
+            type: string;
+            autodrain: () => void;
+            [Symbol.asyncIterator]?: () => AsyncIterator<unknown>;
+        }>;
+
+        let extractedCount = 0;
+
+        for await (const entry of directory as AsyncIterable<any>) {
+            const entryPath: string = entry.path || "";
+            const lowerPath = entryPath.toLowerCase();
+
+            if (entry.type === "File" && lowerPath.endsWith(".pdf")) {
+                if (extractedCount >= maxEntries || extractedCount >= MAX_PDFS_PER_ZIP) {
+                    console.warn(`[extractPdfsFromZip] Reached max PDF limit for ${zipFile.name}, skipping remaining entries.`);
+                    entry.autodrain();
+                    continue;
+                }
+
+                extractedCount += 1;
+
+                const chunks: Uint8Array[] = [];
+                for await (const chunk of entry) {
+                    chunks.push(chunk as Uint8Array);
+                }
+
+                const buffer = Buffer.concat(chunks.map((c) => Buffer.from(c)));
+                const fileName = path.basename(entryPath) || `${zipFile.name.replace(/\.zip$/i, "")}_${extractedCount}.pdf`;
+
+                pdfFiles.push(new File([buffer], fileName, { type: "application/pdf" }));
+            } else {
+                entry.autodrain();
+            }
+        }
+
+        console.log(`[extractPdfsFromZip] Extracted ${pdfFiles.length} PDF(s) from ${zipFile.name}`);
+    } catch (error) {
+        console.error(`[extractPdfsFromZip] Failed to extract PDFs from ${zipFile.name}:`, error);
+    }
+
+    return pdfFiles;
 }
 
 function isRateLimitError(error: unknown): boolean {
@@ -4397,26 +4483,68 @@ export async function startInvoiceBatch(formDataWithFiles: FormData): Promise<{ 
             console.error('[startInvoiceBatch] No files provided in FormData');
             throw new Error('No files provided.');
         }
-
-        if (files.length > MAX_FILES_PER_UPLOAD) {
-            console.error(`[startInvoiceBatch] Too many files: ${files.length} > ${MAX_FILES_PER_UPLOAD}`);
-            throw new Error(`Too many files. Maximum allowed is ${MAX_FILES_PER_UPLOAD}.`);
-        }
         const totalBytes = files.reduce((sum, f) => sum + (typeof f.size === 'number' ? f.size : 0), 0);
         if (totalBytes > MAX_TOTAL_UPLOAD_BYTES) {
             console.error(`[startInvoiceBatch] Total size exceeds limit: ${totalBytes} > ${MAX_TOTAL_UPLOAD_BYTES}`);
             throw new Error(`Total upload size exceeds ${Math.round(MAX_TOTAL_UPLOAD_BYTES / 1024 / 1024)}MB.`);
         }
 
-        // Filter invalid files early
-        const validFiles = files.filter(f => validateUploadFile(f).valid);
-        const invalidCount = files.length - validFiles.length;
-        if (invalidCount > 0) {
-            console.warn(`[startInvoiceBatch] ${invalidCount} invalid files filtered out`);
+        // Separate PDFs and ZIPs
+        const pdfUploads: File[] = [];
+        const zipUploads: File[] = [];
+
+        for (const file of files) {
+            if (isZipFile(file)) {
+                const zipValidation = validateZipFile(file);
+                if (!zipValidation.valid) {
+                    console.warn(`[startInvoiceBatch] Invalid ZIP skipped (${file.name}): ${zipValidation.error}`);
+                    continue;
+                }
+                zipUploads.push(file);
+            } else if (isPdfFile(file)) {
+                pdfUploads.push(file);
+            } else {
+                console.warn(`[startInvoiceBatch] Unsupported file type skipped: ${file.name} (${file.type})`);
+            }
+        }
+
+        // Expand ZIP archives into individual PDF files without loading everything into memory at once
+        const expandedPdfs: File[] = [];
+        let remainingCapacity = MAX_FILES_PER_UPLOAD - pdfUploads.length;
+
+        if (remainingCapacity <= 0 && zipUploads.length > 0) {
+            console.warn(`[startInvoiceBatch] PDF upload capacity (${MAX_FILES_PER_UPLOAD}) already reached with direct PDFs, ZIPs will be ignored.`);
+        } else {
+            for (const zip of zipUploads) {
+                if (remainingCapacity <= 0) break;
+
+                const extracted = await extractPdfsFromZip(zip, remainingCapacity);
+                expandedPdfs.push(...extracted);
+                remainingCapacity = MAX_FILES_PER_UPLOAD - (pdfUploads.length + expandedPdfs.length);
+
+                if (remainingCapacity <= 0) {
+                    console.warn(`[startInvoiceBatch] Reached max PDF capacity (${MAX_FILES_PER_UPLOAD}) while expanding ZIPs. Remaining ZIP contents will be ignored.`);
+                    break;
+                }
+            }
+        }
+
+        const allPdfCandidates = [...pdfUploads, ...expandedPdfs];
+
+        if (allPdfCandidates.length === 0) {
+            console.error('[startInvoiceBatch] No valid PDF files found after filtering and ZIP expansion');
+            throw new Error('No valid PDF files to process. Upload PDFs directly or ZIP files that contain PDFs.');
+        }
+
+        // Final validation on PDFs (size, emptiness)
+        const validFiles = allPdfCandidates.filter(f => validateUploadFile(f).valid);
+        const invalidPdfCount = allPdfCandidates.length - validFiles.length;
+        if (invalidPdfCount > 0) {
+            console.warn(`[startInvoiceBatch] ${invalidPdfCount} invalid PDF(s) filtered out after ZIP expansion`);
         }
         if (validFiles.length === 0) {
-            console.error('[startInvoiceBatch] No valid files after filtering');
-            throw new Error('No valid files to process. Ensure PDFs under the size limit.');
+            console.error('[startInvoiceBatch] No valid PDFs after validation');
+            throw new Error('No valid PDF files to process after validation. Ensure PDFs are under the size limit and not empty.');
         }
 
         // Get authenticated user for batch ownership

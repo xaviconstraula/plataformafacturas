@@ -73,6 +73,8 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
         onDrop,
         accept: {
             'application/pdf': ['.pdf'],
+            'application/zip': ['.zip'],
+            'application/x-zip-compressed': ['.zip'],
         },
         maxSize: 500 * 1024 * 1024, // Increased from 5MB to 500MB per file
     })
@@ -220,11 +222,11 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
                     <p className="font-semibold text-primary">Suelta los archivos aquí...</p>
                 ) : (
                     <p className="text-muted-foreground">
-                        Arrastra y suelta archivos PDF aquí, o haz clic para seleccionar
+                        Arrastra y suelta archivos PDF o ZIP aquí, o haz clic para seleccionar
                     </p>
                 )}
                 <p className="mt-1 text-xs text-muted-foreground/80">
-                    Archivos PDF, hasta 500MB cada uno
+                    Archivos PDF o ZIP, hasta 500MB cada uno
                 </p>
             </div>
 
