@@ -5464,4 +5464,112 @@ export async function cancelAllBatches(): Promise<{ success: boolean; message: s
             cancelledCount: 0
         };
     }
-} 
+}
+
+// ---------------------------------------------------------------------------
+// 🛑  Server Action: Cancel a single batch or grouped session
+// ---------------------------------------------------------------------------
+
+export async function cancelBatchSession(batchOrSessionId: string): Promise<{ success: boolean; message: string; cancelledCount: number }> {
+    const user = await requireAuth();
+
+    try {
+        let targetBatches: { id: string }[] = [];
+
+        if (batchOrSessionId.startsWith('session-')) {
+            const rawTimestamp = batchOrSessionId.replace('session-', '');
+            const timestamp = Number(rawTimestamp);
+
+            if (!Number.isFinite(timestamp)) {
+                return {
+                    success: false,
+                    message: 'Identificador de sesión de proceso inválido.',
+                    cancelledCount: 0,
+                };
+            }
+
+            const TIME_WINDOW_MS = 5 * 60 * 1000; // 5 minutes – must stay in sync with grouping logic
+            const windowStart = new Date(timestamp - TIME_WINDOW_MS);
+            const windowEnd = new Date(timestamp + TIME_WINDOW_MS);
+
+            targetBatches = await prisma.batchProcessing.findMany({
+                where: {
+                    userId: user.id,
+                    createdAt: {
+                        gte: windowStart,
+                        lte: windowEnd,
+                    },
+                    status: {
+                        in: ['PENDING', 'PROCESSING'],
+                    },
+                },
+                select: {
+                    id: true,
+                },
+            });
+        } else {
+            const batch = await prisma.batchProcessing.findFirst({
+                where: {
+                    id: batchOrSessionId,
+                    userId: user.id,
+                    status: {
+                        in: ['PENDING', 'PROCESSING'],
+                    },
+                },
+                select: {
+                    id: true,
+                },
+            });
+
+            if (batch) {
+                targetBatches.push(batch);
+            }
+        }
+
+        if (targetBatches.length === 0) {
+            return {
+                success: true,
+                message: 'No se encontraron procesos activos para cancelar.',
+                cancelledCount: 0,
+            };
+        }
+
+        let cancelledCount = 0;
+
+        for (const batch of targetBatches) {
+            try {
+                // Attempt to cancel the remote Gemini batch; if it fails, we still mark local as cancelled
+                await gemini.batches.cancel({ name: batch.id });
+            } catch (error) {
+                console.error(`[cancelBatchSession] Failed to cancel remote batch ${batch.id}:`, error);
+            }
+
+            try {
+                await updateBatchProgress(batch.id, {
+                    status: 'CANCELLED',
+                    completedAt: new Date(),
+                });
+                cancelledCount += 1;
+            } catch (error) {
+                console.error(`[cancelBatchSession] Failed to update local batch ${batch.id}:`, error);
+            }
+        }
+
+        const message = cancelledCount === targetBatches.length
+            ? `Se ha cancelado ${cancelledCount} proceso(s).`
+            : `Se han cancelado ${cancelledCount} de ${targetBatches.length} proceso(s). Algunos pueden haber finalizado antes de la cancelación.`;
+
+        return {
+            success: true,
+            message,
+            cancelledCount,
+        };
+    } catch (error) {
+        console.error('[cancelBatchSession] Error cancelling batch/session:', error);
+        return {
+            success: false,
+            message: error instanceof Error ? error.message : 'Error desconocido al cancelar el proceso.',
+            cancelledCount: 0,
+        };
+    }
+}

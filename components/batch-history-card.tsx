@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { AlertTriangle, CheckCircle, XCircle, Clock, FileText, ChevronDown, ChevronUp, RotateCcw, Loader2 } from "lucide-react"
 import { formatDateTime } from "@/lib/utils"
 import { BatchErrorsDialog } from "@/components/batch-errors-dialog"
-import { getBatchHistory, retryBatchSession } from "@/lib/actions/invoices"
+import { getBatchHistory, retryBatchSession, cancelBatchSession } from "@/lib/actions/invoices"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import type { BatchProgressInfo } from "@/lib/actions/invoices"
 import { toast } from "sonner"
@@ -25,11 +25,15 @@ function BatchHistoryItem({
     onViewErrors,
     onRetry,
     isRetrying,
+    onCancel,
+    isCancelling,
 }: {
     batch: BatchProgressInfo
     onViewErrors: (batch: BatchProgressInfo) => void
     onRetry?: (batch: BatchProgressInfo) => void
     isRetrying?: boolean
+    onCancel?: (batch: BatchProgressInfo) => void
+    isCancelling?: boolean
 }) {
     const [isExpanded, setIsExpanded] = useState(false)
     const config = statusConfig[batch.status]
@@ -41,6 +45,7 @@ function BatchHistoryItem({
     const hasErrors = actualErrorCount > 0 || (batch.failedFiles ?? 0) > 0
     const hasDuplicates = duplicateCount > 0
     const canRetry = !!onRetry && (batch.status === 'FAILED' || (batch.status === 'COMPLETED' && hasErrors))
+    const canCancel = !!onCancel && (batch.status === 'PENDING' || batch.status === 'PROCESSING')
 
     return (
         <div className="border rounded-lg p-4 space-y-3">
@@ -97,6 +102,22 @@ function BatchHistoryItem({
                                 <RotateCcw className="h-3 w-3 mr-1" />
                             )}
                             Reintentar
+                        </Button>
+                    )}
+                    {canCancel && (
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => onCancel?.(batch)}
+                            className="text-xs"
+                            disabled={isCancelling}
+                        >
+                            {isCancelling ? (
+                                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                            ) : (
+                                <XCircle className="h-3 w-3 mr-1" />
+                            )}
+                            Cancelar
                         </Button>
                     )}
                     {(batch.status === 'COMPLETED' || batch.status === 'FAILED') && (
@@ -158,6 +179,7 @@ export function BatchHistoryCard() {
     const [errorsDialogOpen, setErrorsDialogOpen] = useState(false)
     const [selectedBatchData, setSelectedBatchData] = useState<BatchProgressInfo | null>(null)
     const [retryingBatchId, setRetryingBatchId] = useState<string | null>(null)
+    const [cancellingBatchId, setCancellingBatchId] = useState<string | null>(null)
     const queryClient = useQueryClient()
 
     const { data: batches = [], isLoading, error } = useQuery({
@@ -196,6 +218,32 @@ export function BatchHistoryCard() {
             toast.error("No se pudo reintentar el proceso", { description })
         } finally {
             setRetryingBatchId(null)
+        }
+    }
+
+    const handleCancelBatch = async (batch: BatchProgressInfo) => {
+        setCancellingBatchId(batch.id)
+        try {
+            const result = await cancelBatchSession(batch.id)
+            if (result.success) {
+                toast.success("Proceso cancelado", {
+                    description: result.message,
+                })
+            } else {
+                toast.error("No se pudo cancelar el proceso", {
+                    description: result.message,
+                })
+            }
+            await Promise.all([
+                queryClient.invalidateQueries({ queryKey: ['batch-history'] }),
+                queryClient.invalidateQueries({ queryKey: ['batch-progress'] }),
+            ])
+        } catch (err) {
+            console.error('[BatchHistoryCard] Error cancelling batch/session', err)
+            const description = err instanceof Error ? err.message : 'Ocurrió un error inesperado al cancelar el proceso.'
+            toast.error("No se pudo cancelar el proceso", { description })
+        } finally {
+            setCancellingBatchId(null)
         }
     }
 
@@ -272,6 +320,8 @@ export function BatchHistoryCard() {
                                     onViewErrors={handleViewErrors}
                                     onRetry={handleRetryBatch}
                                     isRetrying={retryingBatchId === batch.id}
+                                    onCancel={handleCancelBatch}
+                                    isCancelling={cancellingBatchId === batch.id}
                                 />
                             ))}
                         </div>
