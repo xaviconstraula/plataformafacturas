@@ -859,98 +859,7 @@ export async function getActiveBatches(): Promise<BatchProgressInfo[]> {
         },
     });
 
-    // 🔄  Attempt to reconcile status with Gemini for active batches
-    //     We only do this for batches that are still PENDING/PROCESSING to avoid
-    //     unnecessary API calls once a batch is terminal.
-    const reconciledBatches: typeof localBatches = [];
-
-    for (const batch of localBatches) {
-        if (['PENDING', 'PROCESSING'].includes(batch.status)) {
-            try {
-                // Retry logic for batch status check with timeout handling
-                const remote = await retryGeminiOperation(async () => {
-                    return await gemini.batches.get({ name: batch.id }) as GeminiBatchStatus;
-                }, 3, 2000); // 3 retries with 2 second initial delay
-
-                // Map Gemini state → local BatchStatus
-                const state = remote?.state as string | undefined;
-                const statusMap: Record<string, BatchStatus> = {
-                    JOB_STATE_PENDING: 'PENDING',
-                    JOB_STATE_RUNNING: 'PROCESSING',
-                    JOB_STATE_SUCCEEDED: 'COMPLETED',
-                    JOB_STATE_FAILED: 'FAILED',
-                    JOB_STATE_EXPIRED: 'FAILED',
-                    JOB_STATE_CANCELLED: 'CANCELLED',
-                };
-                const newStatus = state ? statusMap[state] ?? batch.status : batch.status;
-
-                // Counts if present
-                const rc = (remote?.request_counts ?? remote?.requestCounts ?? {});
-
-                await updateBatchProgress(batch.id, {
-                    status: newStatus,
-                    processedFiles: rc.completed !== undefined || rc.failed !== undefined ? (rc.completed ?? 0) + (rc.failed ?? 0) : undefined,
-                    successfulFiles: rc.completed,
-                    failedFiles: rc.failed,
-                });
-
-                reconciledBatches.push({ ...batch, status: newStatus, processedFiles: (rc.completed ?? 0) + (rc.failed ?? 0), successfulFiles: rc.completed ?? 0, failedFiles: rc.failed ?? 0 });
-
-                // If batch completed, ingest results
-                if (newStatus === 'COMPLETED' && !batch.completedAt && remote?.dest) {
-                    // Set completedAt BEFORE ingesting to prevent duplicate processing from concurrent polls
-                    const now = new Date();
-                    await updateBatchProgress(batch.id, {
-                        completedAt: now,
-                    });
-
-                    // Now safely ingest results - concurrent polls will skip this batch due to completedAt being set
-                    try {
-                        await ingestBatchOutputFromGemini(batch.id, remote.dest);
-                    } catch (ingestError) {
-                        const errorMessage = ingestError instanceof Error ? ingestError.message : 'Failed to ingest batch results';
-
-                        if (isGeminiTimeoutError(ingestError)) {
-                            console.warn(`[getActiveBatches] Timeout ingesting batch results for ${batch.id}, marking for retry`);
-                            // Reset completedAt so it can be retried on next poll - use direct Prisma update
-                            await prisma.batchProcessing.update({
-                                where: { id: batch.id },
-                                data: { completedAt: null, updatedAt: new Date() },
-                            });
-                        } else {
-                            console.error(`[getActiveBatches] Failed to ingest batch results for ${batch.id}:`, ingestError);
-                            // Mark batch as failed for non-timeout errors
-                            await updateBatchProgress(batch.id, {
-                                status: 'FAILED',
-                                errors: [
-                                    {
-                                        kind: 'DATABASE_ERROR',
-                                        message: errorMessage,
-                                        timestamp: new Date().toISOString(),
-                                    },
-                                ],
-                            });
-                        }
-                    }
-                }
-
-                continue;
-            } catch (err) {
-                // Log error but don't fail the entire operation
-                if (isGeminiTimeoutError(err)) {
-                    console.warn(`[getActiveBatches] Timeout retrieving Gemini batch ${batch.id}, will retry on next poll`);
-                } else {
-                    console.error('[getActiveBatches] Failed to retrieve Gemini batch', batch.id, err);
-                }
-            }
-        }
-
-        reconciledBatches.push(batch);
-    }
-
-    const batches = reconciledBatches;
-
-    return batches.map(batch => ({
+    return localBatches.map(batch => ({
         id: batch.id,
         status: batch.status,
         totalFiles: batch.totalFiles,
@@ -2583,40 +2492,23 @@ async function callPdfExtractAPIWithRetry(file: File, batchErrors: BatchErrorDet
     };
 }
 
-export async function createInvoiceFromFiles(
-    formDataWithFiles: FormData
+async function processInvoicesWithDirectApi(
+    files: File[],
+    userId: string,
+    existingBatchId?: string | null
 ): Promise<{ overallSuccess: boolean; results: CreateInvoiceResult[]; batchId: string }> {
-    const files = formDataWithFiles.getAll("files") as File[];
     if (!files || files.length === 0) {
         throw new Error("No files provided.");
     }
 
-    if (files.length > MAX_FILES_PER_UPLOAD) {
-        throw new Error(`Too many files. Maximum allowed is ${MAX_FILES_PER_UPLOAD}.`);
-    }
-    const totalBytes = files.reduce((sum, f) => sum + (typeof f.size === 'number' ? f.size : 0), 0);
-    if (totalBytes > MAX_TOTAL_UPLOAD_BYTES) {
-        throw new Error(`Total upload size exceeds ${Math.round(MAX_TOTAL_UPLOAD_BYTES / 1024 / 1024)}MB.`);
-    }
-
-    // Identify the current authenticated user so that all subsequent
-    // provider/invoice creations are correctly scoped. Without this the UI
-    // queries (which filter by userId) may fail to find newly created records
-    // leading to the appearance that invoices "disappear".
-    const user = await requireAuth();
-
-    // Check if an existing batch ID was provided, otherwise create a new one
-    const existingBatchId = formDataWithFiles.get("existingBatchId") as string | null;
     let batchId: string;
 
     if (existingBatchId) {
         batchId = existingBatchId;
     } else {
-        // Create new batch processing record (fallback for backward compatibility)
-        batchId = await createBatchProcessing(files.length, undefined, user.id);
+        batchId = await createBatchProcessing(files.length, undefined, userId);
     }
 
-    // Start batch processing
     await updateBatchProgress(batchId, {
         status: 'PROCESSING',
         startedAt: new Date(),
@@ -2802,7 +2694,7 @@ export async function createInvoiceFromFiles(
     for (const [cif, providerData] of uniqueProviders.entries()) {
         try {
             const provider = await prisma.$transaction(async (tx) => {
-                return await findOrCreateProviderTx(tx, providerData, user.id);
+                return await findOrCreateProviderTx(tx, providerData, userId);
             });
             providerCache.set(cif, provider.id);
         } catch (error) {
@@ -2827,7 +2719,7 @@ export async function createInvoiceFromFiles(
     let existingMaterials = await prisma.material.findMany({
         select: { id: true, name: true, code: true, referenceCode: true, category: true },
         where: {
-            userId: user.id,
+            userId: userId,
             OR: referencedCodes.size > 0 ? [
                 { code: { in: Array.from(referencedCodes) } },
                 { referenceCode: { in: Array.from(referencedCodes) } },
@@ -2840,7 +2732,7 @@ export async function createInvoiceFromFiles(
     if (existingMaterials.length === 0) {
         existingMaterials = await prisma.material.findMany({
             select: { id: true, name: true, code: true, referenceCode: true, category: true },
-            where: { userId: user.id },
+            where: { userId: userId },
             take: 300,
             orderBy: { updatedAt: 'desc' },
         });
@@ -2931,11 +2823,11 @@ export async function createInvoiceFromFiles(
 
                                 // Either the provider disappeared (unlikely) or it belongs to
                                 // another user. Fallback to a scoped lookup.
-                                if (!provider || provider.userId !== user.id) {
-                                    provider = await findOrCreateProviderTx(tx, extractedData.provider, user.id);
+                                if (!provider || provider.userId !== userId) {
+                                    provider = await findOrCreateProviderTx(tx, extractedData.provider, userId);
                                 }
                             } else {
-                                provider = await findOrCreateProviderTx(tx, extractedData.provider, user.id);
+                                provider = await findOrCreateProviderTx(tx, extractedData.provider, userId);
                             }
                         } catch (providerError) {
                             // If provider lookup/creation fails, throw immediately to prevent transaction abortion
@@ -3080,7 +2972,7 @@ export async function createInvoiceFromFiles(
                                     await tx.invoiceItem.create({
                                         data: {
                                             invoiceId: invoice.id,
-                                            materialId: (await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache, user.id)).id,
+                                            materialId: (await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache, userId)).id,
                                             quantity: quantityDecimal,
                                             listPrice: listPriceDecimal,
                                             discountPercentage: discountPercentageDecimal,
@@ -3096,7 +2988,7 @@ export async function createInvoiceFromFiles(
 
                                 let material: Material;
                                 try {
-                                    material = await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache, user.id);
+                                    material = await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache, userId);
                                 } catch (materialError) {
                                     console.error(`Error creating/finding material '${itemData.materialName}' in invoice ${invoice.invoiceCode}:`, materialError);
                                     throw new Error(`Failed to process material '${itemData.materialName}': ${materialError instanceof Error ? materialError.message : 'Unknown error'}`);
@@ -3405,14 +3297,35 @@ export async function createInvoiceFromFiles(
         }
     }
 
-    // Clean up old batch records as maintenance (non-blocking)
-    if (Math.random() < 0.1) { // Only run cleanup 10% of the time to reduce overhead
+    if (Math.random() < 0.1) {
         cleanupOldBatches().catch(error => {
             console.error("Background cleanup failed:", error);
         });
     }
 
     return { overallSuccess, results: finalResultsWithBatch, batchId };
+}
+
+export async function createInvoiceFromFiles(
+    formDataWithFiles: FormData
+): Promise<{ overallSuccess: boolean; results: CreateInvoiceResult[]; batchId: string }> {
+    const files = formDataWithFiles.getAll("files") as File[];
+    if (!files || files.length === 0) {
+        throw new Error("No files provided.");
+    }
+
+    if (files.length > MAX_FILES_PER_UPLOAD) {
+        throw new Error(`Too many files. Maximum allowed is ${MAX_FILES_PER_UPLOAD}.`);
+    }
+    const totalBytes = files.reduce((sum, f) => sum + (typeof f.size === 'number' ? f.size : 0), 0);
+    if (totalBytes > MAX_TOTAL_UPLOAD_BYTES) {
+        throw new Error(`Total upload size exceeds ${Math.round(MAX_TOTAL_UPLOAD_BYTES / 1024 / 1024)}MB.`);
+    }
+
+    const user = await requireAuth();
+    const existingBatchId = formDataWithFiles.get("existingBatchId") as string | null;
+
+    return await processInvoicesWithDirectApi(files, user.id, existingBatchId);
 }
 
 // Manual invoice creation function for form submissions
@@ -3779,90 +3692,6 @@ async function buildBatchJsonl(files: File[]): Promise<string> {
 // Stay well below that hard limit so we never lose the entire
 // batch due to a single oversize upload.
 const MAX_BATCH_FILE_SIZE = 90 * 1024 * 1024; // 90 MB safety threshold
-
-interface JsonlChunk {
-    content: string;
-    files: File[];
-}
-
-async function buildBatchJsonlChunks(files: File[]): Promise<JsonlChunk[]> {
-    const chunks: JsonlChunk[] = [];
-
-    // Allow limited parallelism to accelerate heavy pdfToPng work.
-    // Use more conservative concurrency for very large batches to avoid OOM.
-    const CONCURRENCY = files.length >= 250 ? 1 : files.length >= 150 ? 2 : 4;
-
-    console.log(`[buildBatchJsonlChunks] Building JSONL for ${files.length} files with concurrency ${CONCURRENCY}`);
-
-    let currentLines: string[] = [];
-    let currentSize = 0;
-    let currentFiles: File[] = [];
-    let processedCount = 0;
-    let errorCount = 0;
-
-    for (let i = 0; i < files.length; i += CONCURRENCY) {
-        // Slice the next group of files and process them in parallel.
-        const slice = files.slice(i, i + CONCURRENCY).filter(f => validateUploadFile(f).valid);
-
-        const results = await Promise.allSettled(
-            slice.map(async (file) => {
-                const line = await prepareBatchLine(file);
-                return { file, line } as const;
-            })
-        );
-
-        // Process results, handling both successes and failures
-        for (let j = 0; j < results.length; j++) {
-            const result = results[j];
-            const file = slice[j];
-
-            if (result.status === 'fulfilled') {
-                const { file: processedFile, line } = result.value;
-                const lineSize = Buffer.byteLength(line, "utf8") + 1; // +1 for newline
-
-                if (currentSize + lineSize > MAX_BATCH_FILE_SIZE && currentLines.length > 0) {
-                    chunks.push({ content: currentLines.join("\n"), files: currentFiles });
-                    currentLines = [];
-                    currentFiles = [];
-                    currentSize = 0;
-                }
-
-                currentLines.push(line);
-                currentFiles.push(processedFile);
-                currentSize += lineSize;
-                processedCount++;
-            } else {
-                errorCount++;
-                console.error(`[buildBatchJsonlChunks] ❌ Failed to process file ${file?.name || 'unknown'}:`, result.reason);
-                // Continue processing other files even if one fails
-            }
-        }
-
-        // Memory monitoring & opportunistic GC
-        const mem = process.memoryUsage();
-        const heapMb = Math.round(mem.heapUsed / 1024 / 1024);
-        if (heapMb > 1500) {
-            console.warn(`[buildBatchJsonlChunks] High heap usage detected (${heapMb} MB). Triggering GC and throttling…`);
-            if (global.gc) {
-                global.gc();
-            }
-            // Small delay to let GC do its work in tight loops
-            await new Promise((r) => setTimeout(r, 500));
-        }
-    }
-
-    if (currentLines.length > 0) {
-        chunks.push({ content: currentLines.join("\n"), files: currentFiles });
-    }
-
-    console.log(`[buildBatchJsonlChunks] ✅ Built ${chunks.length} chunks. Processed: ${processedCount}/${files.length}, Errors: ${errorCount}`);
-
-    if (chunks.length === 0 && errorCount > 0) {
-        throw new Error(`Failed to process any files. ${errorCount} file(s) had errors.`);
-    }
-
-    return chunks;
-}
 
 // ---------------------------------------------------------------------------
 // 🏗️  Helper: Persist extracted JSON response (used by webhook)
@@ -4582,25 +4411,20 @@ export async function startInvoiceBatch(formDataWithFiles: FormData): Promise<{ 
 async function processBatchInBackground(files: File[], userId: string) {
     console.log(`[processBatchInBackground] 🚀 Starting background processing for ${files.length} files, userId: ${userId}`);
 
-    // Create an initial batch record that will be updated as processing happens
     let batchId: string | null = null;
 
     try {
         console.log('[processBatchInBackground] Step 0: Checking R2 configuration...');
-        // STEP 0 – Upload PDFs to R2 for retry capability (if configured)
         const r2Keys: string[] = [];
-        const r2Urls: Record<string, string> = {}; // Map fileName -> URL
         const r2Enabled = isR2Configured();
 
         if (r2Enabled) {
             console.log('[processBatchInBackground] R2 configured, uploading PDFs for permanent storage');
-            // Create temporary batch ID for R2 organization
             const tempBatchId = `batch-${Date.now()}`;
 
             try {
                 const uploadPromises = files.map(async (file) => {
                     const result = await uploadPdfToR2(file, tempBatchId);
-                    r2Urls[file.name] = result.url;
                     return result.key;
                 });
                 const keys = await Promise.all(uploadPromises);
@@ -4614,115 +4438,18 @@ async function processBatchInBackground(files: File[], userId: string) {
             console.log('[processBatchInBackground] R2 not configured, skipping PDF upload (no retry capability)');
         }
 
-        // STEP A – Build JSONL chunks
-        console.log('[processBatchInBackground] Step A: Building JSONL chunks...');
-        const tmpDir = path.join(process.env.NODE_ENV === 'development' ? path.join(process.cwd(), 'tmp') : os.tmpdir(), 'facturas-batch');
-        try {
-            if (!fs.existsSync(tmpDir)) {
-                fs.mkdirSync(tmpDir, { recursive: true, mode: 0o755 });
-            }
-        } catch (mkdirError) {
-            const errorMsg = mkdirError instanceof Error ? mkdirError.message : 'Unknown error creating tmp directory';
-            console.error('[processBatchInBackground] ❌ Failed to create tmp directory:', mkdirError);
-            throw new Error(`Failed to create temporary directory: ${errorMsg}`);
-        }
+        const directResult = await processInvoicesWithDirectApi(files, userId, null);
+        batchId = directResult.batchId;
 
-        console.log('[processBatchInBackground] Building JSONL chunks from files...');
-        const chunks = await buildBatchJsonlChunks(files);
-        console.log(`[processBatchInBackground] Built ${chunks.length} JSONL chunks`);
-
-        if (chunks.length === 0) {
-            console.error('[processBatchInBackground] ❌ No JSONL chunks built from files');
-            throw new Error('No JSONL chunks built.');
-        }
-
-        let isFirstChunk = true;
-
-        for (const [index, chunk] of chunks.entries()) {
-            const jsonlPath = path.join(tmpDir, `gemini-batch-${Date.now()}-${index}.jsonl`);
-            await fs.promises.writeFile(jsonlPath, chunk.content, 'utf8');
-
-            // Upload file to Gemini with retry logic
-            let uploaded: { name?: string; id?: string } | undefined;
-            let uploadAttempts = 0;
-            while (uploadAttempts < 3) {
-                try {
-                    uploaded = await gemini.files.upload({
-                        file: jsonlPath,
-                        config: { displayName: `invoices-${Date.now()}-${index}`, mimeType: 'application/json' }
-                    }) as unknown as { name?: string; id?: string };
-                    break;
-                } catch (error: unknown) {
-                    uploadAttempts++;
-                    if (uploadAttempts >= 3) throw error;
-                    if (isRateLimitError(error)) {
-                        console.log(`[processBatchInBackground] Rate limit hit during file upload, waiting 2s before retry ${uploadAttempts}/3`);
-                        await new Promise(resolve => setTimeout(resolve, 2000));
-                    } else {
-                        throw error;
-                    }
-                }
-            }
-
-            // Create Gemini batch job with retry logic
-            let created: { name: string } | undefined;
-            let batchAttempts = 0;
-            // Ensure we have a valid file identifier from the upload response
-            const fileIdentifier = (uploaded as { name?: string; id?: string } | undefined)?.name;
-            if (!fileIdentifier) {
-                throw new Error('[processBatchInBackground] Gemini file upload did not return a valid file identifier (name or id)');
-            }
-            while (batchAttempts < 3) {
-                try {
-                    created = await gemini.batches.create({
-                        model: GEMINI_MODEL,
-                        src: fileIdentifier,
-                        config: { displayName: `invoice-job-${Date.now()}-${index}` }
-                    }) as unknown as { name: string };
-                    break;
-                } catch (error: unknown) {
-                    batchAttempts++;
-                    if (batchAttempts >= 3) throw error;
-                    if (isRateLimitError(error)) {
-                        console.log(`[processBatchInBackground] Rate limit hit during batch creation, waiting 1s before retry ${batchAttempts}/3`);
-                        await new Promise(resolve => setTimeout(resolve, 1000));
-                    } else {
-                        throw error;
-                    }
-                }
-            }
-
-            const remoteId: string = created?.name || 'unknown';
-            console.log(`[processBatchInBackground] Created Gemini batch ${remoteId} for chunk ${index + 1}/${chunks.length} (${chunk.files.length} files)`);
-
-            // On the first chunk, create the local batch record using the Gemini batch ID
-            if (isFirstChunk && remoteId !== 'unknown') {
-                batchId = await createBatchProcessing(files.length, remoteId, userId);
-                isFirstChunk = false;
-
-                // Save R2 keys to database for retry capability
-                if (r2Keys.length > 0) {
-                    await prisma.batchProcessing.update({
-                        where: { id: batchId },
-                        data: { r2Keys: r2Keys },
-                    });
-                }
-
-                // Update to PROCESSING state
-                await updateBatchProgress(batchId, {
-                    status: 'PROCESSING',
-                    startedAt: new Date(),
-                });
-            }
-
-            // Cleanup temp file in background (don't block loop)
-            fs.promises.unlink(jsonlPath).catch(() => undefined);
-
+        if (batchId && r2Enabled && r2Keys.length > 0) {
+            await prisma.batchProcessing.update({
+                where: { id: batchId },
+                data: { r2Keys: r2Keys },
+            });
         }
     } catch (err) {
         console.error('[processBatchInBackground] Failed to enqueue batches', err);
 
-        // If we created a batch record, update it with the error so the user sees it
         if (batchId) {
             const errorMsg = err instanceof Error ? err.message : 'Unknown error during batch processing';
             await updateBatchProgress(batchId, {
