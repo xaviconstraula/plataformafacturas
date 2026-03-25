@@ -6,7 +6,7 @@ import { UploadCloudIcon, XIcon, FileIcon, BotIcon, Loader2Icon } from 'lucide-r
 import { cn } from '@/lib/utils'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
-import { startInvoiceBatch, type CreateInvoiceResult } from '@/lib/actions/invoices'
+import type { CreateInvoiceResult } from '@/lib/actions/invoices'
 
 interface InvoiceDropzoneProps {
     onProcessingComplete?: (results: CreateInvoiceResult[]) => void;
@@ -101,7 +101,7 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
         // 🚧  Split huge selections into smaller requests so Next.js does not
         //     need to buffer hundreds of MB in a single multipart body. Each
         //     sub-batch will be processed independently by the server.
-        const MAX_FILES_PER_REQUEST = 150; // 150 × 500 MB ≈ 75 GB (worst-case)
+        const MAX_FILES_PER_REQUEST = 5000;
         const chunks: File[][] = [];
         for (let i = 0; i < filesToProcess.length; i += MAX_FILES_PER_REQUEST) {
             chunks.push(filesToProcess.slice(i, i + MAX_FILES_PER_REQUEST));
@@ -134,7 +134,15 @@ export function InvoiceDropzone({ onProcessingComplete, onProcessingStart, class
                 });
 
                 console.log(`▶️  Sub-batch ${idx + 1}/${chunks.length} – ${chunk.length} archivos`);
-                const { batchId } = await startInvoiceBatch(formData);
+                const res = await fetch(`/api/invoices/upload?mode=async`, {
+                    method: 'POST',
+                    body: formData,
+                });
+                if (!res.ok) {
+                    const text = await res.text().catch(() => '');
+                    throw new Error(text || `Upload failed (${res.status})`);
+                }
+                const { batchId } = (await res.json()) as { batchId: string };
 
                 operationResults.push({
                     success: true,

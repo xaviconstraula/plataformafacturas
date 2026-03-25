@@ -14,26 +14,16 @@ import { uploadPdfToR2, downloadPdfFromR2, isR2Configured, getPdfUrlFromKey } fr
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { Readable } from "stream";
-import * as unzipper from "unzipper";
 // ------------------------------
 // Upload constraints & utilities
 // ------------------------------
 const MAX_UPLOAD_FILE_SIZE = 500 * 1024 * 1024; // 500 MB (increased from 50 MB)
-const MAX_FILES_PER_UPLOAD = 700;
-const MAX_TOTAL_UPLOAD_BYTES = 700 * 1024 * 1024; // 500 MB per request
-const MAX_PDFS_PER_ZIP = 2000; // Safety cap to avoid exploding memory on giant archives
+const MAX_FILES_PER_UPLOAD = 5000;
+const MAX_TOTAL_UPLOAD_BYTES = 700 * 1024 * 1024; // legacy; streaming uploads use Busboy limits
 
 function isPdfFile(file: File): boolean {
     const name = (file.name || "").toLowerCase();
     return file.type === "application/pdf" || name.endsWith(".pdf");
-}
-
-function isZipFile(file: File): boolean {
-    const name = (file.name || "").toLowerCase();
-    return file.type === "application/zip"
-        || file.type === "application/x-zip-compressed"
-        || name.endsWith(".zip");
 }
 
 function validateUploadFile(file: File): { valid: boolean; error?: string } {
@@ -47,78 +37,6 @@ function validateUploadFile(file: File): { valid: boolean; error?: string } {
         return { valid: false, error: `File is empty.` };
     }
     return { valid: true };
-}
-
-function validateZipFile(file: File): { valid: boolean; error?: string } {
-    if (!isZipFile(file)) {
-        return { valid: false, error: `File is not a ZIP archive.` };
-    }
-    if (typeof file.size === 'number' && file.size > MAX_UPLOAD_FILE_SIZE) {
-        return { valid: false, error: `ZIP file exceeds ${Math.round(MAX_UPLOAD_FILE_SIZE / 1024 / 1024)}MB limit.` };
-    }
-    if (typeof file.size === 'number' && file.size === 0) {
-        return { valid: false, error: `ZIP file is empty.` };
-    }
-    return { valid: true };
-}
-
-async function extractPdfsFromZip(zipFile: File, maxEntries: number): Promise<File[]> {
-    console.log(`[extractPdfsFromZip] Extracting PDFs from ${zipFile.name} (size: ${zipFile.size} bytes, maxEntries: ${maxEntries})`);
-
-    if (maxEntries <= 0) {
-        console.warn(`[extractPdfsFromZip] maxEntries is 0 for ${zipFile.name}, skipping extraction.`);
-        return [];
-    }
-
-    const pdfFiles: File[] = [];
-    try {
-        // Convert Web ReadableStream from File into a Node.js Readable stream
-        const nodeStream: Readable = (Readable as unknown as { fromWeb(stream: ReadableStream): Readable }).fromWeb(
-            zipFile.stream() as unknown as ReadableStream
-        );
-
-        const directory = nodeStream.pipe((unzipper as unknown as typeof unzipper).Parse({ forceStream: true })) as unknown as AsyncIterable<{
-            path: string;
-            type: string;
-            autodrain: () => void;
-            [Symbol.asyncIterator]?: () => AsyncIterator<unknown>;
-        }>;
-
-        let extractedCount = 0;
-
-        for await (const entry of directory as AsyncIterable<any>) {
-            const entryPath: string = entry.path || "";
-            const lowerPath = entryPath.toLowerCase();
-
-            if (entry.type === "File" && lowerPath.endsWith(".pdf")) {
-                if (extractedCount >= maxEntries || extractedCount >= MAX_PDFS_PER_ZIP) {
-                    console.warn(`[extractPdfsFromZip] Reached max PDF limit for ${zipFile.name}, skipping remaining entries.`);
-                    entry.autodrain();
-                    continue;
-                }
-
-                extractedCount += 1;
-
-                const chunks: Uint8Array[] = [];
-                for await (const chunk of entry) {
-                    chunks.push(chunk as Uint8Array);
-                }
-
-                const buffer = Buffer.concat(chunks.map((c) => Buffer.from(c)));
-                const fileName = path.basename(entryPath) || `${zipFile.name.replace(/\.zip$/i, "")}_${extractedCount}.pdf`;
-
-                pdfFiles.push(new File([buffer], fileName, { type: "application/pdf" }));
-            } else {
-                entry.autodrain();
-            }
-        }
-
-        console.log(`[extractPdfsFromZip] Extracted ${pdfFiles.length} PDF(s) from ${zipFile.name}`);
-    } catch (error) {
-        console.error(`[extractPdfsFromZip] Failed to extract PDFs from ${zipFile.name}:`, error);
-    }
-
-    return pdfFiles;
 }
 
 function isRateLimitError(error: unknown): boolean {
@@ -1101,27 +1019,7 @@ export async function retryBatchSession(batchOrSessionId: string): Promise<{ ok:
     void (async () => {
         try {
             console.log(`[retryBatchSession] Starting retry for ${r2Keys.length} PDF(s) from R2...`);
-
-            const files: File[] = [];
-
-            for (const key of r2Keys) {
-                try {
-                    const file = await downloadPdfFromR2(key);
-                    files.push(file);
-                } catch (err) {
-                    console.error('[retryBatchSession] Failed to download PDF from R2 for key', key, err);
-                }
-            }
-
-            if (files.length === 0) {
-                console.error('[retryBatchSession] No PDFs could be downloaded from R2, aborting retry.');
-                return;
-            }
-
-            console.log(`[retryBatchSession] Downloaded ${files.length} PDF(s) from R2. Enqueuing new batch...`);
-
-            // Reuse the same background worker that handles normal uploads
-            await processBatchInBackground(files, user.id);
+            await processInvoicesFromR2Keys(r2Keys, user.id, null);
         } catch (err) {
             console.error('[retryBatchSession] Unexpected error while retrying batch session:', err);
         }
@@ -1189,6 +1087,13 @@ interface ExtractedFileItem {
     extractedData: ExtractedPdfData | null;
     error?: string; // Error during extraction or initial validation
     fileName: string; // Store filename for results
+}
+
+interface ExtractedR2KeyItem {
+    r2Key: string;
+    extractedData: ExtractedPdfData | null;
+    error?: string;
+    fileName: string;
 }
 
 // Type for the result of the transaction part of processing
@@ -3306,26 +3211,587 @@ async function processInvoicesWithDirectApi(
     return { overallSuccess, results: finalResultsWithBatch, batchId };
 }
 
-export async function createInvoiceFromFiles(
-    formDataWithFiles: FormData
+export async function processInvoicesFromR2Keys(
+    r2Keys: string[],
+    userId: string,
+    existingBatchId?: string | null
 ): Promise<{ overallSuccess: boolean; results: CreateInvoiceResult[]; batchId: string }> {
-    const files = formDataWithFiles.getAll("files") as File[];
-    if (!files || files.length === 0) {
-        throw new Error("No files provided.");
+    if (!Array.isArray(r2Keys) || r2Keys.length === 0) {
+        throw new Error("No R2 keys provided.");
     }
 
-    if (files.length > MAX_FILES_PER_UPLOAD) {
-        throw new Error(`Too many files. Maximum allowed is ${MAX_FILES_PER_UPLOAD}.`);
-    }
-    const totalBytes = files.reduce((sum, f) => sum + (typeof f.size === 'number' ? f.size : 0), 0);
-    if (totalBytes > MAX_TOTAL_UPLOAD_BYTES) {
-        throw new Error(`Total upload size exceeds ${Math.round(MAX_TOTAL_UPLOAD_BYTES / 1024 / 1024)}MB.`);
+    const { downloadFromR2AsStream } = await import("@/lib/storage/r2-client");
+
+    let batchId: string;
+    if (existingBatchId) {
+        batchId = existingBatchId;
+    } else {
+        batchId = await createBatchProcessing(r2Keys.length, undefined, userId);
     }
 
-    const user = await requireAuth();
-    const existingBatchId = formDataWithFiles.get("existingBatchId") as string | null;
+    // Persist keys for retry/debugging (upload route also does this; safe to overwrite)
+    await prisma.batchProcessing.update({
+        where: { id: batchId },
+        data: {
+            r2Keys,
+            totalFiles: r2Keys.length,
+            updatedAt: new Date(),
+        },
+    }).catch(() => { });
 
-    return await processInvoicesWithDirectApi(files, user.id, existingBatchId);
+    await updateBatchProgress(batchId, {
+        status: 'PROCESSING',
+        startedAt: new Date(),
+    });
+
+    let CONCURRENCY_LIMIT = r2Keys.length > 10
+        ? Math.min(4, Math.max(2, Math.ceil(r2Keys.length / 12)))
+        : Math.min(6, Math.max(2, Math.ceil(r2Keys.length / 6)));
+
+    const initialMemory = process.memoryUsage();
+    const isVeryLargeBatch = r2Keys.length >= 100;
+    const batchErrors: BatchErrorDetail[] = [];
+
+    const allExtractionResults: Array<ExtractedR2KeyItem> = [];
+
+    async function streamToBuffer(stream: NodeJS.ReadableStream): Promise<Buffer> {
+        const chunks: Buffer[] = [];
+        for await (const chunk of stream as AsyncIterable<unknown>) {
+            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as any));
+        }
+        return Buffer.concat(chunks);
+    }
+
+    for (let i = 0; i < r2Keys.length; i += CONCURRENCY_LIMIT) {
+        const keyChunk = r2Keys.slice(i, i + CONCURRENCY_LIMIT);
+
+        const currentKeyIndex = i + 1;
+        const estimatedTimePerFile = 30; // seconds
+        const remainingFiles = r2Keys.length - currentKeyIndex;
+        const estimatedCompletion = new Date(Date.now() + (remainingFiles * estimatedTimePerFile * 1000));
+
+        await updateBatchProgress(batchId, {
+            processedFiles: i,
+            currentFile: keyChunk.length > 0 ? (keyChunk[0].split('/').pop() || keyChunk[0]) : undefined,
+            estimatedCompletion,
+        });
+
+        const currentMemory = process.memoryUsage();
+        const heapUsedMB = Math.round(currentMemory.heapUsed / 1024 / 1024);
+        const memoryGrowthMB = Math.round((currentMemory.heapUsed - initialMemory.heapUsed) / 1024 / 1024);
+
+        if (heapUsedMB > 800 || memoryGrowthMB > 400) {
+            console.warn(`[Memory] High memory usage detected: ${heapUsedMB}MB heap (+${memoryGrowthMB}MB growth). Reducing concurrency.`);
+            CONCURRENCY_LIMIT = Math.max(1, Math.floor(CONCURRENCY_LIMIT * 0.6));
+            if (global.gc) global.gc();
+        }
+
+        if (isVeryLargeBatch && (i / Math.max(1, CONCURRENCY_LIMIT)) % 10 === 0 && i > 0) {
+            if (global.gc) global.gc();
+            // eslint-disable-next-line no-await-in-loop
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+
+        const chunkPromises = keyChunk.map(async (r2Key): Promise<ExtractedR2KeyItem> => {
+            const fileName = r2Key.split('/').pop() || 'invoice.pdf';
+            try {
+                const { stream } = await downloadFromR2AsStream(r2Key);
+                const buffer = await streamToBuffer(stream);
+                const file = new File([new Uint8Array(buffer)], fileName, { type: 'application/pdf' });
+
+                const validation = validateUploadFile(file);
+                if (!validation.valid) {
+                    return { r2Key, extractedData: null, error: validation.error || 'Invalid file', fileName };
+                }
+
+                const { extractedData, error: extractionError } = await callPdfExtractAPIWithRetry(file, batchErrors, 3);
+
+                if (extractionError) {
+                    return { r2Key, extractedData: extractedData ?? null, error: extractionError, fileName };
+                }
+
+                if (!extractedData) {
+                    return { r2Key, extractedData: null, error: "Failed to extract usable invoice data from PDF.", fileName };
+                }
+
+                if (!extractedData.invoiceCode || !extractedData.provider?.cif || !extractedData.issueDate || typeof extractedData.totalAmount !== 'number') {
+                    return { r2Key, extractedData, error: "Missing or invalid crucial invoice-level data after PDF extraction.", fileName };
+                }
+
+                try {
+                    new Date(extractedData.issueDate);
+                } catch {
+                    return { r2Key, extractedData, error: `Invalid issue date format: ${extractedData.issueDate}.`, fileName };
+                }
+
+                return { r2Key, extractedData, fileName };
+            } catch (topLevelError: unknown) {
+                const errorMessage = topLevelError instanceof Error ? topLevelError.message : "Unknown error during R2 download/extraction.";
+                return { r2Key, extractedData: null, error: errorMessage, fileName };
+            }
+        });
+
+        const chunkResults = await Promise.all(chunkPromises);
+        allExtractionResults.push(...chunkResults);
+    }
+
+    const finalResults: CreateInvoiceResult[] = [];
+    const processableItems: ExtractedR2KeyItem[] = [];
+
+    for (const item of allExtractionResults) {
+        if (item.error) {
+            pushBatchError(batchErrors, {
+                kind: 'EXTRACTION_ERROR',
+                message: item.error,
+                fileName: item.fileName,
+                invoiceCode: item.extractedData?.invoiceCode,
+            });
+            finalResults.push({ success: false, message: item.error, fileName: item.fileName });
+        } else if (item.extractedData) {
+            processableItems.push(item);
+        }
+    }
+
+    processableItems.sort((a, b) => {
+        const dateA = a.extractedData?.issueDate ? new Date(a.extractedData.issueDate).getTime() : 0;
+        const dateB = b.extractedData?.issueDate ? new Date(b.extractedData.issueDate).getTime() : 0;
+        if (dateA === 0 || dateB === 0) return 0;
+        return dateA - dateB;
+    });
+
+    const uniqueProviders = new Map<string, ExtractedPdfData['provider']>();
+    for (const item of processableItems) {
+        if (item.extractedData?.provider?.cif) {
+            const key = item.extractedData.provider.cif;
+            if (!uniqueProviders.has(key)) uniqueProviders.set(key, item.extractedData.provider);
+        }
+    }
+
+    const providerCache = new Map<string, string>();
+    for (const [cif, providerData] of uniqueProviders.entries()) {
+        try {
+            const provider = await prisma.$transaction(async (tx) => {
+                return await findOrCreateProviderTx(tx, providerData, userId);
+            });
+            providerCache.set(cif, provider.id);
+        } catch (error) {
+            console.error(`Failed to pre-process provider ${providerData.name} (${cif}):`, error);
+        }
+    }
+
+    console.log("Pre-loading existing materials for faster lookup...");
+    const referencedCodes = new Set<string>();
+    for (const item of processableItems) {
+        const items = item.extractedData?.items ?? [];
+        for (const it of items) {
+            if (it.materialCode && it.materialCode !== 'null') {
+                referencedCodes.add(normalizeMaterialCode(it.materialCode));
+            }
+        }
+    }
+
+    let existingMaterials = await prisma.material.findMany({
+        select: { id: true, name: true, code: true, referenceCode: true, category: true },
+        where: {
+            userId: userId,
+            OR: referencedCodes.size > 0 ? [
+                { code: { in: Array.from(referencedCodes) } },
+                { referenceCode: { in: Array.from(referencedCodes) } },
+            ] : undefined,
+        },
+        take: referencedCodes.size > 0 ? undefined : 300,
+        orderBy: referencedCodes.size > 0 ? undefined : { updatedAt: 'desc' },
+    });
+
+    if (existingMaterials.length === 0) {
+        existingMaterials = await prisma.material.findMany({
+            select: { id: true, name: true, code: true, referenceCode: true, category: true },
+            where: { userId: userId },
+            take: 300,
+            orderBy: { updatedAt: 'desc' },
+        });
+    }
+
+    const materialCache = new Map<string, { id: string; name: string; code: string; referenceCode: string | null; category: string | null }>();
+    for (const material of existingMaterials) {
+        const normalizedName = material.name.toLowerCase().trim();
+        materialCache.set(`name:${normalizedName}`, material);
+        if (material.code) materialCache.set(`code:${material.code}`, material);
+        if (material.referenceCode) materialCache.set(`ref:${material.referenceCode}`, material);
+    }
+
+    const DB_CONCURRENCY_LIMIT = 1;
+    const dbResults: CreateInvoiceResult[] = [];
+    let consecutiveFailures = 0;
+    const MAX_CONSECUTIVE_FAILURES = 5;
+    let circuitBreakerTripped = false;
+
+    for (let i = 0; i < processableItems.length; i += DB_CONCURRENCY_LIMIT) {
+        const chunk = processableItems.slice(i, i + DB_CONCURRENCY_LIMIT);
+
+        const chunkPromises = chunk.map(async (item): Promise<CreateInvoiceResult> => {
+            const { extractedData, fileName } = item;
+            if (!extractedData) {
+                return { success: false, message: "No extracted data", fileName: fileName };
+            }
+
+            await updateBatchProgress(batchId, { currentFile: fileName });
+
+            const maxRetries = 3;
+            let lastError: unknown = null;
+
+            for (let attempt = 1; attempt <= maxRetries; attempt++) {
+                try {
+                    const itemCount = extractedData.items?.length || 0;
+                    const isLargeInvoice = itemCount > 50;
+                    const isVeryLargeInvoice = itemCount > 200;
+                    const baseTimeout = isVeryLargeInvoice ? 1800000 : isLargeInvoice ? 900000 : 300000;
+                    const transactionTimeout = Math.min(baseTimeout, 1800000);
+
+                    const totalsCheck = evaluateTotalsMismatch(extractedData.items ?? [], extractedData.totalAmount, { ivaPercentage: extractedData.ivaPercentage, retentionAmount: extractedData.retentionAmount });
+                    const validationWarnings: BatchErrorDetail[] = totalsCheck.hasMismatch ? [
+                        {
+                            kind: 'VALIDATION_ERROR',
+                            message: buildTotalsMismatchMessage(extractedData.invoiceCode, totalsCheck, extractedData.totalAmount),
+                            fileName,
+                            invoiceCode: extractedData.invoiceCode,
+                            timestamp: new Date().toISOString(),
+                        }
+                    ] : [];
+
+                    const operationResult: TransactionOperationResult = await prisma.$transaction(async (tx) => {
+                        let provider;
+                        const cachedProviderId = extractedData.provider.cif ? providerCache.get(extractedData.provider.cif) : undefined;
+
+                        if (cachedProviderId) {
+                            provider = await tx.provider.findUnique({ where: { id: cachedProviderId } });
+                            if (!provider || provider.userId !== userId) {
+                                provider = await findOrCreateProviderTx(tx, extractedData.provider, userId);
+                            }
+                        } else {
+                            provider = await findOrCreateProviderTx(tx, extractedData.provider, userId);
+                        }
+
+                        const existingInvoice = await tx.invoice.findFirst({
+                            where: { invoiceCode: extractedData.invoiceCode, providerId: provider.id },
+                            select: { id: true, originalFileName: true }
+                        });
+
+                        if (existingInvoice) {
+                            const originalFile = existingInvoice.originalFileName ?? 'Archivo desconocido';
+                            const currentFile = fileName;
+                            const duplicateMessage = `Factura Duplicada - ${extractedData.invoiceCode} - Archivo original: ${originalFile}, Archivo duplicado: ${currentFile}`;
+                            pushBatchError(batchErrors, {
+                                kind: 'DUPLICATE_INVOICE',
+                                message: duplicateMessage,
+                                fileName,
+                                invoiceCode: extractedData.invoiceCode,
+                            });
+                            return {
+                                success: true,
+                                message: duplicateMessage,
+                                invoiceId: existingInvoice.id,
+                                alertsCreated: 0,
+                                isExisting: true,
+                                hasTotalsMismatch: totalsCheck.hasMismatch,
+                                validationErrors: validationWarnings.length > 0 ? validationWarnings : undefined,
+                            };
+                        }
+
+                        const invoice = await tx.invoice.create({
+                            data: {
+                                invoiceCode: extractedData.invoiceCode,
+                                providerId: provider.id,
+                                issueDate: new Date(extractedData.issueDate),
+                                totalAmount: new Prisma.Decimal(extractedData.totalAmount.toFixed(2)),
+                                ivaPercentage: new Prisma.Decimal(extractedData.ivaPercentage.toFixed(2)),
+                                retentionAmount: new Prisma.Decimal(extractedData.retentionAmount.toFixed(2)),
+                                originalFileName: fileName,
+                                status: "PROCESSED",
+                                hasTotalsMismatch: totalsCheck.hasMismatch,
+                            },
+                        });
+
+                        let alertsCounter = 0;
+                        const currentInvoiceIssueDate = new Date(extractedData.issueDate);
+                        const intraInvoiceMaterialPriceHistory = new Map<string, { price: Prisma.Decimal; date: Date; invoiceItemId: string }>();
+
+                        const workOrdersInInvoice = new Set<string>();
+                        for (const item of extractedData.items) {
+                            if (item.workOrder && item.workOrder.trim()) {
+                                workOrdersInInvoice.add(item.workOrder.trim());
+                            }
+                        }
+
+                        let invoiceWorkOrder: string | null = null;
+                        if (workOrdersInInvoice.size > 0) {
+                            invoiceWorkOrder = Array.from(workOrdersInInvoice)[0];
+                            if (workOrdersInInvoice.size > 1) {
+                                console.warn(`[Invoice ${extractedData.invoiceCode}] Multiple work orders found in invoice: ${Array.from(workOrdersInInvoice).join(', ')}. Using: ${invoiceWorkOrder}`);
+                            }
+                        }
+
+                        if (invoiceWorkOrder) {
+                            for (const item of extractedData.items) {
+                                if (!item.workOrder || item.workOrder.trim() === '') {
+                                    item.workOrder = invoiceWorkOrder;
+                                }
+                            }
+                        }
+
+                        const ITEM_CHUNK_SIZE = isVeryLargeInvoice ? 15 : isLargeInvoice ? 30 : 999;
+                        const itemChunks = [];
+                        for (let i = 0; i < extractedData.items.length; i += ITEM_CHUNK_SIZE) {
+                            itemChunks.push(extractedData.items.slice(i, i + ITEM_CHUNK_SIZE));
+                        }
+
+                        console.log(`[Invoice ${invoice.invoiceCode}] Processing ${extractedData.items.length} items in ${itemChunks.length} chunk(s) (chunk size: ${ITEM_CHUNK_SIZE})`);
+
+                        for (let chunkIndex = 0; chunkIndex < itemChunks.length; chunkIndex++) {
+                            const itemChunk = itemChunks[chunkIndex];
+
+                            if (isLargeInvoice && chunkIndex > 0) {
+                                await new Promise(resolve => setTimeout(resolve, isVeryLargeInvoice ? 50 : 100));
+                            }
+
+                            for (const itemData of itemChunk) {
+                                if (!itemData.materialName) {
+                                    console.warn(`Skipping item due to missing material name in invoice ${invoice.invoiceCode} from file ${fileName}`);
+                                    continue;
+                                }
+
+                                if (typeof itemData.quantity !== 'number' || isNaN(itemData.quantity)) {
+                                    console.warn(`Skipping item due to invalid or missing quantity in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}, Quantity: ${itemData.quantity}`);
+                                    continue;
+                                }
+
+                                if (typeof itemData.unitPrice !== 'number' || isNaN(itemData.unitPrice)) {
+                                    console.warn(`Missing or invalid unit price for item in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}. Defaulting to 0.`);
+                                    itemData.unitPrice = 0;
+                                }
+                                if (typeof itemData.totalPrice !== 'number' || isNaN(itemData.totalPrice)) {
+                                    console.warn(`Missing or invalid total price for item in invoice ${invoice.invoiceCode} from file ${fileName}. Material: ${itemData.materialName}. Defaulting to 0.`);
+                                    itemData.totalPrice = 0;
+                                }
+
+                                if (typeof itemData.listPrice !== 'number' || isNaN(itemData.listPrice)) {
+                                    itemData.listPrice = itemData.unitPrice;
+                                }
+
+                                if (typeof itemData.discountPercentage !== 'number' || isNaN(itemData.discountPercentage)) {
+                                    itemData.discountPercentage = 0;
+                                }
+
+                                const isMaterialItem = typeof itemData.isMaterial === 'boolean' ? itemData.isMaterial : true;
+
+                                if (!isMaterialItem) {
+                                    const quantityDecimal = new Prisma.Decimal(itemData.quantity.toFixed(3));
+                                    const listPriceDecimal = typeof itemData.listPrice === 'number' && !isNaN(itemData.listPrice)
+                                        ? new Prisma.Decimal(itemData.listPrice.toFixed(3))
+                                        : null;
+                                    const discountPercentageDecimal = typeof itemData.discountPercentage === 'number' && !isNaN(itemData.discountPercentage)
+                                        ? new Prisma.Decimal(itemData.discountPercentage.toFixed(2))
+                                        : null;
+                                    const currentUnitPriceDecimal = new Prisma.Decimal(itemData.unitPrice.toFixed(3));
+                                    const totalPriceDecimal = new Prisma.Decimal(itemData.totalPrice.toFixed(3));
+                                    const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
+
+                                    await tx.invoiceItem.create({
+                                        data: {
+                                            invoiceId: invoice.id,
+                                            materialId: (await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache, userId)).id,
+                                            quantity: quantityDecimal,
+                                            listPrice: listPriceDecimal,
+                                            discountPercentage: discountPercentageDecimal,
+                                            discountRaw: itemData.discountRaw || null,
+                                            unitPrice: currentUnitPriceDecimal,
+                                            totalPrice: totalPriceDecimal,
+                                            itemDate: effectiveItemDate,
+                                            workOrder: itemData.workOrder || null,
+                                        },
+                                    });
+                                    continue;
+                                }
+
+                                let material: Material;
+                                try {
+                                    material = await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache, userId);
+                                } catch (materialError) {
+                                    console.error(`Error creating/finding material '${itemData.materialName}' in invoice ${invoice.invoiceCode}:`, materialError);
+                                    throw new Error(`Failed to process material '${itemData.materialName}': ${materialError instanceof Error ? materialError.message : 'Unknown error'}`);
+                                }
+                                const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
+                                const currentItemUnitPrice = new Prisma.Decimal(itemData.unitPrice.toFixed(3));
+
+                                const lastSeenPriceRecordInThisInvoice = intraInvoiceMaterialPriceHistory.get(material.id);
+
+                                if (lastSeenPriceRecordInThisInvoice) {
+                                    if (effectiveItemDate.getTime() >= lastSeenPriceRecordInThisInvoice.date.getTime() &&
+                                        !currentItemUnitPrice.equals(lastSeenPriceRecordInThisInvoice.price)) {
+
+                                        const priceDiff = currentItemUnitPrice.minus(lastSeenPriceRecordInThisInvoice.price);
+                                        let percentageChangeDecimal: Prisma.Decimal;
+                                        if (!lastSeenPriceRecordInThisInvoice.price.isZero()) {
+                                            percentageChangeDecimal = priceDiff.dividedBy(lastSeenPriceRecordInThisInvoice.price).times(100);
+                                        } else {
+                                            percentageChangeDecimal = new Prisma.Decimal(currentItemUnitPrice.isPositive() ? 9999 : -9999);
+                                        }
+
+                                        try {
+                                            await tx.priceAlert.create({
+                                                data: {
+                                                    materialId: material.id,
+                                                    providerId: provider.id,
+                                                    oldPrice: lastSeenPriceRecordInThisInvoice.price,
+                                                    newPrice: currentItemUnitPrice,
+                                                    percentage: percentageChangeDecimal,
+                                                    status: "PENDING",
+                                                    effectiveDate: effectiveItemDate,
+                                                    invoiceId: invoice.id,
+                                                },
+                                            });
+                                            alertsCounter++;
+                                        } catch (alertError) {
+                                            if (typeof alertError === 'object' && alertError !== null && 'code' in alertError &&
+                                                (alertError as { code: string }).code === 'P2002') {
+                                            } else {
+                                                throw alertError;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                const { invoiceItem, alert: interInvoiceAlert } = await processInvoiceItemTx(
+                                    tx,
+                                    itemData,
+                                    invoice.id,
+                                    currentInvoiceIssueDate,
+                                    provider.id,
+                                    material,
+                                    isMaterialItem
+                                );
+
+                                if (interInvoiceAlert) {
+                                    alertsCounter++;
+                                }
+
+                                if (isMaterialItem) {
+                                    intraInvoiceMaterialPriceHistory.set(material.id, {
+                                        price: invoiceItem.unitPrice,
+                                        date: invoiceItem.itemDate,
+                                        invoiceItemId: invoiceItem.id
+                                    });
+                                }
+                            }
+                        }
+
+                        return {
+                            success: true,
+                            message: `Invoice ${invoice.invoiceCode} created successfully.`,
+                            invoiceId: invoice.id,
+                            alertsCreated: alertsCounter,
+                            isExisting: false,
+                            hasTotalsMismatch: totalsCheck.hasMismatch,
+                            validationErrors: validationWarnings.length > 0 ? validationWarnings : undefined,
+                        };
+                    }, {
+                        timeout: transactionTimeout,
+                        maxWait: 300000
+                    });
+
+                    return {
+                        success: operationResult.success,
+                        message: operationResult.message,
+                        invoiceId: operationResult.invoiceId,
+                        alertsCreated: operationResult.alertsCreated,
+                        fileName: fileName,
+                        isDuplicate: operationResult.isExisting,
+                        hasTotalsMismatch: operationResult.hasTotalsMismatch,
+                        validationErrors: operationResult.validationErrors,
+                    };
+                } catch (error) {
+                    lastError = error;
+                    if (attempt < maxRetries) {
+                        await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+                        continue;
+                    }
+                }
+            }
+
+            const msg = lastError instanceof Error ? lastError.message : "Unknown error during invoice persistence.";
+            pushBatchError(batchErrors, {
+                kind: 'DATABASE_ERROR',
+                message: msg,
+                fileName,
+                invoiceCode: extractedData.invoiceCode,
+            });
+            return { success: false, message: msg, fileName };
+        });
+
+        const chunkDbResults = await Promise.all(chunkPromises);
+        dbResults.push(...chunkDbResults);
+
+        const failuresInChunk = chunkDbResults.filter(r => !r.success && !r.isBlockedProvider).length;
+        if (failuresInChunk > 0) {
+            consecutiveFailures += failuresInChunk;
+            if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+                circuitBreakerTripped = true;
+                const remainingItems = processableItems.slice(i + DB_CONCURRENCY_LIMIT);
+                for (const item of remainingItems) {
+                    dbResults.push({
+                        success: false,
+                        message: `Processing stopped due to circuit breaker (${consecutiveFailures} consecutive failures)`,
+                        fileName: item.fileName
+                    });
+                }
+                break;
+            }
+        } else {
+            consecutiveFailures = 0;
+        }
+    }
+
+    finalResults.push(...dbResults);
+
+    const finalResultsWithBatch = finalResults.map(result => ({
+        ...result,
+        batchId
+    }));
+
+    const successfulInvoices = finalResultsWithBatch.filter(r => r.success && !r.message.includes("already exists"));
+    const duplicateInvoices = finalResultsWithBatch.filter(r => r.success && r.message.includes("already exists"));
+    const failedInvoices = finalResultsWithBatch.filter(r => !r.success && !r.isBlockedProvider);
+    const blockedInvoices = finalResultsWithBatch.filter(r => r.isBlockedProvider);
+
+    const overallSuccess = finalResultsWithBatch.every(r => r.success);
+    const finalStatus: BatchStatus = circuitBreakerTripped ? 'FAILED' : (overallSuccess ? 'COMPLETED' : 'COMPLETED');
+    const totalFailed = failedInvoices.length + blockedInvoices.length;
+
+    await updateBatchProgress(batchId, {
+        status: finalStatus,
+        processedFiles: r2Keys.length,
+        successfulFiles: successfulInvoices.length + duplicateInvoices.length,
+        failedFiles: totalFailed,
+        blockedFiles: blockedInvoices.length,
+        completedAt: new Date(),
+        errors: batchErrors.length > 0 ? batchErrors : undefined,
+    });
+
+    const newlyCreatedInvoices = finalResultsWithBatch.filter(r => r.success && r.invoiceId && !r.message.includes("already exists"));
+    if (newlyCreatedInvoices.length > 0) {
+        revalidatePath("/facturas");
+        if (newlyCreatedInvoices.some(r => r.alertsCreated && r.alertsCreated > 0)) {
+            revalidatePath("/alertas");
+        }
+    }
+
+    if (Math.random() < 0.1) {
+        cleanupOldBatches().catch(error => {
+            console.error("Background cleanup failed:", error);
+        });
+    }
+
+    return { overallSuccess, results: finalResultsWithBatch, batchId };
 }
 
 // Manual invoice creation function for form submissions
@@ -4300,201 +4766,6 @@ export async function updateInvoiceAction(payload: UpdateInvoiceInput): Promise<
 }
 
 // ---------------------------------------------------------------------------
-// 🚀  Server Action: kick off Batch job (returns immediately)
-// ---------------------------------------------------------------------------
-
-export async function startInvoiceBatch(formDataWithFiles: FormData): Promise<{ batchId: string }> {
-    try {
-        const files = formDataWithFiles.getAll('files') as File[];
-        console.log(`[startInvoiceBatch] Received ${files?.length || 0} files`);
-
-        if (!files || files.length === 0) {
-            console.error('[startInvoiceBatch] No files provided in FormData');
-            throw new Error('No files provided.');
-        }
-        const totalBytes = files.reduce((sum, f) => sum + (typeof f.size === 'number' ? f.size : 0), 0);
-        if (totalBytes > MAX_TOTAL_UPLOAD_BYTES) {
-            console.error(`[startInvoiceBatch] Total size exceeds limit: ${totalBytes} > ${MAX_TOTAL_UPLOAD_BYTES}`);
-            throw new Error(`Total upload size exceeds ${Math.round(MAX_TOTAL_UPLOAD_BYTES / 1024 / 1024)}MB.`);
-        }
-
-        // Separate PDFs and ZIPs
-        const pdfUploads: File[] = [];
-        const zipUploads: File[] = [];
-
-        for (const file of files) {
-            if (isZipFile(file)) {
-                const zipValidation = validateZipFile(file);
-                if (!zipValidation.valid) {
-                    console.warn(`[startInvoiceBatch] Invalid ZIP skipped (${file.name}): ${zipValidation.error}`);
-                    continue;
-                }
-                zipUploads.push(file);
-            } else if (isPdfFile(file)) {
-                pdfUploads.push(file);
-            } else {
-                console.warn(`[startInvoiceBatch] Unsupported file type skipped: ${file.name} (${file.type})`);
-            }
-        }
-
-        // Expand ZIP archives into individual PDF files without loading everything into memory at once
-        const expandedPdfs: File[] = [];
-        let remainingCapacity = MAX_FILES_PER_UPLOAD - pdfUploads.length;
-
-        if (remainingCapacity <= 0 && zipUploads.length > 0) {
-            console.warn(`[startInvoiceBatch] PDF upload capacity (${MAX_FILES_PER_UPLOAD}) already reached with direct PDFs, ZIPs will be ignored.`);
-        } else {
-            for (const zip of zipUploads) {
-                if (remainingCapacity <= 0) break;
-
-                const extracted = await extractPdfsFromZip(zip, remainingCapacity);
-                expandedPdfs.push(...extracted);
-                remainingCapacity = MAX_FILES_PER_UPLOAD - (pdfUploads.length + expandedPdfs.length);
-
-                if (remainingCapacity <= 0) {
-                    console.warn(`[startInvoiceBatch] Reached max PDF capacity (${MAX_FILES_PER_UPLOAD}) while expanding ZIPs. Remaining ZIP contents will be ignored.`);
-                    break;
-                }
-            }
-        }
-
-        const allPdfCandidates = [...pdfUploads, ...expandedPdfs];
-
-        if (allPdfCandidates.length === 0) {
-            console.error('[startInvoiceBatch] No valid PDF files found after filtering and ZIP expansion');
-            throw new Error('No valid PDF files to process. Upload PDFs directly or ZIP files that contain PDFs.');
-        }
-
-        // Final validation on PDFs (size, emptiness)
-        const validFiles = allPdfCandidates.filter(f => validateUploadFile(f).valid);
-        const invalidPdfCount = allPdfCandidates.length - validFiles.length;
-        if (invalidPdfCount > 0) {
-            console.warn(`[startInvoiceBatch] ${invalidPdfCount} invalid PDF(s) filtered out after ZIP expansion`);
-        }
-        if (validFiles.length === 0) {
-            console.error('[startInvoiceBatch] No valid PDFs after validation');
-            throw new Error('No valid PDF files to process after validation. Ensure PDFs are under the size limit and not empty.');
-        }
-
-        // Get authenticated user for batch ownership
-        const user = await requireAuth();
-        console.log(`[startInvoiceBatch] User authenticated: ${user.id}`);
-
-        // 1️⃣  Generate a temporary id so the client can detect "batch mode". We do
-        //     NOT persist it, thus it will not contribute to banner counts.
-        const { randomUUID } = await import('crypto');
-        const tempId = `temp-${randomUUID()}`;
-
-        // 2️⃣  Launch heavy work in background (no await).
-        void processBatchInBackground(validFiles, user.id).catch((err) => {
-            console.error('[startInvoiceBatch] ❌ Background batch processing failed:', err);
-            console.error('[startInvoiceBatch] Error stack:', err instanceof Error ? err.stack : 'No stack trace');
-        });
-
-        console.log(`[startInvoiceBatch] ✅ Returning tempId ${tempId}, background processing started`);
-        // 3️⃣  Return the temporary id immediately.
-        return { batchId: tempId };
-    } catch (error) {
-        console.error('[startInvoiceBatch] ❌ Error in startInvoiceBatch:', error);
-        console.error('[startInvoiceBatch] Error details:', {
-            message: error instanceof Error ? error.message : 'Unknown error',
-            stack: error instanceof Error ? error.stack : 'No stack trace',
-        });
-        throw error;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 🏃‍♂️  Background worker — performs the heavy work and creates real Batch jobs
-// ---------------------------------------------------------------------------
-
-async function processBatchInBackground(files: File[], userId: string) {
-    console.log(`[processBatchInBackground] 🚀 Starting background processing for ${files.length} files, userId: ${userId}`);
-
-    let batchId: string | null = null;
-
-    try {
-        console.log('[processBatchInBackground] Step 0: Checking R2 configuration...');
-        const r2Keys: string[] = [];
-        const r2Enabled = isR2Configured();
-
-        if (r2Enabled) {
-            console.log('[processBatchInBackground] R2 configured, uploading PDFs for permanent storage');
-            const tempBatchId = `batch-${Date.now()}`;
-
-            try {
-                const uploadPromises = files.map(async (file) => {
-                    const result = await uploadPdfToR2(file, tempBatchId);
-                    return result.key;
-                });
-                const keys = await Promise.all(uploadPromises);
-                r2Keys.push(...keys);
-                console.log(`[processBatchInBackground] Uploaded ${r2Keys.length} PDFs to R2 for permanent storage`);
-            } catch (r2Error) {
-                console.error('[processBatchInBackground] Failed to upload PDFs to R2:', r2Error);
-                // Continue without retry capability if R2 upload fails
-            }
-        } else {
-            console.log('[processBatchInBackground] R2 not configured, skipping PDF upload (no retry capability)');
-        }
-
-        const directResult = await processInvoicesWithDirectApi(files, userId, null);
-        batchId = directResult.batchId;
-
-        if (batchId && r2Enabled && r2Keys.length > 0) {
-            await prisma.batchProcessing.update({
-                where: { id: batchId },
-                data: { r2Keys: r2Keys },
-            });
-        }
-    } catch (err) {
-        console.error('[processBatchInBackground] Failed to enqueue batches', err);
-
-        if (batchId) {
-            const errorMsg = err instanceof Error ? err.message : 'Unknown error during batch processing';
-            await updateBatchProgress(batchId, {
-                status: 'FAILED',
-                errors: [
-                    {
-                        kind: 'DATABASE_ERROR',
-                        message: errorMsg,
-                        timestamp: new Date().toISOString(),
-                    },
-                ],
-                completedAt: new Date(),
-                failedFiles: files.length,
-            }).catch((updateErr) => {
-                console.error('[processBatchInBackground] Failed to update batch record with error:', updateErr);
-            });
-        }
-    } finally {
-        // Clean up temporary directory after processing
-        try {
-            const tmpDir = path.join(os.tmpdir(), 'facturas-batch');
-            if (fs.existsSync(tmpDir)) {
-                const files = await fs.promises.readdir(tmpDir);
-                const oneHourAgo = Date.now() - 60 * 60 * 1000;
-                for (const file of files) {
-                    try {
-                        const filePath = path.join(tmpDir, file);
-                        const stats = await fs.promises.stat(filePath);
-                        //do not delete in development to allow inspection
-                        if (process.env.NODE_ENV !== 'development') {
-                            if (stats.isFile() && stats.mtime.getTime() < oneHourAgo) {
-                                await fs.promises.unlink(filePath);
-                                console.log(`[processBatchInBackground] Cleaned up old tmp file: ${file}`);
-                            }
-                        }
-                    } catch { }
-                }
-            }
-        } catch (cleanupErr) {
-            console.warn('[processBatchInBackground] Failed to cleanup tmp directory:', cleanupErr);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Helper to download and persist results of a completed batch
 // ---------------------------------------------------------------------------
 
@@ -5158,9 +5429,6 @@ export async function cancelAllBatches(): Promise<{ success: boolean; message: s
 
         for (const batch of activeBatches) {
             try {
-                // Call Gemini API to cancel the batch
-                await gemini.batches.cancel({ name: batch.id });
-
                 // Update batch status in database
                 await updateBatchProgress(batch.id, {
                     status: 'CANCELLED',
@@ -5265,10 +5533,8 @@ export async function cancelBatchSession(batchOrSessionId: string): Promise<{ su
 
         for (const batch of targetBatches) {
             try {
-                // Attempt to cancel the remote Gemini batch; if it fails, we still mark local as cancelled
-                await gemini.batches.cancel({ name: batch.id });
             } catch (error) {
-                console.error(`[cancelBatchSession] Failed to cancel remote batch ${batch.id}:`, error);
+                // No remote cancellation anymore (streaming/direct pipeline)
             }
 
             try {

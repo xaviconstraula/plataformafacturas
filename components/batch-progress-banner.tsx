@@ -213,16 +213,20 @@ export function BatchProgressBanner() {
                 completedNow.forEach(b => shownNotificationsRef.current.add(b.id))
             })
 
-            // For sessions without errors, show a success toast once
-            const successOnly = completedNow.filter(b => (b.failedFiles || 0) === 0 && (b.errors?.length || 0) === 0)
+            // For sessions without errors, show a success toast once.
+            // IMPORTANT: only for COMPLETED batches; FAILED with missing error metadata would otherwise loop.
+            const successOnly = completedNow.filter(b =>
+                b.status === 'COMPLETED' &&
+                (b.failedFiles || 0) === 0 &&
+                (b.errors?.length || 0) === 0
+            )
             if (successOnly.length > 0) {
                 const totalSuccess = successOnly.reduce((sum, b) => sum + (b.successfulFiles || 0), 0)
                 toast.success("Procesamiento completado", {
                     description: `${totalSuccess} facturas procesadas exitosamente. Recargando página...`
                 })
-                setTimeout(() => {
-                    window.location.reload()
-                }, 1000)
+                // Avoid hard reload loops; data is already refreshed via polling.
+                queryClient.invalidateQueries()
             }
         }
 

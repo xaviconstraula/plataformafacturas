@@ -1,4 +1,6 @@
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { Readable } from "stream";
+import { Upload } from "@aws-sdk/lib-storage";
 
 // Initialize R2 client with S3-compatible API
 const r2Client = new S3Client({
@@ -13,6 +15,69 @@ const r2Client = new S3Client({
 const BUCKET_NAME = process.env.R2_BUCKET_NAME || 'invoice-retries';
 const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL; // Optional: Custom domain for R2 bucket
 
+export interface UploadToR2Params {
+    key: string;
+    body: Readable | Uint8Array | Buffer | string;
+    contentType: string;
+    metadata?: Record<string, string>;
+}
+
+export interface DownloadFromR2StreamResult {
+    stream: Readable;
+    contentType?: string;
+    contentLength?: number;
+}
+
+export async function uploadToR2(params: UploadToR2Params): Promise<void> {
+    // Cloudflare R2 can reject aws-chunked uploads where decoded length is unknown.
+    // For streams, use multipart upload to avoid `x-amz-decoded-content-length: undefined`.
+    if (params.body instanceof Readable) {
+        const uploader = new Upload({
+            client: r2Client,
+            queueSize: 2,
+            partSize: 8 * 1024 * 1024,
+            leavePartsOnError: false,
+            params: {
+                Bucket: BUCKET_NAME,
+                Key: params.key,
+                Body: params.body,
+                ContentType: params.contentType,
+                Metadata: params.metadata,
+            },
+        });
+        await uploader.done();
+        return;
+    }
+
+    await r2Client.send(new PutObjectCommand({
+        Bucket: BUCKET_NAME,
+        Key: params.key,
+        Body: params.body,
+        ContentType: params.contentType,
+        Metadata: params.metadata,
+    }));
+}
+
+export async function downloadFromR2AsStream(key: string): Promise<DownloadFromR2StreamResult> {
+    const response = await r2Client.send(new GetObjectCommand({
+        Bucket: BUCKET_NAME,
+        Key: key,
+    }));
+
+    if (!response.Body) {
+        throw new Error(`No body in R2 response for key: ${key}`);
+    }
+
+    // AWS SDK v3 returns a Node stream in Node runtime; type is broader.
+    const stream = response.Body as unknown as Readable;
+
+    return {
+        stream,
+        contentType: typeof response.ContentType === 'string' ? response.ContentType : undefined,
+        contentLength: typeof response.ContentLength === 'number' ? response.ContentLength : undefined,
+    };
+}
+
 /**
  * Upload a PDF file to Cloudflare R2 for permanent storage
  * @param file - PDF file to upload
@@ -22,18 +87,16 @@ const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL; // Optional: Custom domain for 
 export async function uploadPdfToR2(file: File, batchId: string): Promise<{ key: string; url: string }> {
     const key = `${batchId}/${file.name}`;
     const buffer = Buffer.from(await file.arrayBuffer());
-
-    await r2Client.send(new PutObjectCommand({
-        Bucket: BUCKET_NAME,
-        Key: key,
-        Body: buffer,
-        ContentType: 'application/pdf',
-        Metadata: {
+    await uploadToR2({
+        key,
+        body: buffer,
+        contentType: 'application/pdf',
+        metadata: {
             uploadedAt: new Date().toISOString(),
             batchId: batchId,
             originalFileName: file.name,
         },
-    }));
+    });
 
     const url = getPublicUrl(key);
     return { key, url };
@@ -45,19 +108,19 @@ export async function uploadPdfToR2(file: File, batchId: string): Promise<{ key:
  * @returns File object reconstructed from R2
  */
 export async function downloadPdfFromR2(key: string): Promise<File> {
-    const response = await r2Client.send(new GetObjectCommand({
-        Bucket: BUCKET_NAME,
-        Key: key,
-    }));
-
-    if (!response.Body) {
-        throw new Error(`No body in R2 response for key: ${key}`);
-    }
-
-    const buffer = Buffer.from(await response.Body.transformToByteArray());
+    const { stream } = await downloadFromR2AsStream(key);
+    const buffer = Buffer.from(await streamToByteArray(stream));
     const fileName = key.split('/').pop() || 'invoice.pdf';
 
     return new File([buffer], fileName, { type: 'application/pdf' });
+}
+
+async function streamToByteArray(stream: Readable): Promise<Uint8Array> {
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
 }
 
 /**
