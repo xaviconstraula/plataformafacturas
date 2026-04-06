@@ -221,7 +221,14 @@ export const POST = withAuthHandler(async (request: NextRequest, user) => {
           await persistKeysAndCounts();
         }
       })().catch((err) => {
-        parseError = err instanceof Error ? err : new Error(String(err));
+        const e = err instanceof Error ? err : new Error(String(err));
+        parseError = e;
+        console.error("[api/invoices/upload] File upload pipeline failed:", {
+          batchId,
+          fileName: name,
+          message: e.message,
+          stack: e.stack,
+        });
         fileStream.resume();
       })
     );
@@ -232,7 +239,13 @@ export const POST = withAuthHandler(async (request: NextRequest, user) => {
   });
 
   bb.on("error", (err) => {
-    parseError = err instanceof Error ? err : new Error(String(err));
+    const e = err instanceof Error ? err : new Error(String(err));
+    parseError = e;
+    console.error("[api/invoices/upload] Busboy parse error:", {
+      batchId,
+      message: e.message,
+      stack: e.stack,
+    });
   });
 
   bb.on("finish", () => {
@@ -245,7 +258,13 @@ export const POST = withAuthHandler(async (request: NextRequest, user) => {
   });
 
   nodeStream.on("error", (err) => {
-    parseError = err instanceof Error ? err : new Error(String(err));
+    const e = err instanceof Error ? err : new Error(String(err));
+    parseError = e;
+    console.error("[api/invoices/upload] Request body stream error:", {
+      batchId,
+      message: e.message,
+      stack: e.stack,
+    });
   });
 
   nodeStream.pipe(bb);
@@ -256,11 +275,23 @@ export const POST = withAuthHandler(async (request: NextRequest, user) => {
     await new Promise((r) => setTimeout(r, 25));
     if (bytesSeenTotal > MAX_FILES_PER_UPLOAD * MAX_UPLOAD_FILE_SIZE) {
       parseError = new Error("Upload too large.");
+      console.error("[api/invoices/upload] Upload exceeded guard limit:", {
+        batchId,
+        bytesSeenTotal,
+        limitBytes: MAX_FILES_PER_UPLOAD * MAX_UPLOAD_FILE_SIZE,
+      });
       break;
     }
   }
 
   if (parseError) {
+    console.error("[api/invoices/upload] Upload failed (multipart / stream):", {
+      batchId,
+      userId: user.id,
+      message: parseError.message,
+      bytesSeenTotal,
+      stack: parseError.stack,
+    });
     await updateBatchProgress(batchId, {
       status: "FAILED",
       errors: [
@@ -281,6 +312,7 @@ export const POST = withAuthHandler(async (request: NextRequest, user) => {
   await persistKeysAndCounts();
 
   if (r2Keys.length === 0) {
+    console.error("[api/invoices/upload] No PDFs extracted from upload:", { batchId, userId: user.id });
     await updateBatchProgress(batchId, {
       status: "FAILED",
       errors: [
