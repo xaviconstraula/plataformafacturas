@@ -27,6 +27,7 @@ interface InvoicesPageProps {
     maxUnitPrice?: string
     category?: string
     page?: string
+    soloDescuadre?: string
   }>
 }
 
@@ -88,6 +89,7 @@ export default async function InvoicesPage({ searchParams }: InvoicesPageProps) 
       maxAmount: resolvedSearchParams.maxAmount ? parseFloat(resolvedSearchParams.maxAmount) : undefined,
       minUnitPrice: resolvedSearchParams.minUnitPrice ? parseFloat(resolvedSearchParams.minUnitPrice) : undefined,
       maxUnitPrice: resolvedSearchParams.maxUnitPrice ? parseFloat(resolvedSearchParams.maxUnitPrice) : undefined,
+      soloDescuadre: resolvedSearchParams.soloDescuadre === 'true',
       includeItems: false,
     }),
     getFilterData()

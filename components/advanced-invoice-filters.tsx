@@ -22,7 +22,8 @@ import {
     TagIcon,
     DollarSignIcon,
     ClipboardListIcon,
-    SlidersHorizontalIcon
+    SlidersHorizontalIcon,
+    AlertTriangleIcon
 } from "lucide-react"
 import { Separator } from "@/components/ui/separator"
 
@@ -76,6 +77,7 @@ export function AdvancedInvoiceFilters({
     const [supplierCif, setSupplierCif] = useState(searchParams.get("supplierCif") || "")
     const [minAmount, setMinAmount] = useState(searchParams.get("minAmount") || "")
     const [maxAmount, setMaxAmount] = useState(searchParams.get("maxAmount") || "")
+    const [soloDescuadre, setSoloDescuadre] = useState(searchParams.get("soloDescuadre") === "true")
 
     const [showFilters, setShowFilters] = useState(false)
     const [showAdvanced, setShowAdvanced] = useState(true)
@@ -104,7 +106,8 @@ export function AdvancedInvoiceFilters({
             category ||
             debouncedSupplierCif ||
             debouncedMinAmount ||
-            debouncedMaxAmount
+            debouncedMaxAmount ||
+            soloDescuadre
         )
         setHasActiveFilters(hasFilters)
 
@@ -114,7 +117,8 @@ export function AdvancedInvoiceFilters({
         }
     }, [
         debouncedSearchTerm, month, quarter, year, fiscalYear, supplier,
-        debouncedWorkOrder, material, category, debouncedSupplierCif, debouncedMinAmount, debouncedMaxAmount, showFilters
+        debouncedWorkOrder, material, category, debouncedSupplierCif, debouncedMinAmount, debouncedMaxAmount,
+        soloDescuadre, showFilters
     ])
 
     const updateUrlParams = useCallback(() => {
@@ -135,6 +139,7 @@ export function AdvancedInvoiceFilters({
         if (debouncedSupplierCif) params.set("supplierCif", debouncedSupplierCif)
         if (debouncedMinAmount) params.set("minAmount", debouncedMinAmount)
         if (debouncedMaxAmount) params.set("maxAmount", debouncedMaxAmount)
+        if (soloDescuadre) params.set("soloDescuadre", "true")
 
         // Reset page when filters change
         params.set("page", "1")
@@ -142,7 +147,8 @@ export function AdvancedInvoiceFilters({
         router.push(`/facturas?${params.toString()}`, { scroll: false })
     }, [
         debouncedSearchTerm, month, quarter, year, fiscalYear, supplier,
-        debouncedWorkOrder, material, category, debouncedSupplierCif, debouncedMinAmount, debouncedMaxAmount, router
+        debouncedWorkOrder, material, category, debouncedSupplierCif, debouncedMinAmount, debouncedMaxAmount,
+        soloDescuadre, router
     ])
 
     useEffect(() => {
@@ -162,6 +168,7 @@ export function AdvancedInvoiceFilters({
         setSupplierCif("")
         setMinAmount("")
         setMaxAmount("")
+        setSoloDescuadre(false)
     }
 
     const handleMonthChange = (value: string) => {
@@ -209,7 +216,8 @@ export function AdvancedInvoiceFilters({
         category && category !== 'all' ? category : null,
         debouncedSupplierCif,
         debouncedMinAmount,
-        debouncedMaxAmount
+        debouncedMaxAmount,
+        soloDescuadre ? 'soloDescuadre' : null
     ].filter(Boolean).length
 
     const basicFilterCount = [
@@ -474,6 +482,23 @@ export function AdvancedInvoiceFilters({
                                                 value={maxAmount}
                                                 onChange={(e) => setMaxAmount(e.target.value)}
                                             />
+                                        </div>
+
+                                        <div className="space-y-1 flex items-end">
+                                            <Button
+                                                type="button"
+                                                variant="outline"
+                                                size="sm"
+                                                onClick={() => setSoloDescuadre(!soloDescuadre)}
+                                                className={`h-8 w-full text-sm ${
+                                                    soloDescuadre
+                                                        ? 'bg-destructive/10 border-destructive/30 text-destructive hover:bg-destructive/20 hover:text-destructive'
+                                                        : 'border-gray-300 text-gray-600 hover:bg-gray-50'
+                                                }`}
+                                            >
+                                                <AlertTriangleIcon className="h-3 w-3 mr-1.5" />
+                                                Solo con descuadre
+                                            </Button>
                                         </div>
                                     </div>
                                 </CollapsibleContent>

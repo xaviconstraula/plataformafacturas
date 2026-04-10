@@ -61,6 +61,7 @@ export interface GetInvoicesParams {
     fiscalYear?: string
     category?: string
     includeItems?: boolean
+    soloDescuadre?: boolean
 }
 
 const DEFAULT_PAGE_SIZE = 15
@@ -204,7 +205,8 @@ export async function getInvoices(params: GetInvoicesParams) {
                         material: { userId: user.id }
                     }
                 }
-            } : {})
+            } : {}),
+            ...(params.soloDescuadre ? { hasTotalsMismatch: true } : {})
         }
 
         const [totalCount, invoices] = await Promise.all([
