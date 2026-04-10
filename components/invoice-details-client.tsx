@@ -148,8 +148,38 @@ export function InvoiceDetailsClient({ invoice, updateInvoice }: InvoiceDetailsC
     setIsEditing(false)
   }
 
+  const recalcDraftTotal = (items: ItemDraft[]) => {
+    const lineSum = items.reduce((sum, item) => {
+      const v = parseInputNumber(item.totalPrice)
+      return Number.isFinite(v) ? sum + v : sum
+    }, 0)
+    const total = lineSum + (lineSum * invoiceState.ivaPercentage / 100) - invoiceState.retentionAmount
+    setDraftTotalAmount(total.toFixed(2))
+  }
+
   const updateDraftItem = (itemId: string, key: keyof ItemDraft, value: string) => {
-    setDraftItems((prev) => prev.map((item) => (item.id === itemId ? { ...item, [key]: value } : item)))
+    const newItems = draftItems.map((item) => {
+      if (item.id !== itemId) return item
+
+      const updated = { ...item, [key]: value }
+
+      // Auto-recalculate line total when quantity, unit price or discount changes
+      if (key === 'quantity' || key === 'unitPrice' || key === 'discountPercentage') {
+        const qty = parseInputNumber(key === 'quantity' ? value : item.quantity)
+        const price = parseInputNumber(key === 'unitPrice' ? value : item.unitPrice)
+        const discountStr = key === 'discountPercentage' ? value : item.discountPercentage
+        const discount = discountStr.trim() !== '' ? parseInputNumber(discountStr) : 0
+        if (Number.isFinite(qty) && Number.isFinite(price)) {
+          const discountFactor = Number.isFinite(discount) && discount > 0 ? (1 - discount / 100) : 1
+          updated.totalPrice = (qty * price * discountFactor).toFixed(3)
+        }
+      }
+
+      return updated
+    })
+
+    setDraftItems(newItems)
+    recalcDraftTotal(newItems)
   }
 
   const handleAddLine = () => {
@@ -157,11 +187,14 @@ export function InvoiceDetailsClient({ invoice, updateInvoice }: InvoiceDetailsC
   }
 
   const handleRemoveLine = (itemId: string) => {
-    setDraftItems((prev) => prev.filter((item) => item.id !== itemId))
+    const newItems = draftItems.filter((item) => item.id !== itemId)
+    setDraftItems(newItems)
 
     if (invoiceItemsMap.has(itemId)) {
       setDeletedItemIds((prev) => (prev.includes(itemId) ? prev : [...prev, itemId]))
     }
+
+    recalcDraftTotal(newItems)
   }
 
   const handleSave = () => {
