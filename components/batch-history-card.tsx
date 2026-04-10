@@ -77,7 +77,7 @@ function BatchHistoryItem({
                     </div>
                 </div>
                 <div className="flex items-center gap-2">
-                    {hasErrors && (
+                    {(hasErrors || hasDuplicates) && (
                         <Button
                             variant="outline"
                             size="sm"
@@ -85,7 +85,7 @@ function BatchHistoryItem({
                             className="text-xs"
                         >
                             <AlertTriangle className="h-3 w-3 mr-1" />
-                            Ver errores
+                            {hasErrors ? 'Ver errores' : 'Ver duplicadas'}
                         </Button>
                     )}
                     {canRetry && (

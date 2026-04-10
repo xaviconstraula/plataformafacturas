@@ -2896,7 +2896,7 @@ async function processInvoicesWithDirectApi(
                                     material = await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache, userId);
                                 } catch (materialError) {
                                     console.error(`Error creating/finding material '${itemData.materialName}' in invoice ${invoice.invoiceCode}:`, materialError);
-                                    throw new Error(`Failed to process material '${itemData.materialName}': ${materialError instanceof Error ? materialError.message : 'Unknown error'}`);
+                                    throw new Error(`Error en material '${itemData.materialName}': ${materialError instanceof Error ? materialError.message : 'Unknown error'}`);
                                 }
                                 const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
                                 const currentItemUnitPrice = new Prisma.Decimal(itemData.unitPrice.toFixed(3));
@@ -2963,6 +2963,7 @@ async function processInvoicesWithDirectApi(
                                 }
                             }
                         }
+
                         return {
                             success: true,
                             message: `Invoice ${invoice.invoiceCode} created successfully.`,
@@ -3618,7 +3619,7 @@ export async function processInvoicesFromR2Keys(
                                     material = await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache, userId);
                                 } catch (materialError) {
                                     console.error(`Error creating/finding material '${itemData.materialName}' in invoice ${invoice.invoiceCode}:`, materialError);
-                                    throw new Error(`Failed to process material '${itemData.materialName}': ${materialError instanceof Error ? materialError.message : 'Unknown error'}`);
+                                    throw new Error(`Error en material '${itemData.materialName}': ${materialError instanceof Error ? materialError.message : 'Unknown error'}`);
                                 }
                                 const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
                                 const currentItemUnitPrice = new Prisma.Decimal(itemData.unitPrice.toFixed(3));
@@ -3758,8 +3759,8 @@ export async function processInvoicesFromR2Keys(
         batchId
     }));
 
-    const successfulInvoices = finalResultsWithBatch.filter(r => r.success && !r.message.includes("already exists"));
-    const duplicateInvoices = finalResultsWithBatch.filter(r => r.success && r.message.includes("already exists"));
+    const successfulInvoices = finalResultsWithBatch.filter(r => r.success && !r.isDuplicate);
+    const duplicateInvoices = finalResultsWithBatch.filter(r => r.success && r.isDuplicate);
     const failedInvoices = finalResultsWithBatch.filter(r => !r.success && !r.isBlockedProvider);
     const blockedInvoices = finalResultsWithBatch.filter(r => r.isBlockedProvider);
 
@@ -3770,14 +3771,14 @@ export async function processInvoicesFromR2Keys(
     await updateBatchProgress(batchId, {
         status: finalStatus,
         processedFiles: r2Keys.length,
-        successfulFiles: successfulInvoices.length + duplicateInvoices.length,
+        successfulFiles: successfulInvoices.length,
         failedFiles: totalFailed,
         blockedFiles: blockedInvoices.length,
         completedAt: new Date(),
         errors: batchErrors.length > 0 ? batchErrors : undefined,
     });
 
-    const newlyCreatedInvoices = finalResultsWithBatch.filter(r => r.success && r.invoiceId && !r.message.includes("already exists"));
+    const newlyCreatedInvoices = finalResultsWithBatch.filter(r => r.success && r.invoiceId && !r.isDuplicate);
     if (newlyCreatedInvoices.length > 0) {
         revalidatePath("/facturas");
         if (newlyCreatedInvoices.some(r => r.alertsCreated && r.alertsCreated > 0)) {
