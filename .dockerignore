@@ -3,3 +3,8 @@ npm-debug.log
 Dockerfile
 docker-compose.yml
 .dockerignore
+.next
+.env
+.env.local
+tmp
+*.log
