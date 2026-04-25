@@ -70,7 +70,8 @@ export default function LoginPage() {
       })
 
       if (error) {
-        setGeneralError(error.message || "Error al iniciar sesión")
+        console.error("Login error:", { status: error.status, statusText: error.statusText, message: error.message })
+        setGeneralError(error.message || error.statusText || "Error al iniciar sesión")
       } else if (data) {
         // Successful login, redirect will be handled by callbackURL
         router.push("/")
