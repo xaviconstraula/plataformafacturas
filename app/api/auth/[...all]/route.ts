@@ -11,11 +11,12 @@ try {
 }
 
 async function withLogging(method: string, req: NextRequest) {
-  console.log(`[auth] ${method} ${req.nextUrl.pathname}`)
+  console.log(`[auth] ${method} raw url=${req.url} pathname=${req.nextUrl.pathname}`)
   try {
     const response = await handler[method as keyof typeof handler](req)
     if (response.status >= 400) {
-      console.error(`[auth] ${method} ${req.nextUrl.pathname} → ${response.status}`)
+      const body = await response.clone().text()
+      console.error(`[auth] ${method} ${req.nextUrl.pathname} → ${response.status} body=${body}`)
     }
     return response
   } catch (error) {
