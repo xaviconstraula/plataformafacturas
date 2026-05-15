@@ -95,9 +95,8 @@ async function getSuppliersData(params: { [key: string]: string | string[] | und
     // Get all suppliers for the dropdown
     prisma.provider.findMany({
       where: { userId: user.id },
-      select: { id: true, name: true },
+      select: { id: true, name: true, cif: true },
       orderBy: { name: 'asc' },
-      take: 1000 // Limit for performance
     }),
     // Get work orders data for suppliers with pagination
     getWorkOrdersForSuppliers({
@@ -193,7 +192,7 @@ export default async function SuppliersPage({ searchParams }: SuppliersPageProps
             content={helpContent.proveedores.content}
           />
           <ExcelExportButton filters={{ ...exportFilters, exportType: 'suppliers-list' }} includeDetails />
-          <MergeProvidersDialog providers={data.supplierAnalytics.map(s => ({ id: s.supplierId, name: s.supplierName, cif: s.supplierCif }))} />
+          <MergeProvidersDialog providers={data.allSuppliers} />
           <NewSupplierButton />
         </div>
       </div>
