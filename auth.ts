@@ -1,9 +1,12 @@
 import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
-import { PrismaClient } from "@/generated/prisma";
 import { nextCookies } from "better-auth/next-js";
 import { prisma } from "@/lib/db";
-
+import {
+    getAuthBaseURLConfig,
+    getTrustedOriginsList,
+    shouldTrustProxyHeaders,
+} from "@/lib/auth-domains";
 
 export const auth = betterAuth({
     database: prismaAdapter(prisma, {
@@ -11,17 +14,13 @@ export const auth = betterAuth({
     }),
     emailAndPassword: {
         enabled: true,
-        requireEmailVerification: false, // Disable email verification for now
+        requireEmailVerification: false,
     },
     secret: process.env.BETTER_AUTH_SECRET,
-    baseURL: process.env.BETTER_AUTH_URL || "http://localhost:3000",
-    trustedOrigins: [
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "https://ctboxapp.com"
-    ],
-    plugins: [nextCookies()] // make sure this is the last plugin in the array
-
-
-
+    baseURL: getAuthBaseURLConfig(),
+    trustedOrigins: async () => getTrustedOriginsList(),
+    advanced: shouldTrustProxyHeaders()
+        ? { trustedProxyHeaders: true }
+        : undefined,
+    plugins: [nextCookies()],
 });

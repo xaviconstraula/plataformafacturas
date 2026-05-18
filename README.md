@@ -51,6 +51,10 @@ Edita `.env` con tus credenciales:
 DATABASE_URL="postgresql://user:password@localhost:5432/facturasfacil"
 BETTER_AUTH_SECRET="your-secret-key"
 BETTER_AUTH_URL="http://localhost:3000"
+# Producción con varios dominios (separados por coma, sin protocolo):
+# ALLOWED_HOSTS="ctboxapp.com,www.ctboxapp.com,otrodominio.com"
+# BETTER_AUTH_URL sigue siendo el dominio principal / fallback
+# AUTH_TRUST_PROXY_HEADERS="true"  # si hay nginx/caddy delante (recomendado)
 GEMINI_API_KEY="your-gemini-api-key"
 
 # Opcional - Sistema de reintentos con R2
