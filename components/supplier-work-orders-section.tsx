@@ -1,63 +1,14 @@
 'use client'
 
 import { useState } from "react"
-import { useRouter, useSearchParams } from "next/navigation"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { formatCurrency, formatDate } from "@/lib/utils"
 import Link from "next/link"
-import { PackageIcon, DollarSignIcon, CalendarIcon, TruckIcon, ChevronLeft, ChevronRight } from "lucide-react"
-
-function PaginationControls({
-    currentPage,
-    totalPages,
-    paramPrefix
-}: {
-    currentPage: number
-    totalPages: number
-    paramPrefix: string
-}) {
-    const router = useRouter()
-    const searchParams = useSearchParams()
-
-    const createPageURL = (page: number) => {
-        const params = new URLSearchParams(searchParams)
-        params.set(`${paramPrefix}Page`, page.toString())
-        return `?${params.toString()}`
-    }
-
-    if (totalPages <= 1) return null
-
-    return (
-        <div className="flex items-center justify-between px-2">
-            <div className="text-sm text-muted-foreground">
-                Página {currentPage} de {totalPages}
-            </div>
-            <div className="flex items-center space-x-2">
-                <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => router.push(createPageURL(currentPage - 1))}
-                    disabled={currentPage <= 1}
-                >
-                    <ChevronLeft className="h-4 w-4" />
-                    Anterior
-                </Button>
-                <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => router.push(createPageURL(currentPage + 1))}
-                    disabled={currentPage >= totalPages}
-                >
-                    Siguiente
-                    <ChevronRight className="h-4 w-4" />
-                </Button>
-            </div>
-        </div>
-    )
-}
+import { PackageIcon, DollarSignIcon, CalendarIcon, TruckIcon } from "lucide-react"
+import { PaginationBar } from "@/components/pagination-bar"
 
 interface WorkOrderData {
     workOrder: string
@@ -237,10 +188,10 @@ export function SupplierWorkOrdersSection({
 
                             {/* Pagination Controls */}
                             {pagination ? (
-                                <PaginationControls
+                                <PaginationBar
                                     currentPage={pagination.currentPage}
                                     totalPages={pagination.totalPages}
-                                    paramPrefix="workOrders"
+                                    pageParam="workOrdersPage"
                                 />
                             ) : (
                                 /* Show More Button for client-side pagination */
