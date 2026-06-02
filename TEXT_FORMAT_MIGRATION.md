@@ -219,3 +219,33 @@ The text-based format migration:
 - ✅ Improves reliability
 
 **Status:** ✅ Ready for deployment
+
+---
+
+## JSON v2 (structured extraction, 2026)
+
+The default import path uses **JSON** again via Gemini `responseMimeType: application/json` and `responseJsonSchema`, implemented in `lib/invoice-extraction/`.
+
+### Why JSON returned
+
+- Pipe-delimited lines break when descriptions contain `|` or fields shift.
+- Structured JSON maps `materialCode` / `materialName` explicitly (better name quality).
+- Gemini schema enforcement reduces malformed responses.
+
+### Token / size mitigation
+
+- Follow-up calls return only `{ items: [...] }` when `MAX_TOKENS` truncates.
+- Items are merged by `lineNumber`.
+
+### Rollback / comparison
+
+Set environment variable:
+
+- `EXTRACT_FORMAT=json` (default) — structured JSON extraction
+- `EXTRACT_FORMAT=pipe` — legacy pipe format in `lib/actions/invoices.ts`
+
+### Tests
+
+```bash
+npm run test:extraction
+```

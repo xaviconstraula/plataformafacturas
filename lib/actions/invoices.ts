@@ -6,6 +6,7 @@ import { Prisma, type Provider, type Material, type Invoice, type InvoiceItem, t
 import { groupBatchesByTimeWindow as groupBatchesUtil } from "@/lib/utils/batch-grouping";
 import { revalidatePath } from "next/cache";
 import { GoogleGenAI } from "@google/genai";
+import { getExtractFormat, extractInvoiceJsonFromPdf } from "@/lib/invoice-extraction";
 import { normalizeMaterialCode, areMaterialCodesSimilar, normalizeCifForComparison, buildCifVariants } from "@/lib/utils";
 import { checkVAT, countries } from "jsvat";
 import { parseJsonLinesFromFile } from "@/lib/utils/jsonl-parser";
@@ -1260,6 +1261,60 @@ interface CallPdfExtractAPIResponse {
     error?: string;
 }
 
+interface MaterialMatchOptions {
+    strictCodeMatch?: boolean;
+}
+
+/** PDF import paths: match materials by exact product code only. */
+const IMPORT_MATERIAL_MATCH: MaterialMatchOptions = { strictCodeMatch: true };
+
+function validateExtractedProviderCif(
+    extractedData: ExtractedPdfData,
+    fileName: string,
+    batchErrors: BatchErrorDetail[],
+): CallPdfExtractAPIResponse | null {
+    const rawCif = extractedData.provider?.cif;
+    if (!rawCif) {
+        return null;
+    }
+
+    const upper = String(rawCif).toUpperCase().trim();
+    const normalizedCore = normalizeCifForComparison(rawCif);
+
+    if (!normalizedCore) {
+        const errorMsg = `CIF/NIF/VAT del proveedor tiene un formato inválido: '${rawCif}'.`;
+        console.warn(`[callPdfExtractAPI] ${errorMsg} (file: ${fileName})`);
+        pushBatchError(batchErrors, {
+            kind: 'VALIDATION_ERROR',
+            message: `${errorMsg} Asegúrate de incluir un identificador fiscal válido (por ejemplo, ESB12345678 o un VAT europeo estándar con prefijo de país).`,
+            fileName,
+            invoiceCode: extractedData.invoiceCode,
+        });
+        return { extractedData: null, error: errorMsg };
+    }
+
+    const vatToCheck = /^ES[\s\-_.:]?/i.test(upper)
+        ? `ES${normalizedCore.replace(/^ES/i, "")}`
+        : normalizedCore;
+
+    const vatResult = checkVAT(vatToCheck, countries);
+
+    if (!vatResult.isValid) {
+        const errorMsg = `Identificador fiscal/VAT del proveedor no es válido: '${rawCif}'.`;
+        console.warn(`[callPdfExtractAPI] ${errorMsg} (file: ${fileName})`);
+        pushBatchError(batchErrors, {
+            kind: 'VALIDATION_ERROR',
+            message: `${errorMsg} (normalizado como '${vatToCheck}'). Asegúrate de que incluya el código de país cuando proceda (por ejemplo, ESB12345678, DE123..., FR123...).`,
+            fileName,
+            invoiceCode: extractedData.invoiceCode,
+        });
+        return { extractedData: null, error: errorMsg };
+    }
+
+    extractedData.provider.cif = vatResult.value ?? vatToCheck;
+    return null;
+}
+
 
 
 
@@ -1457,7 +1512,42 @@ async function callPdfExtractAPI(file: File, batchErrors: BatchErrorDetail[]): P
         const buffer = Buffer.from(await file.arrayBuffer());
         const base64 = buffer.toString('base64');
 
-        // Build prompt for direct PDF processing with text-based output
+        if (getExtractFormat() === 'json') {
+            const jsonResult = await extractInvoiceJsonFromPdf({
+                gemini,
+                model: GEMINI_MODEL,
+                fileName: file.name,
+                base64,
+            });
+
+            if (!jsonResult.extractedData) {
+                const errorMessage = jsonResult.error ?? 'JSON extraction failed.';
+                pushBatchError(batchErrors, {
+                    kind: errorMessage.includes('Validation') ? 'VALIDATION_ERROR' : 'PARSING_ERROR',
+                    message: errorMessage,
+                    fileName: file.name,
+                });
+                return { extractedData: null, error: errorMessage };
+            }
+
+            const extractedData = jsonResult.extractedData;
+
+            if (!extractedData.invoiceCode || !extractedData.provider?.cif || !extractedData.issueDate || typeof extractedData.totalAmount !== 'number') {
+                console.warn(`Response for ${file.name} missing crucial invoice-level data. Data: ${JSON.stringify(extractedData)}`);
+            }
+            if (!extractedData.items || extractedData.items.length === 0) {
+                console.warn(`File ${file.name} yielded invoice-level data but no line items were extracted by AI.`);
+            }
+
+            const cifError = validateExtractedProviderCif(extractedData, file.name, batchErrors);
+            if (cifError) {
+                return cifError;
+            }
+
+            return { extractedData };
+        }
+
+        // Legacy pipe-delimited extraction (EXTRACT_FORMAT=pipe)
         const promptText = buildExtractionPrompt();
 
         const result = await gemini.models.generateContent({
@@ -1585,46 +1675,9 @@ async function callPdfExtractAPI(file: File, batchErrors: BatchErrorDetail[]): P
                 console.warn(`File ${file.name} yielded invoice-level data but no line items were extracted by AI.`);
             }
 
-            // 🔎 Validate provider CIF/VAT using jsvat when present.
-            const rawCif = extractedData.provider?.cif;
-            if (rawCif) {
-                const upper = String(rawCif).toUpperCase().trim();
-                const normalizedCore = normalizeCifForComparison(rawCif);
-
-                if (!normalizedCore) {
-                    const errorMsg = `CIF/NIF/VAT del proveedor tiene un formato inválido: '${rawCif}'.`;
-                    console.warn(`[callPdfExtractAPI] ${errorMsg} (file: ${file.name})`);
-                    pushBatchError(batchErrors, {
-                        kind: 'VALIDATION_ERROR',
-                        message: `${errorMsg} Asegúrate de incluir un identificador fiscal válido (por ejemplo, ESB12345678 o un VAT europeo estándar con prefijo de país).`,
-                        fileName: file.name,
-                        invoiceCode: extractedData.invoiceCode,
-                    });
-                    // Treat invalid format as a hard validation failure for this invoice
-                    return { extractedData: null, error: errorMsg };
-                }
-
-                // If the original value starts with ES, ensure the VAT we validate also carries ES
-                const vatToCheck = /^ES[\s\-_.:]?/i.test(upper)
-                    ? `ES${normalizedCore.replace(/^ES/i, "")}`
-                    : normalizedCore;
-
-                const vatResult = checkVAT(vatToCheck, countries);
-
-                if (!vatResult.isValid) {
-                    const errorMsg = `Identificador fiscal/VAT del proveedor no es válido: '${rawCif}'.`;
-                    console.warn(`[callPdfExtractAPI] ${errorMsg} (file: ${file.name})`);
-                    pushBatchError(batchErrors, {
-                        kind: 'VALIDATION_ERROR',
-                        message: `${errorMsg} (normalizado como '${vatToCheck}'). Asegúrate de que incluya el código de país cuando proceda (por ejemplo, ESB12345678, DE123..., FR123...).`,
-                        fileName: file.name,
-                        invoiceCode: extractedData.invoiceCode,
-                    });
-                    return { extractedData: null, error: errorMsg };
-                }
-
-                // When valid, store canonical VAT value or the normalized VAT we checked
-                extractedData.provider.cif = vatResult.value ?? vatToCheck;
+            const cifError = validateExtractedProviderCif(extractedData, file.name, batchErrors);
+            if (cifError) {
+                return cifError;
             }
 
             return { extractedData };
@@ -1953,8 +2006,10 @@ async function findOrCreateMaterialTxWithCache(
     providerType?: string,
     materialCache?: Map<string, { id: string; name: string; code: string; referenceCode: string | null; category: string | null }>,
     userId?: string,
+    options?: MaterialMatchOptions,
 ): Promise<Material> {
     const normalizedName = materialName.trim();
+    const strictCodeMatch = options?.strictCodeMatch === true;
 
     // Priorizar el código extraído del PDF por Gemini
     // Handle case where AI returns string 'null' instead of null
@@ -1975,31 +2030,31 @@ async function findOrCreateMaterialTxWithCache(
             }
         }
 
-        // Search by name
-        const cachedByName = materialCache.get(`name:${normalizedName.toLowerCase()}`);
-        if (cachedByName) {
-            return await tx.material.findUnique({ where: { id: cachedByName.id } }) as Material;
-        }
+        if (!strictCodeMatch) {
+            const cachedByName = materialCache.get(`name:${normalizedName.toLowerCase()}`);
+            if (cachedByName) {
+                return await tx.material.findUnique({ where: { id: cachedByName.id } }) as Material;
+            }
 
-        // Check for similar codes in cache if finalCode is long enough
-        if (finalCode && finalCode.length >= 6) {
-            for (const [key, cachedMaterial] of materialCache.entries()) {
-                if (key.startsWith('code:') || key.startsWith('ref:')) {
-                    const cacheCode = key.substring(key.indexOf(':') + 1);
-                    if (areMaterialCodesSimilar(finalCode, cacheCode)) {
-                        return await tx.material.findUnique({ where: { id: cachedMaterial.id } }) as Material;
+            if (finalCode && finalCode.length >= 6) {
+                for (const [key, cachedMaterial] of materialCache.entries()) {
+                    if (key.startsWith('code:') || key.startsWith('ref:')) {
+                        const cacheCode = key.substring(key.indexOf(':') + 1);
+                        if (areMaterialCodesSimilar(finalCode, cacheCode)) {
+                            return await tx.material.findUnique({ where: { id: cachedMaterial.id } }) as Material;
+                        }
                     }
                 }
             }
         }
     }
 
-    // Fall back to original database lookup logic (scoped by user)
-    return await findOrCreateMaterialTx(tx, materialName, materialCode, providerType, userId);
+    return await findOrCreateMaterialTx(tx, materialName, materialCode, providerType, userId, options);
 }
 
-async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName: string, materialCode?: string, providerType?: string, userId?: string): Promise<Material> {
+async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName: string, materialCode?: string, providerType?: string, userId?: string, options?: MaterialMatchOptions): Promise<Material> {
     const normalizedName = materialName.trim();
+    const strictCodeMatch = options?.strictCodeMatch === true;
     let material: Material | null = null;
 
     // Priorizar el código extraído del PDF por Gemini
@@ -2028,37 +2083,35 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
         }
     }
 
-    // Buscar por nombre exacto
-    material = await tx.material.findFirst({
-        where: { name: { equals: normalizedName, mode: 'insensitive' }, userId: userId ?? undefined }
-    });
-
-    if (material) {
-        return material;
-    }
-
-    // Solo si no encontramos nada, hacer búsqueda por similitud (más conservadora)
-    if (finalCode && finalCode.length >= 6) {
-        const allMaterials = await tx.material.findMany({
-            where: { userId: userId ?? undefined },
-            select: { id: true, name: true, code: true, referenceCode: true, category: true }
+    if (!strictCodeMatch) {
+        material = await tx.material.findFirst({
+            where: { name: { equals: normalizedName, mode: 'insensitive' }, userId: userId ?? undefined }
         });
 
-        for (const existingMaterial of allMaterials) {
-            // Verificar similitud por código solo si ambos códigos son largos
-            if (existingMaterial.code && areMaterialCodesSimilar(finalCode, existingMaterial.code)) {
-                material = await tx.material.findUnique({
-                    where: { id: existingMaterial.id }
-                });
-                break;
-            }
+        if (material) {
+            return material;
+        }
 
-            // También verificar con referenceCode
-            if (existingMaterial.referenceCode && areMaterialCodesSimilar(finalCode, existingMaterial.referenceCode)) {
-                material = await tx.material.findUnique({
-                    where: { id: existingMaterial.id }
-                });
-                break;
+        if (finalCode && finalCode.length >= 6) {
+            const allMaterials = await tx.material.findMany({
+                where: { userId: userId ?? undefined },
+                select: { id: true, name: true, code: true, referenceCode: true, category: true }
+            });
+
+            for (const existingMaterial of allMaterials) {
+                if (existingMaterial.code && areMaterialCodesSimilar(finalCode, existingMaterial.code)) {
+                    material = await tx.material.findUnique({
+                        where: { id: existingMaterial.id }
+                    });
+                    break;
+                }
+
+                if (existingMaterial.referenceCode && areMaterialCodesSimilar(finalCode, existingMaterial.referenceCode)) {
+                    material = await tx.material.findUnique({
+                        where: { id: existingMaterial.id }
+                    });
+                    break;
+                }
             }
         }
     }
@@ -2119,15 +2172,14 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
         }
 
         if (!material) {
-            // If the loop finishes without creating a material, it means all attempts to generate a unique code failed.
-            // This is highly unlikely but possible under heavy concurrency.
-            // As a final fallback, try to find the material by its name, as it might have been created by another transaction.
-            const existingMaterial = await tx.material.findFirst({
-                where: { name: { equals: normalizedName, mode: 'insensitive' } }
-            });
+            if (!strictCodeMatch) {
+                const existingMaterial = await tx.material.findFirst({
+                    where: { name: { equals: normalizedName, mode: 'insensitive' } }
+                });
 
-            if (existingMaterial) {
-                return existingMaterial;
+                if (existingMaterial) {
+                    return existingMaterial;
+                }
             }
 
             throw new Error(`Could not create material '${normalizedName}' due to a temporary code conflict. Please try again.`);
@@ -2238,7 +2290,7 @@ async function processInvoiceItemTx(
             totalPrice: totalPriceDecimal,
             itemDate: effectiveDate, // Store the effective date for the item
             workOrder: itemData.workOrder || null,
-            description: itemData.description || null,
+            description: itemData.description || itemData.materialName || null,
             lineNumber: itemData.lineNumber || null,
         },
     });
@@ -2877,7 +2929,7 @@ async function processInvoicesWithDirectApi(
                                     await tx.invoiceItem.create({
                                         data: {
                                             invoiceId: invoice.id,
-                                            materialId: (await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache, userId)).id,
+                                            materialId: (await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache, userId, IMPORT_MATERIAL_MATCH)).id,
                                             quantity: quantityDecimal,
                                             listPrice: listPriceDecimal,
                                             discountPercentage: discountPercentageDecimal,
@@ -2886,6 +2938,7 @@ async function processInvoicesWithDirectApi(
                                             totalPrice: totalPriceDecimal,
                                             itemDate: effectiveItemDate,
                                             workOrder: itemData.workOrder || null,
+                                            description: itemData.description || itemData.materialName || null,
                                         },
                                     });
                                     continue;
@@ -2893,7 +2946,7 @@ async function processInvoicesWithDirectApi(
 
                                 let material: Material;
                                 try {
-                                    material = await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache, userId);
+                                    material = await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache, userId, IMPORT_MATERIAL_MATCH);
                                 } catch (materialError) {
                                     console.error(`Error creating/finding material '${itemData.materialName}' in invoice ${invoice.invoiceCode}:`, materialError);
                                     throw new Error(`Error en material '${itemData.materialName}': ${materialError instanceof Error ? materialError.message : 'Unknown error'}`);
@@ -3600,7 +3653,7 @@ export async function processInvoicesFromR2Keys(
                                     await tx.invoiceItem.create({
                                         data: {
                                             invoiceId: invoice.id,
-                                            materialId: (await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache, userId)).id,
+                                            materialId: (await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache, userId, IMPORT_MATERIAL_MATCH)).id,
                                             quantity: quantityDecimal,
                                             listPrice: listPriceDecimal,
                                             discountPercentage: discountPercentageDecimal,
@@ -3609,6 +3662,7 @@ export async function processInvoicesFromR2Keys(
                                             totalPrice: totalPriceDecimal,
                                             itemDate: effectiveItemDate,
                                             workOrder: itemData.workOrder || null,
+                                            description: itemData.description || itemData.materialName || null,
                                         },
                                     });
                                     continue;
@@ -3616,7 +3670,7 @@ export async function processInvoicesFromR2Keys(
 
                                 let material: Material;
                                 try {
-                                    material = await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache, userId);
+                                    material = await findOrCreateMaterialTxWithCache(tx, itemData.materialName, itemData.materialCode, provider.type, materialCache, userId, IMPORT_MATERIAL_MATCH);
                                 } catch (materialError) {
                                     console.error(`Error creating/finding material '${itemData.materialName}' in invoice ${invoice.invoiceCode}:`, materialError);
                                     throw new Error(`Error en material '${itemData.materialName}': ${materialError instanceof Error ? materialError.message : 'Unknown error'}`);
@@ -4331,7 +4385,7 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
                 }
 
                 try {
-                    const material = await findOrCreateMaterialTxWithCache(tx, item.materialName, item.materialCode, provider.type, materialCache, user.id);
+                    const material = await findOrCreateMaterialTxWithCache(tx, item.materialName, item.materialCode, provider.type, materialCache, user.id, IMPORT_MATERIAL_MATCH);
                     await processInvoiceItemTx(
                         tx,
                         item,
