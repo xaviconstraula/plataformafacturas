@@ -2147,6 +2147,38 @@ function parseItemDate(itemDateString: string | null | undefined, invoiceIssueDa
     return invoiceIssueDate;
 }
 
+function clampDiscountPercentage(value: number | null | undefined): number | null {
+    if (value === null || value === undefined || !Number.isFinite(value)) {
+        return null;
+    }
+    return Math.min(Math.max(value, 0), 999.99);
+}
+
+function toDiscountDecimal(value: number | null | undefined): Prisma.Decimal | null {
+    const clamped = clampDiscountPercentage(value);
+    if (clamped === null) {
+        return null;
+    }
+    return new Prisma.Decimal(clamped.toFixed(2));
+}
+
+async function withTransactionSavepoint<T>(
+    tx: Prisma.TransactionClient,
+    savepointName: string,
+    operation: () => Promise<T>,
+): Promise<T> {
+    const safeName = savepointName.replace(/[^a-zA-Z0-9_]/g, '_');
+    await tx.$executeRawUnsafe(`SAVEPOINT "${safeName}"`);
+    try {
+        const result = await operation();
+        await tx.$executeRawUnsafe(`RELEASE SAVEPOINT "${safeName}"`);
+        return result;
+    } catch (error) {
+        await tx.$executeRawUnsafe(`ROLLBACK TO SAVEPOINT "${safeName}"`);
+        throw error;
+    }
+}
+
 async function processInvoiceItemTx(
     tx: Prisma.TransactionClient,
     itemData: ExtractedPdfItemData,
@@ -2170,14 +2202,13 @@ async function processInvoiceItemTx(
     const listPriceDecimal = typeof listPrice === 'number' && !isNaN(listPrice)
         ? new Prisma.Decimal(listPrice.toFixed(3))
         : null;
-    const discountPercentageDecimal = typeof discountPercentage === 'number' && !isNaN(discountPercentage)
-        ? new Prisma.Decimal(discountPercentage.toFixed(2))
-        : null;
+    const discountPercentageDecimal = toDiscountDecimal(discountPercentage);
 
     // Use itemDate if provided and valid, otherwise use invoice issue date
-    const effectiveDate = parseItemDate(itemDate, invoiceIssueDate);
-
-
+    let effectiveDate = parseItemDate(itemDate, invoiceIssueDate);
+    if (Number.isNaN(effectiveDate.getTime())) {
+        effectiveDate = invoiceIssueDate;
+    }
 
     const invoiceItem = await tx.invoiceItem.create({
         data: {
@@ -2291,14 +2322,41 @@ async function processInvoiceItemTx(
             }
         } else {
 
-            await tx.materialProvider.create({
-                data: {
-                    materialId: createdMaterial.id,
-                    providerId,
-                    lastPrice: currentUnitPriceDecimal,
-                    lastPriceDate: effectiveDate,
-                },
-            });
+            try {
+                await tx.materialProvider.create({
+                    data: {
+                        materialId: createdMaterial.id,
+                        providerId,
+                        lastPrice: currentUnitPriceDecimal,
+                        lastPriceDate: effectiveDate,
+                    },
+                });
+            } catch (materialProviderError) {
+                if (typeof materialProviderError === 'object' && materialProviderError !== null && 'code' in materialProviderError &&
+                    (materialProviderError as { code: string }).code === 'P2002') {
+                    const existingMaterialProvider = await tx.materialProvider.findUnique({
+                        where: {
+                            materialId_providerId: {
+                                materialId: createdMaterial.id,
+                                providerId,
+                            },
+                        },
+                    });
+
+                    if (existingMaterialProvider &&
+                        (!existingMaterialProvider.lastPriceDate || effectiveDate.getTime() > existingMaterialProvider.lastPriceDate.getTime())) {
+                        await tx.materialProvider.update({
+                            where: { id: existingMaterialProvider.id },
+                            data: {
+                                lastPrice: currentUnitPriceDecimal,
+                                lastPriceDate: effectiveDate,
+                            },
+                        });
+                    }
+                } else {
+                    throw materialProviderError;
+                }
+            }
         }
     }
 
@@ -2820,12 +2878,10 @@ async function processInvoicesWithDirectApi(
                                     const listPriceDecimal = typeof itemData.listPrice === 'number' && !isNaN(itemData.listPrice)
                                         ? new Prisma.Decimal(itemData.listPrice.toFixed(3))
                                         : null;
-                                    const discountPercentageDecimal = typeof itemData.discountPercentage === 'number' && !isNaN(itemData.discountPercentage)
-                                        ? new Prisma.Decimal(itemData.discountPercentage.toFixed(2))
-                                        : null;
+                                    const discountPercentageDecimal = toDiscountDecimal(itemData.discountPercentage);
                                     const currentUnitPriceDecimal = new Prisma.Decimal(itemData.unitPrice.toFixed(3));
                                     const totalPriceDecimal = new Prisma.Decimal(itemData.totalPrice.toFixed(3));
-                                    const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
+                                    const effectiveItemDate = parseItemDate(itemData.itemDate, currentInvoiceIssueDate);
 
                                     await tx.invoiceItem.create({
                                         data: {
@@ -2852,7 +2908,7 @@ async function processInvoicesWithDirectApi(
                                     console.error(`Error creating/finding material '${itemData.materialName}' in invoice ${invoice.invoiceCode}:`, materialError);
                                     throw new Error(`Error en material '${itemData.materialName}': ${materialError instanceof Error ? materialError.message : 'Unknown error'}`);
                                 }
-                                const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
+                                const effectiveItemDate = parseItemDate(itemData.itemDate, currentInvoiceIssueDate);
                                 const currentItemUnitPrice = new Prisma.Decimal(itemData.unitPrice.toFixed(3));
 
                                 const lastSeenPriceRecordInThisInvoice = intraInvoiceMaterialPriceHistory.get(material.id);
@@ -3166,6 +3222,12 @@ async function processInvoicesWithDirectApi(
     return { overallSuccess, results: finalResultsWithBatch, batchId };
 }
 
+function getR2ProcessingConcurrencyLimit(fileCount: number): number {
+    return fileCount > 10
+        ? Math.min(4, Math.max(2, Math.ceil(fileCount / 12)))
+        : Math.min(6, Math.max(2, Math.ceil(fileCount / 6)));
+}
+
 export async function processInvoicesFromR2Keys(
     r2Keys: string[],
     userId: string,
@@ -3199,9 +3261,7 @@ export async function processInvoicesFromR2Keys(
         startedAt: new Date(),
     });
 
-    let CONCURRENCY_LIMIT = r2Keys.length > 10
-        ? Math.min(4, Math.max(2, Math.ceil(r2Keys.length / 12)))
-        : Math.min(6, Math.max(2, Math.ceil(r2Keys.length / 6)));
+    let CONCURRENCY_LIMIT = getR2ProcessingConcurrencyLimit(r2Keys.length);
 
     const initialMemory = process.memoryUsage();
     const isVeryLargeBatch = r2Keys.length >= 100;
@@ -3545,12 +3605,10 @@ export async function processInvoicesFromR2Keys(
                                     const listPriceDecimal = typeof itemData.listPrice === 'number' && !isNaN(itemData.listPrice)
                                         ? new Prisma.Decimal(itemData.listPrice.toFixed(3))
                                         : null;
-                                    const discountPercentageDecimal = typeof itemData.discountPercentage === 'number' && !isNaN(itemData.discountPercentage)
-                                        ? new Prisma.Decimal(itemData.discountPercentage.toFixed(2))
-                                        : null;
+                                    const discountPercentageDecimal = toDiscountDecimal(itemData.discountPercentage);
                                     const currentUnitPriceDecimal = new Prisma.Decimal(itemData.unitPrice.toFixed(3));
                                     const totalPriceDecimal = new Prisma.Decimal(itemData.totalPrice.toFixed(3));
-                                    const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
+                                    const effectiveItemDate = parseItemDate(itemData.itemDate, currentInvoiceIssueDate);
 
                                     await tx.invoiceItem.create({
                                         data: {
@@ -3577,7 +3635,7 @@ export async function processInvoicesFromR2Keys(
                                     console.error(`Error creating/finding material '${itemData.materialName}' in invoice ${invoice.invoiceCode}:`, materialError);
                                     throw new Error(`Error en material '${itemData.materialName}': ${materialError instanceof Error ? materialError.message : 'Unknown error'}`);
                                 }
-                                const effectiveItemDate = itemData.itemDate ? new Date(itemData.itemDate) : currentInvoiceIssueDate;
+                                const effectiveItemDate = parseItemDate(itemData.itemDate, currentInvoiceIssueDate);
                                 const currentItemUnitPrice = new Prisma.Decimal(itemData.unitPrice.toFixed(3));
 
                                 const lastSeenPriceRecordInThisInvoice = intraInvoiceMaterialPriceHistory.get(material.id);
@@ -3875,9 +3933,7 @@ export async function createManualInvoice(data: ManualInvoiceData): Promise<Crea
                 const listPriceDecimal = typeof itemData.listPrice === 'number' && !isNaN(itemData.listPrice)
                     ? new Prisma.Decimal(itemData.listPrice.toFixed(3))
                     : null;
-                const discountPercentageDecimal = typeof itemData.discountPercentage === 'number' && !isNaN(itemData.discountPercentage)
-                    ? new Prisma.Decimal(itemData.discountPercentage.toFixed(2))
-                    : null;
+                const discountPercentageDecimal = toDiscountDecimal(itemData.discountPercentage);
                 const unitPriceDecimal = new Prisma.Decimal(itemData.unitPrice.toFixed(3));
                 const totalPriceDecimal = new Prisma.Decimal(itemData.totalPrice.toFixed(3));
 
@@ -4247,7 +4303,8 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
                 }
             }
 
-            for (const item of processedItems) {
+            for (let itemIndex = 0; itemIndex < processedItems.length; itemIndex++) {
+                const item = processedItems[itemIndex];
                 // 🚦 Validate item data to prevent runtime errors
                 if (!item.materialName) {
                     console.warn(`[saveExtractedInvoice][Invoice ${extractedData.invoiceCode}] Skipping line item due to missing material name (file: ${fileName ?? "unknown"}). Item data:`, item);
@@ -4287,17 +4344,20 @@ export async function saveExtractedInvoice(extractedData: ExtractedPdfData, file
                 }
 
                 try {
-                    const material = await findOrCreateMaterialTxWithCache(tx, item.materialName, item.materialCode, provider.type, materialCache, user.id, IMPORT_MATERIAL_MATCH);
-                    await processInvoiceItemTx(
-                        tx,
-                        item,
-                        invoice.id,
-                        new Date(extractedData.issueDate),
-                        provider.id,
-                        material,
-                        item.isMaterial ?? true,
-                    ).then(({ alert }) => {
-                        if (alert) alertsCreated += 1;
+                    await withTransactionSavepoint(tx, `save_item_${itemIndex}`, async () => {
+                        const material = await findOrCreateMaterialTxWithCache(tx, item.materialName, item.materialCode, provider.type, materialCache, user.id, IMPORT_MATERIAL_MATCH);
+                        const { alert } = await processInvoiceItemTx(
+                            tx,
+                            item,
+                            invoice.id,
+                            new Date(extractedData.issueDate),
+                            provider.id,
+                            material,
+                            item.isMaterial ?? true,
+                        );
+                        if (alert) {
+                            alertsCreated += 1;
+                        }
                     });
                     itemsProcessed++;
                 } catch (itemErr) {
@@ -4563,9 +4623,7 @@ export async function updateInvoiceAction(payload: UpdateInvoiceInput): Promise<
                 const listPriceDecimal = input.listPrice !== null && input.listPrice !== undefined
                     ? new Prisma.Decimal(input.listPrice.toFixed(3))
                     : null;
-                const discountPercentageDecimal = input.discountPercentage !== null && input.discountPercentage !== undefined
-                    ? new Prisma.Decimal(input.discountPercentage.toFixed(2))
-                    : null;
+                const discountPercentageDecimal = toDiscountDecimal(input.discountPercentage);
 
                 const normalizedMaterialName = input.materialName;
 
@@ -4753,15 +4811,116 @@ function mapInvoiceToStoredComparison(
     };
 }
 
+type PreloadedInvoiceForReanalysis = {
+    id: string;
+    invoiceCode: string;
+    issueDate: Date;
+    totalAmount: Prisma.Decimal;
+    ivaPercentage: Prisma.Decimal | null;
+    retentionAmount: Prisma.Decimal | null;
+    originalFileName: string | null;
+    provider: { name: string; cif: string };
+    items: Array<{
+        id: string;
+        description: string | null;
+        quantity: Prisma.Decimal;
+        unitPrice: Prisma.Decimal;
+        totalPrice: Prisma.Decimal;
+        workOrder: string | null;
+        discountPercentage: Prisma.Decimal | null;
+        lineNumber: number | null;
+        material: { name: string; code: string };
+    }>;
+};
+
+async function loadStoredInvoicesByFileNames(
+    fileNames: string[],
+    userId: string,
+): Promise<Map<string, PreloadedInvoiceForReanalysis>> {
+    const uniqueNames = Array.from(new Set(fileNames.filter((name) => name.length > 0)));
+    if (uniqueNames.length === 0) {
+        return new Map();
+    }
+
+    const invoices = await prisma.invoice.findMany({
+        where: {
+            originalFileName: { in: uniqueNames },
+            provider: { userId },
+        },
+        include: {
+            provider: true,
+            items: {
+                include: { material: true },
+                orderBy: [
+                    { lineNumber: 'asc' },
+                    { createdAt: 'asc' },
+                ],
+            },
+        },
+    });
+
+    const map = new Map<string, PreloadedInvoiceForReanalysis>();
+    for (const invoice of invoices) {
+        if (invoice.originalFileName) {
+            map.set(invoice.originalFileName, invoice);
+        }
+    }
+
+    return map;
+}
+
+function stripNullBytes(value: string): string {
+    return value.replace(/\u0000/g, '');
+}
+
+function sanitizeForPostgresJson<T>(value: T): T {
+    if (value === null || value === undefined) {
+        return value;
+    }
+
+    if (typeof value === 'string') {
+        return stripNullBytes(value) as T;
+    }
+
+    if (Array.isArray(value)) {
+        return value.map((entry) => sanitizeForPostgresJson(entry)) as T;
+    }
+
+    if (typeof value === 'object') {
+        if (value instanceof Date) {
+            return value;
+        }
+
+        const sanitized: Record<string, unknown> = {};
+        for (const [key, entry] of Object.entries(value)) {
+            sanitized[key] = sanitizeForPostgresJson(entry);
+        }
+        return sanitized as T;
+    }
+
+    return value;
+}
+
 async function reanalyzeSinglePdf(
     r2Key: string,
-    userId: string,
+    storedInvoicesByFileName: Map<string, PreloadedInvoiceForReanalysis>,
 ): Promise<InvoiceComparisonResult> {
     const fileName = r2Key.split('/').pop() || 'invoice.pdf';
 
     try {
         const pdfFile = await downloadPdfFromR2(r2Key);
-        const extraction = await callPdfExtractAPI(pdfFile, []);
+        const extractionTimeoutMs = 4 * 60 * 1000;
+        const extraction = await Promise.race([
+            callPdfExtractAPIWithRetry(pdfFile, [], 3),
+            new Promise<CallPdfExtractAPIResponse>((resolve) => {
+                setTimeout(() => {
+                    resolve({
+                        extractedData: null,
+                        error: `Timeout de extracción tras ${Math.round(extractionTimeoutMs / 1000)}s`,
+                    });
+                }, extractionTimeoutMs);
+            }),
+        ]);
 
         if (!extraction.extractedData) {
             return {
@@ -4773,22 +4932,7 @@ async function reanalyzeSinglePdf(
             };
         }
 
-        const storedInvoice = await prisma.invoice.findFirst({
-            where: {
-                originalFileName: fileName,
-                provider: { userId },
-            },
-            include: {
-                provider: true,
-                items: {
-                    include: { material: true },
-                    orderBy: [
-                        { lineNumber: 'asc' },
-                        { createdAt: 'asc' },
-                    ],
-                },
-            },
-        });
+        const storedInvoice = storedInvoicesByFileName.get(fileName);
 
         if (!storedInvoice) {
             return {
@@ -4870,25 +5014,31 @@ async function processReanalysisJobInBackground(
             },
         });
 
-        for (let index = 0; index < r2Keys.length; index++) {
-            const r2Key = r2Keys[index];
-            const fileName = r2Key.split('/').pop() || 'invoice.pdf';
+        const fileNames = r2Keys.map((r2Key) => r2Key.split('/').pop() || 'invoice.pdf');
+        const storedInvoicesByFileName = await loadStoredInvoicesByFileNames(fileNames, userId);
+        const concurrencyLimit = getR2ProcessingConcurrencyLimit(r2Keys.length);
+
+        for (let index = 0; index < r2Keys.length; index += concurrencyLimit) {
+            const keyChunk = r2Keys.slice(index, index + concurrencyLimit);
+            const currentFileName = keyChunk[0]?.split('/').pop() || null;
 
             await prisma.batchReanalysisJob.update({
                 where: { id: jobId },
                 data: {
-                    currentFile: fileName,
+                    currentFile: currentFileName ? stripNullBytes(currentFileName) : null,
                     processedFiles: index,
                 },
             });
 
-            const result = await reanalyzeSinglePdf(r2Key, userId);
-            results.push(result);
+            const chunkResults = await Promise.all(
+                keyChunk.map((r2Key) => reanalyzeSinglePdf(r2Key, storedInvoicesByFileName)),
+            );
+            results.push(...chunkResults);
 
             await prisma.batchReanalysisJob.update({
                 where: { id: jobId },
                 data: {
-                    processedFiles: index + 1,
+                    processedFiles: Math.min(index + keyChunk.length, r2Keys.length),
                 },
             });
         }
@@ -4901,17 +5051,18 @@ async function processReanalysisJobInBackground(
                 status: 'COMPLETED',
                 processedFiles: r2Keys.length,
                 currentFile: null,
-                report: report as unknown as Prisma.InputJsonValue,
+                report: sanitizeForPostgresJson(report) as unknown as Prisma.InputJsonValue,
                 completedAt: new Date(),
             },
         });
     } catch (error) {
         console.error(`[processReanalysisJobInBackground] Fatal error for job ${jobId}`, error);
+        const errorMessage = error instanceof Error ? error.message : 'Error inesperado durante el reanálisis';
         await prisma.batchReanalysisJob.update({
             where: { id: jobId },
             data: {
                 status: 'FAILED',
-                error: error instanceof Error ? error.message : 'Error inesperado durante el reanálisis',
+                error: stripNullBytes(errorMessage),
                 completedAt: new Date(),
             },
         }).catch((updateError) => {
