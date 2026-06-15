@@ -8,6 +8,7 @@ import { AlertTriangle, CheckCircle, XCircle, Clock, FileText, ChevronDown, Chev
 import { formatDateTime } from "@/lib/utils"
 import { BatchErrorsDialog } from "@/components/batch-errors-dialog"
 import { BatchReanalysisDialog } from "@/components/batch-reanalysis-dialog"
+import { BatchProgressIndicator } from "@/components/batch-progress-indicator"
 import { getBatchHistory, retryBatchSession, cancelBatchSession, startReanalyzeBatchSessionAction } from "@/lib/actions/invoices"
 import type { BatchProgressInfo, ReanalysisJobInfo } from "@/lib/actions/invoices"
 import { useActiveReanalysisJobs } from "@/hooks/use-analytics"
@@ -56,6 +57,7 @@ function BatchHistoryItem({
     const canRetry = !!onRetry && (batch.status === 'FAILED' || (batch.status === 'COMPLETED' && hasErrors))
     const canCancel = !!onCancel && (batch.status === 'PENDING' || batch.status === 'PROCESSING')
     const canReanalyze = !!onReanalyze && batch.status === 'COMPLETED'
+    const isProcessing = batch.status === 'PENDING' || batch.status === 'PROCESSING'
     const isReanalysisRunning = reanalysisJob?.status === 'PENDING' || reanalysisJob?.status === 'PROCESSING'
     const hasReanalysisReport = reanalysisJob?.status === 'COMPLETED' && !!reanalysisJob.report
 
@@ -81,6 +83,12 @@ function BatchHistoryItem({
                                     {duplicateCount} duplicadas
                                 </Badge>
                             )}
+                            {isProcessing ? (
+                                <Badge variant="outline" className="text-xs text-blue-600 border-blue-200">
+                                    <Loader2 className="h-3 w-3 mr-1 animate-spin inline" />
+                                    Procesando {batch.processedFiles}/{batch.totalFiles}
+                                </Badge>
+                            ) : null}
                             {isReanalysisRunning ? (
                                 <Badge variant="outline" className="text-xs text-blue-600 border-blue-200">
                                     <Loader2 className="h-3 w-3 mr-1 animate-spin inline" />
@@ -91,10 +99,24 @@ function BatchHistoryItem({
                         <div className="text-xs text-muted-foreground mt-3">
                             {batch.totalFiles} archivos • {formatDateTime(batch.createdAt)}
                         </div>
-                        {isReanalysisRunning && reanalysisJob.currentFile ? (
-                            <p className="text-xs text-muted-foreground mt-1 truncate max-w-md">
-                                Procesando: {reanalysisJob.currentFile}
-                            </p>
+                        {isProcessing ? (
+                            <div className="mt-2 max-w-md">
+                                <BatchProgressIndicator
+                                    processedFiles={batch.processedFiles}
+                                    totalFiles={batch.totalFiles}
+                                    currentFile={batch.currentFile}
+                                />
+                            </div>
+                        ) : null}
+                        {isReanalysisRunning ? (
+                            <div className="mt-2 max-w-md">
+                                <BatchProgressIndicator
+                                    processedFiles={reanalysisJob.processedFiles}
+                                    totalFiles={reanalysisJob.totalFiles}
+                                    currentFile={reanalysisJob.currentFile}
+                                    label="Reanalizando"
+                                />
+                            </div>
                         ) : null}
                     </div>
                 </div>
@@ -255,6 +277,12 @@ export function BatchHistoryCard() {
         },
         staleTime: 30 * 1000,
         gcTime: 5 * 60 * 1000,
+        refetchInterval: (query) => {
+            const hasActiveProcessing = query.state.data?.some(
+                (batch) => batch.status === 'PENDING' || batch.status === 'PROCESSING',
+            )
+            return hasActiveProcessing ? 5000 : false
+        },
     })
 
     const { data: reanalysisJobs = [] } = useActiveReanalysisJobs()
@@ -283,7 +311,7 @@ export function BatchHistoryCard() {
 
             if (currentJob.status === 'COMPLETED' && currentJob.report) {
                 toast.success("Informe de reanálisis listo", {
-                    description: `${currentJob.report.matchedCount} iguales, ${currentJob.report.diffCount} con diferencias`,
+                    description: `${currentJob.report.matchedCount} iguales, ${currentJob.report.diffCount} con diferencias, ${currentJob.report.minorDiffCount ?? 0} menores`,
                     action: {
                         label: "Ver informe",
                         onClick: () => {

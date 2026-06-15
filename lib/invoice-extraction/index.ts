@@ -9,9 +9,12 @@ export {
     summarizeBatchReanalysisReport,
     type BatchReanalysisReport,
     type FieldDiff,
+    type FieldDiffSeverity,
     type InvoiceComparisonResult,
     type InvoiceComparisonStatus,
     type LineDiff,
     type StoredInvoiceForComparison,
     type StoredInvoiceItemForComparison,
+    isMinorDiffField,
+    resolveComparisonStatus,
 } from '@/lib/invoice-extraction/compare-extraction';

@@ -25,8 +25,13 @@ LINE ITEMS (one JSON object per product/service row, in exact visual order):
 • unitPrice — Unit price of THIS row from PRECIO UNITARIO. 0.00 if cell is blank.
 • totalPrice — Line total of THIS row from IMPORTE / TOTAL. 0.00 if cell is blank.
 • itemDate — YYYY-MM-DD only if line date differs from invoice date; else null.
-• workOrder — OT/CECO from section header (e.g. "S/REF: 074129/001941" → "074129"). Inherit until next section.
-• description — Extra detail beyond materialName on same row; null if redundant.
+• workOrder — OT/CECO from section header. Examples:
+  - "S/REF: 074129/001941" → "074129"
+  - "S/REF: 99675-OT4095-129" → "4095" (use the OT segment, not the delivery ref)
+  - "OBRA: CONSTRAULA SAU (OT.4075)" → "4075"
+  Inherit until next section. Store only the OT digits, without "OT-" prefix.
+• description — Extra line detail beyond materialName (S/REF text, OBRA, delivery notes). null if redundant.
+  NEVER include "ALBARAN Nº ..." header rows in description.
 
 SPANISH INVOICE COLUMN MAPPING (CRITICAL):
 • materialCode ← CÓDIGO / REF / ARTÍCULO column only.
@@ -44,6 +49,14 @@ ORDER:
 
 WORK ORDERS:
 • Section headers like "S/REF: 074129/001941" → extract OT "074129" and apply to all following items until a new section.
+• "S/REF: 99675-OT4095-129" → workOrder "4095" (OT segment), NOT "99675".
+• "OBRA: CONSTRAULA SAU (OT.4075)" at section footer → workOrder "4075" for items in that section.
+• Do NOT concatenate ref + OT + suffix into one long number.
+
+SALTOKI / ALBARÁN LAYOUT:
+• Rows like "ALBARAN Nº 701.152 FECHA ..." are document headers, NOT line items and NOT description.
+• Product rows have CÓDIGO + CANTIDAD + CONCEPTO. materialName = CONCEPTO product text only.
+• S/REF and OBRA blocks belong in workOrder/description context, not in materialName.
 
 SKIP (not line items):
 • Loyalty points, promotions, subtotal headers without products, asterisk dividers, metadata rows.

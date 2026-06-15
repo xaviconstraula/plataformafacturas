@@ -8,6 +8,7 @@ import { useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { BatchErrorsDialog } from "@/components/batch-errors-dialog"
+import { BatchProgressIndicator } from "@/components/batch-progress-indicator"
 import { getBatchById } from "@/lib/actions/invoices"
 import type { BatchProgressInfo } from "@/lib/actions/invoices"
 import { groupBatchesByTimeWindow } from "@/lib/utils/batch-grouping"
@@ -123,7 +124,9 @@ export function BatchProgressBanner() {
 
     // Aggregate the total number of files across all active batches
     const aggregated = activeBatches.reduce((sum, b) => sum + (b.totalFiles ?? 0), 0)
+    const aggregatedProcessed = activeBatches.reduce((sum, b) => sum + (b.processedFiles ?? 0), 0)
     const totalFiles = expectedTotal && expectedTotal > aggregated ? expectedTotal : aggregated
+    const currentFile = activeBatches.find((batch) => batch.currentFile)?.currentFile
 
     // Emit event when we reach the expected total
     useEffect(() => {
@@ -311,16 +314,20 @@ export function BatchProgressBanner() {
             {shouldShowBanner && (
                 <div className="mb-6">
                     <Card className="border-blue-200 bg-blue-50">
-                        <CardContent className="pt-4 pb-4">
-                            <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-3">
-                                    <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
-                                    <FileText className="h-5 w-5 text-blue-600" />
-                                    <span className="font-medium text-base">
-                                        Procesando {totalFiles} factura{totalFiles !== 1 ? 's' : ''}
-                                    </span>
-                                </div>
+                        <CardContent className="pt-4 pb-4 space-y-3">
+                            <div className="flex items-center gap-3">
+                                <Loader2 className="h-5 w-5 animate-spin text-blue-600 shrink-0" />
+                                <FileText className="h-5 w-5 text-blue-600 shrink-0" />
+                                <span className="font-medium text-base">
+                                    Procesando {totalFiles} factura{totalFiles !== 1 ? 's' : ''}
+                                </span>
                             </div>
+                            <BatchProgressIndicator
+                                processedFiles={aggregatedProcessed}
+                                totalFiles={totalFiles}
+                                currentFile={currentFile}
+                                label="Progreso"
+                            />
                         </CardContent>
                     </Card>
                 </div>

@@ -7,7 +7,7 @@ import { groupBatchesByTimeWindow as groupBatchesUtil } from "@/lib/utils/batch-
 import { revalidatePath } from "next/cache";
 import { GoogleGenAI } from "@google/genai";
 import { getExtractFormat, extractInvoiceJsonFromPdf, compareStoredVsExtracted, summarizeBatchReanalysisReport, type BatchReanalysisReport, type InvoiceComparisonResult, type StoredInvoiceForComparison } from "@/lib/invoice-extraction";
-import { normalizeMaterialCode, areMaterialCodesSimilar, normalizeCifForComparison, buildCifVariants } from "@/lib/utils";
+import { normalizeMaterialCode, areMaterialCodesSimilar, normalizeCifForComparison, buildCifVariants, normalizeMaterialName, generateStandardMaterialCode } from "@/lib/utils";
 import { checkVAT, countries } from "jsvat";
 import { parseJsonLinesFromFile } from "@/lib/utils/jsonl-parser";
 import { requireAuth } from "@/lib/auth-utils";
@@ -1953,6 +1953,26 @@ async function findOrCreateMaterialTxWithCache(
     return await findOrCreateMaterialTx(tx, materialName, materialCode, providerType, userId, options);
 }
 
+function materialMatchesRequestedProduct(
+    existing: Pick<Material, 'name' | 'code' | 'referenceCode'>,
+    normalizedName: string,
+    finalCode: string | null,
+): boolean {
+    if (normalizeMaterialName(existing.name) === normalizeMaterialName(normalizedName)) {
+        return true;
+    }
+
+    if (!finalCode) {
+        return false;
+    }
+
+    if (existing.code && normalizeMaterialCode(existing.code) === finalCode) {
+        return true;
+    }
+
+    return Boolean(existing.referenceCode && normalizeMaterialCode(existing.referenceCode) === finalCode);
+}
+
 async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName: string, materialCode?: string, providerType?: string, userId?: string, options?: MaterialMatchOptions): Promise<Material> {
     const normalizedName = materialName.trim();
     const strictCodeMatch = options?.strictCodeMatch === true;
@@ -2021,31 +2041,28 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
     const category = providerType === 'MACHINERY_RENTAL' ? 'Alquiler Maquinaria' : 'Proveedor de Materiales';
 
     if (!material) {
-        // Generate a base code
-        const baseCode = (materialCode && materialCode !== 'null') ? materialCode : normalizedName.toLowerCase()
-            .normalize('NFD')
-            .replace(/[\u0300-\u036f]/g, '') // Remove accents
-            .replace(/[^a-z0-9\s]/g, '') // Remove special characters
-            .replace(/\s+/g, '-')
-            .substring(0, 45); // Leave room for suffix
+        const baseCode = generateStandardMaterialCode(
+            normalizedName,
+            materialCode && materialCode !== 'null' ? materialCode : undefined,
+        );
 
-        // Try to create with base code first, then with suffixes if needed
         let attempts = 0;
         const maxAttempts = 10;
 
         while (attempts < maxAttempts) {
             const codeToTry = attempts === 0 ? baseCode : `${baseCode}-${attempts}`;
 
-            // First, check if a material with this code already exists to avoid the unique constraint violation
-            // which would abort the entire transaction.
             const existingMaterialWithCode = await tx.material.findFirst({
                 where: { code: codeToTry, userId: userId ?? undefined },
-                select: { id: true }, // Lightweight query
             });
 
             if (existingMaterialWithCode) {
+                if (materialMatchesRequestedProduct(existingMaterialWithCode, normalizedName, finalCode)) {
+                    return existingMaterialWithCode;
+                }
+
                 attempts++;
-                continue; // Move to the next attempt with a new suffix
+                continue;
             }
 
             try {
@@ -2054,33 +2071,39 @@ async function findOrCreateMaterialTx(tx: Prisma.TransactionClient, materialName
                         code: codeToTry,
                         name: normalizedName,
                         category: category,
-                        referenceCode: materialCode && materialCode !== 'null' ? materialCode : null, // Keep original code from PDF, but not string 'null'
+                        referenceCode: materialCode && materialCode !== 'null' ? materialCode : null,
                         ...(userId ? { user: { connect: { id: userId } } } : {}),
                     },
                 });
-                break; // Success, exit loop
+                break;
             } catch (error) {
-                // This catch block now primarily handles race conditions, where another
-                // transaction created a material with the same code *after* our check but *before* our create.
                 if (typeof error === 'object' && error !== null && 'code' in error && (error as { code: string }).code === 'P2002') {
+                    const recoveredMaterial = await tx.material.findFirst({
+                        where: { code: codeToTry, userId: userId ?? undefined },
+                    });
+
+                    if (recoveredMaterial && materialMatchesRequestedProduct(recoveredMaterial, normalizedName, finalCode)) {
+                        material = recoveredMaterial;
+                        break;
+                    }
+
                     attempts++;
-                    // The loop will continue, and our check at the top will now find the conflicting material.
                 } else {
-                    // For any other error, we must re-throw to abort the transaction.
                     throw error;
                 }
             }
         }
 
         if (!material) {
-            if (!strictCodeMatch) {
-                const existingMaterial = await tx.material.findFirst({
-                    where: { name: { equals: normalizedName, mode: 'insensitive' } }
-                });
+            const existingMaterial = await tx.material.findFirst({
+                where: {
+                    name: { equals: normalizedName, mode: 'insensitive' },
+                    userId: userId ?? undefined,
+                },
+            });
 
-                if (existingMaterial) {
-                    return existingMaterial;
-                }
+            if (existingMaterial) {
+                return existingMaterial;
             }
 
             throw new Error(`Could not create material '${normalizedName}' due to a temporary code conflict. Please try again.`);

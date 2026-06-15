@@ -1,4 +1,5 @@
 import type { ExtractedPdfData, ExtractedPdfItemData } from '@/lib/types/pdf';
+import { canonicalizeLineNote, canonicalizeWorkOrder } from '@/lib/invoice-extraction/normalize-line-context';
 import { normalizeCifForComparison, normalizeMaterialCode } from '@/lib/utils';
 
 function collapseWhitespace(value: string): string {
@@ -35,8 +36,8 @@ function normalizeItem(item: ExtractedPdfItemData): ExtractedPdfItemData {
         ...item,
         materialName: collapseWhitespace(item.materialName ?? ''),
         materialCode: materialCode || undefined,
-        description: normalizeOptionalText(item.description),
-        workOrder: normalizeOptionalText(item.workOrder),
+        description: canonicalizeLineNote(item.description),
+        workOrder: canonicalizeWorkOrder(item.workOrder),
         itemDate: normalizeOptionalText(item.itemDate),
         quantity: Number(item.quantity.toFixed(3)),
         unitPrice: Number(item.unitPrice.toFixed(3)),

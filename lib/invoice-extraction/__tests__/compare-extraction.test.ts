@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     compareStoredVsExtracted,
+    normalizeWorkOrderForComparison,
     summarizeBatchReanalysisReport,
     type StoredInvoiceForComparison,
 } from '@/lib/invoice-extraction/compare-extraction';
@@ -135,6 +136,165 @@ describe('compareStoredVsExtracted', () => {
         const result = compareStoredVsExtracted(stored, extracted);
         assert.equal(result.status, 'match');
     });
+
+    it('treats equivalent work order formats as match', () => {
+        const stored = buildStored({
+            items: [{
+                id: 'item-1',
+                description: null,
+                quantity: 1,
+                unitPrice: 100,
+                totalPrice: 100,
+                workOrder: '4078',
+                discountPercentage: 0,
+                lineNumber: 1,
+                material: { name: 'TERMO ELECTRICO GZT 500L', code: 'TERM001' },
+            }],
+        });
+        const extracted = buildExtracted({
+            items: [{
+                materialName: 'TERMO ELECTRICO GZT 500L',
+                materialCode: 'TERM001',
+                isMaterial: true,
+                quantity: 1,
+                unitPrice: 100,
+                totalPrice: 100,
+                workOrder: 'OT-4078',
+                discountPercentage: 0,
+                lineNumber: 1,
+            }],
+        });
+
+        const result = compareStoredVsExtracted(stored, extracted);
+        assert.equal(result.status, 'match');
+        assert.equal(normalizeWorkOrderForComparison('4078'), '4078');
+        assert.equal(normalizeWorkOrderForComparison('OT-4078'), '4078');
+        assert.equal(normalizeWorkOrderForComparison('OT4078'), '4078');
+    });
+
+    it('compares product name from material.name, not line description notes', () => {
+        const stored = buildStored({
+            items: [{
+                id: 'item-1',
+                description: 'AVISAR 1 DIA ANTES',
+                quantity: 1,
+                unitPrice: 100,
+                totalPrice: 100,
+                workOrder: '4078',
+                discountPercentage: 0,
+                lineNumber: 1,
+                material: { name: 'TERMO ELECTRICO GZT 500L', code: 'TERM001' },
+            }],
+        });
+        const extracted = buildExtracted({
+            items: [{
+                materialName: 'TERMO ELECTRICO GZT 500L',
+                materialCode: 'TERM001',
+                isMaterial: true,
+                quantity: 1,
+                unitPrice: 100,
+                totalPrice: 100,
+                workOrder: '4078',
+                discountPercentage: 0,
+                lineNumber: 1,
+            }],
+        });
+
+        const result = compareStoredVsExtracted(stored, extracted);
+        assert.equal(result.status, 'minor_diff');
+        assert.ok(result.lineDiffs?.[0].fields.some((field) => field.field === 'lineNote' && field.severity === 'minor'));
+        assert.ok(!result.lineDiffs?.[0].fields.some((field) => field.field === 'materialName'));
+    });
+
+    it('matches repositioned lines by content instead of reporting missing and extra', () => {
+        const stored = buildStored({
+            items: [
+                {
+                    id: 'item-1',
+                    description: null,
+                    quantity: 1,
+                    unitPrice: 50,
+                    totalPrice: 50,
+                    workOrder: null,
+                    discountPercentage: 0,
+                    lineNumber: 1,
+                    material: { name: 'PRODUCTO PRINCIPAL', code: 'P001' },
+                },
+                {
+                    id: 'item-2',
+                    description: null,
+                    quantity: 1,
+                    unitPrice: 2.5,
+                    totalPrice: 2.5,
+                    workOrder: null,
+                    discountPercentage: 0,
+                    lineNumber: 8,
+                    material: { name: 'ECOTASA DE RESIDUOS DE APARATO', code: 'ECO001' },
+                },
+            ],
+        });
+        const extracted = buildExtracted({
+            items: [
+                {
+                    materialName: 'PRODUCTO PRINCIPAL',
+                    materialCode: 'P001',
+                    isMaterial: true,
+                    quantity: 1,
+                    unitPrice: 50,
+                    totalPrice: 50,
+                    lineNumber: 1,
+                },
+                {
+                    materialName: 'ECOTASA DE RESIDUOS DE APARATO',
+                    materialCode: 'ECO001',
+                    isMaterial: true,
+                    quantity: 1,
+                    unitPrice: 2.5,
+                    totalPrice: 2.5,
+                    lineNumber: 2,
+                },
+            ],
+        });
+
+        const result = compareStoredVsExtracted(stored, extracted);
+        assert.equal(result.status, 'minor_diff');
+        assert.ok(!result.lineDiffs?.some((line) => line.matchKind === 'missing'));
+        assert.ok(!result.lineDiffs?.some((line) => line.matchKind === 'extra'));
+        assert.ok(result.lineDiffs?.some((line) => line.matchKind === 'content' && line.fields.some((field) => field.field === 'lineNumber' && field.severity === 'minor')));
+    });
+
+    it('treats work order-only differences as minor', () => {
+        const stored = buildStored({
+            items: [{
+                id: 'item-1',
+                description: null,
+                quantity: 1,
+                unitPrice: 100,
+                totalPrice: 100,
+                workOrder: '4078',
+                discountPercentage: 0,
+                lineNumber: 1,
+                material: { name: 'TERMO ELECTRICO GZT 500L', code: 'TERM001' },
+            }],
+        });
+        const extracted = buildExtracted({
+            items: [{
+                materialName: 'TERMO ELECTRICO GZT 500L',
+                materialCode: 'TERM001',
+                isMaterial: true,
+                quantity: 1,
+                unitPrice: 100,
+                totalPrice: 100,
+                workOrder: 'OT-9999',
+                discountPercentage: 0,
+                lineNumber: 1,
+            }],
+        });
+
+        const result = compareStoredVsExtracted(stored, extracted);
+        assert.equal(result.status, 'minor_diff');
+        assert.ok(result.lineDiffs?.[0].fields.some((field) => field.field === 'workOrder' && field.severity === 'minor'));
+    });
 });
 
 describe('summarizeBatchReanalysisReport', () => {
@@ -142,12 +302,14 @@ describe('summarizeBatchReanalysisReport', () => {
         const summary = summarizeBatchReanalysisReport([
             { fileName: 'a.pdf', r2Key: 'batch/a.pdf', invoiceCode: 'A', status: 'match' },
             { fileName: 'b.pdf', r2Key: 'batch/b.pdf', invoiceCode: 'B', status: 'diff' },
+            { fileName: 'e.pdf', r2Key: 'batch/e.pdf', invoiceCode: 'E', status: 'minor_diff' },
             { fileName: 'c.pdf', r2Key: 'batch/c.pdf', invoiceCode: 'C', status: 'not_found' },
             { fileName: 'd.pdf', r2Key: 'batch/d.pdf', invoiceCode: 'D', status: 'extraction_error', error: 'fail' },
         ]);
 
         assert.equal(summary.matchedCount, 1);
         assert.equal(summary.diffCount, 1);
+        assert.equal(summary.minorDiffCount, 1);
         assert.equal(summary.notFoundCount, 1);
         assert.equal(summary.errorCount, 1);
     });

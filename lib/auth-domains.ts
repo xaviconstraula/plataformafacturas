@@ -37,7 +37,7 @@ export function getAllowedHosts(): string[] {
         if (host) hosts.add(host)
     }
 
-    if (process.env.NODE_ENV !== "production") {
+    if (process.env.NODE_ENV !== "production" && process.env.AUTH_DEV_EXPANDED_HOSTS === "true") {
         for (const host of DEV_HOSTS) {
             hosts.add(host)
         }
@@ -47,7 +47,18 @@ export function getAllowedHosts(): string[] {
         hosts.add("localhost:3000")
     }
 
+    addLoopbackAliasHosts(hosts)
+
     return [...hosts]
+}
+
+function addLoopbackAliasHosts(hosts: Set<string>): void {
+    for (const host of [...hosts]) {
+        const [, hostname, port = "3000"] = host.match(/^(localhost|127\.0\.0\.1)(?::(\d+))?$/) ?? []
+        if (!hostname) continue
+        hosts.add(`localhost:${port}`)
+        hosts.add(`127.0.0.1:${port}`)
+    }
 }
 
 function hostToOrigins(host: string): string[] {
@@ -59,16 +70,30 @@ function hostToOrigins(host: string): string[] {
 
 /** Origins passed to Better Auth trustedOrigins */
 export function getTrustedOriginsList(): string[] {
-    const origins = getAllowedHosts().flatMap(hostToOrigins)
+    const origins = new Set<string>()
+
+    if (process.env.NODE_ENV !== "production" && !process.env.ALLOWED_HOSTS) {
+        const baseUrl = process.env.BETTER_AUTH_URL || "http://localhost:3000"
+        origins.add(baseUrl)
+
+        const host = hostFromUrl(baseUrl)
+        if (host?.startsWith("localhost:")) {
+            origins.add(`http://127.0.0.1:${host.split(":")[1]}`)
+        }
+    } else {
+        for (const origin of getAllowedHosts().flatMap(hostToOrigins)) {
+            origins.add(origin)
+        }
+    }
 
     if (process.env.BETTER_AUTH_TRUSTED_ORIGINS) {
         for (const origin of process.env.BETTER_AUTH_TRUSTED_ORIGINS.split(",")) {
             const trimmed = origin.trim()
-            if (trimmed) origins.push(trimmed)
+            if (trimmed) origins.add(trimmed)
         }
     }
 
-    return [...new Set(origins)]
+    return [...origins]
 }
 
 function getFallbackBaseUrl(allowedHosts: string[]): string {
@@ -90,6 +115,10 @@ export type AuthBaseURLConfig =
       }
 
 export function getAuthBaseURLConfig(): AuthBaseURLConfig {
+    if (process.env.NODE_ENV !== "production" && !process.env.ALLOWED_HOSTS) {
+        return process.env.BETTER_AUTH_URL || "http://localhost:3000"
+    }
+
     const allowedHosts = getAllowedHosts()
 
     if (allowedHosts.length > 1) {
