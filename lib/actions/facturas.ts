@@ -503,6 +503,7 @@ export async function getInvoiceDetails(id: string) {
                 unitPrice: item.unitPrice.toNumber(),
                 totalPrice: item.totalPrice.toNumber(),
                 workOrder: item.workOrder,
+                description: item.description,
                 material: {
                     id: item.material.id,
                     name: item.material.name,

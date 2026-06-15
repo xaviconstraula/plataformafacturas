@@ -1138,123 +1138,6 @@ export interface UpdateInvoiceActionResult {
 type InvoiceWithProvider = Invoice & { provider: Provider };
 type InvoiceWithProviderAndItems = InvoiceWithProvider & { items: (InvoiceItem & { material: Material })[] };
 
-async function syncMaterialPricingForInvoiceItem(
-    tx: Prisma.TransactionClient,
-    invoice: InvoiceWithProvider,
-    materialId: string,
-    unitPriceDecimal: Prisma.Decimal,
-): Promise<void> {
-    const invoiceIssueDate = invoice.issueDate;
-
-    const materialProvider = await tx.materialProvider.findUnique({
-        where: {
-            materialId_providerId: {
-                materialId,
-                providerId: invoice.providerId,
-            },
-        },
-    });
-
-    if (!materialProvider || !materialProvider.lastPriceDate || invoiceIssueDate.getTime() >= materialProvider.lastPriceDate.getTime()) {
-        await tx.materialProvider.upsert({
-            where: {
-                materialId_providerId: {
-                    materialId,
-                    providerId: invoice.providerId,
-                },
-            },
-            update: {
-                lastPrice: unitPriceDecimal,
-                lastPriceDate: invoiceIssueDate,
-            },
-            create: {
-                materialId,
-                providerId: invoice.providerId,
-                lastPrice: unitPriceDecimal,
-                lastPriceDate: invoiceIssueDate,
-            },
-        });
-    }
-
-    const existingAlert = await tx.priceAlert.findFirst({
-        where: {
-            invoiceId: invoice.id,
-            materialId,
-        },
-    });
-
-    if (existingAlert) {
-        let percentageDecimal: Prisma.Decimal;
-
-        if (existingAlert.oldPrice.isZero()) {
-            percentageDecimal = unitPriceDecimal.isZero()
-                ? new Prisma.Decimal(0)
-                : new Prisma.Decimal(unitPriceDecimal.isPositive() ? 9999 : -9999);
-        } else {
-            percentageDecimal = unitPriceDecimal.minus(existingAlert.oldPrice)
-                .dividedBy(existingAlert.oldPrice)
-                .times(100);
-        }
-
-        await tx.priceAlert.update({
-            where: { id: existingAlert.id },
-            data: {
-                newPrice: unitPriceDecimal,
-                percentage: percentageDecimal,
-            },
-        });
-
-        return;
-    }
-
-    const lastPurchase = await tx.invoiceItem.findFirst({
-        where: {
-            materialId,
-            invoice: {
-                providerId: invoice.providerId,
-                issueDate: {
-                    lt: invoiceIssueDate,
-                },
-            },
-        },
-        orderBy: {
-            itemDate: 'desc',
-        },
-    });
-
-    if (!lastPurchase) {
-        return;
-    }
-
-    const lastPrice = lastPurchase.unitPrice;
-    let percentageChange: Prisma.Decimal;
-
-    if (!lastPrice.isZero()) {
-        percentageChange = unitPriceDecimal.minus(lastPrice)
-            .dividedBy(lastPrice)
-            .times(100);
-    } else {
-        percentageChange = unitPriceDecimal.isZero()
-            ? new Prisma.Decimal(0)
-            : new Prisma.Decimal(unitPriceDecimal.isPositive() ? 9999 : -9999);
-    }
-
-    if (percentageChange.abs().gte(5)) {
-        await tx.priceAlert.create({
-            data: {
-                materialId,
-                providerId: invoice.providerId,
-                oldPrice: lastPrice,
-                newPrice: unitPriceDecimal,
-                percentage: percentageChange,
-                status: "PENDING",
-                effectiveDate: invoiceIssueDate,
-                invoiceId: invoice.id,
-            },
-        });
-    }
-}
-
 
 interface CallPdfExtractAPIResponse {
     extractedData: ExtractedPdfData | null;
@@ -4665,6 +4548,8 @@ export async function updateInvoiceAction(payload: UpdateInvoiceInput): Promise<
                     ? new Prisma.Decimal(input.discountPercentage.toFixed(2))
                     : null;
 
+                const normalizedMaterialName = input.materialName;
+
                 if (existingItem) {
                     await tx.invoiceItem.update({
                         where: { id: existingItem.id },
@@ -4676,24 +4561,13 @@ export async function updateInvoiceAction(payload: UpdateInvoiceInput): Promise<
                             unitPrice: unitPriceDecimal,
                             totalPrice: totalPriceDecimal,
                             workOrder: input.workOrder,
+                            description: normalizedMaterialName,
                         },
                     });
 
-                    const normalizedMaterialName = input.materialName;
-                    if (normalizedMaterialName && normalizedMaterialName !== existingItem.material.name) {
-                        await tx.material.update({
-                            where: { id: existingItem.materialId },
-                            data: {
-                                name: normalizedMaterialName,
-                            },
-                        });
-                    }
-
-                    await syncMaterialPricingForInvoiceItem(tx, invoice, existingItem.materialId, unitPriceDecimal);
                     continue;
                 }
 
-                const normalizedMaterialName = input.materialName;
                 let material: Material;
 
                 if (input.materialId) {
@@ -4719,16 +4593,6 @@ export async function updateInvoiceAction(payload: UpdateInvoiceInput): Promise<
                     );
                 }
 
-                if (normalizedMaterialName && normalizedMaterialName !== material.name) {
-                    await tx.material.update({
-                        where: { id: material.id },
-                        data: {
-                            name: normalizedMaterialName,
-                        },
-                    });
-                    material = { ...material, name: normalizedMaterialName };
-                }
-
                 const created = await tx.invoiceItem.create({
                     data: {
                         invoiceId: invoice.id,
@@ -4741,6 +4605,7 @@ export async function updateInvoiceAction(payload: UpdateInvoiceInput): Promise<
                         totalPrice: totalPriceDecimal,
                         itemDate: invoice.issueDate,
                         workOrder: input.workOrder,
+                        description: normalizedMaterialName,
                     },
                     include: {
                         material: true,
@@ -4748,7 +4613,6 @@ export async function updateInvoiceAction(payload: UpdateInvoiceInput): Promise<
                 });
 
                 createdItems.push(created);
-                await syncMaterialPricingForInvoiceItem(tx, invoice, created.materialId, unitPriceDecimal);
             }
 
             if (deletedSet.size > 0) {

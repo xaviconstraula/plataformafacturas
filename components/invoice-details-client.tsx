@@ -32,7 +32,7 @@ function createDraft(items: InvoiceDetailsItem[]): ItemDraft[] {
   return items.map((item) => ({
     id: item.id,
     materialId: item.materialId,
-    materialName: item.material.name,
+    materialName: item.description ?? item.material.name,
     quantity: item.quantity.toString(),
     listPrice: item.listPrice !== null && item.listPrice !== undefined ? item.listPrice.toString() : '',
     discountPercentage: item.discountPercentage !== null && item.discountPercentage !== undefined ? item.discountPercentage.toString() : '',
@@ -283,6 +283,7 @@ export function InvoiceDetailsClient({ invoice, updateInvoice }: InvoiceDetailsC
                 unitPrice: updated.unitPrice,
                 totalPrice: updated.totalPrice,
                 workOrder: updated.workOrder ?? null,
+                description: updated.materialName,
                 material: {
                   id: materialId,
                   name: updated.materialName,
@@ -301,10 +302,7 @@ export function InvoiceDetailsClient({ invoice, updateInvoice }: InvoiceDetailsC
               unitPrice: updated.unitPrice,
               totalPrice: updated.totalPrice,
               workOrder: updated.workOrder ?? null,
-              material: {
-                ...existing.material,
-                name: updated.materialName,
-              },
+              description: updated.materialName,
             }
           })
 
@@ -566,7 +564,7 @@ export function InvoiceDetailsClient({ invoice, updateInvoice }: InvoiceDetailsC
                       <tr key={item.id} className="border-b last:border-0">
                         <td className="p-3 align-top">
                           <div className="space-y-0.5">
-                            <p className="font-medium">{item.material.name}</p>
+                            <p className="font-medium">{item.description ?? item.material.name}</p>
                             {item.material.code ? (
                               <p className="text-xs text-muted-foreground">Código: {item.material.code}</p>
                             ) : null}

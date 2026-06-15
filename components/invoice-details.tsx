@@ -11,6 +11,7 @@ export interface InvoiceDetailsItem {
   unitPrice: number
   totalPrice: number
   workOrder: string | null
+  description: string | null
   material: {
     id: string
     name: string
