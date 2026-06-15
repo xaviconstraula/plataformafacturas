@@ -12,6 +12,7 @@ import {
     validateExtractedItems,
     type ItemValidationIssue,
 } from '@/lib/invoice-extraction/validate-items';
+import { normalizeExtractedInvoice } from '@/lib/invoice-extraction/normalize-extraction';
 
 function normalizeOptionalString(value: string | null | undefined): string | undefined {
     if (value === null || value === undefined) return undefined;
@@ -67,7 +68,7 @@ function normalizeItem(raw: ExtractedInvoiceJson['items'][number], index: number
 function mapInvoiceJson(parsed: ExtractedInvoiceJson): ExtractedPdfData {
     const items = parsed.items.map((row, i) => normalizeItem(row, i));
 
-    return {
+    return normalizeExtractedInvoice({
         invoiceCode: parsed.invoiceCode.trim(),
         issueDate: validateAndFixDate(parsed.issueDate.trim()),
         totalAmount: Number(parsed.totalAmount),
@@ -81,7 +82,7 @@ function mapInvoiceJson(parsed: ExtractedInvoiceJson): ExtractedPdfData {
             address: normalizeOptionalString(parsed.provider.address),
         },
         items,
-    };
+    });
 }
 
 export interface ParseJsonResult {

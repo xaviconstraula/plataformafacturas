@@ -20,7 +20,7 @@ import { MIN_ITEMS_BEFORE_FOLLOW_UP } from '@/lib/invoice-extraction/config';
 
 const GEMINI_JSON_CONFIG = {
     candidateCount: 1,
-    thinkingConfig: { thinkingBudget: 0 },
+    thinkingConfig: { thinkingBudget: 2048 },
 } as const;
 
 function getResponseText(result: {
@@ -157,20 +157,28 @@ export async function extractInvoiceJsonFromPdf(params: {
     if (
         !parseResult.data &&
         allowRetryOnValidation &&
-        parseResult.error?.includes('Validation failed')
+        parseResult.error
     ) {
-        promptText = buildJsonCorrectionPrompt(parseResult.error);
-        const { text } = await callGeminiJson(
-            gemini,
-            model,
-            promptText,
-            base64,
-            EXTRACTED_INVOICE_JSON_SCHEMA,
-        );
-        if (text) {
-            const retry = parseGeminiJsonExtraction(text);
-            if (retry.data) {
-                parseResult = { data: retry.data, finishReason: undefined };
+        const shouldRetry =
+            parseResult.error.includes('Validation failed') ||
+            parseResult.error.includes('Invalid JSON') ||
+            parseResult.error.includes('Could not parse JSON') ||
+            parseResult.error.includes('No content from Gemini');
+
+        if (shouldRetry) {
+            promptText = buildJsonCorrectionPrompt(parseResult.error);
+            const { text } = await callGeminiJson(
+                gemini,
+                model,
+                promptText,
+                base64,
+                EXTRACTED_INVOICE_JSON_SCHEMA,
+            );
+            if (text) {
+                const retry = parseGeminiJsonExtraction(text);
+                if (retry.data) {
+                    parseResult = { data: retry.data, finishReason: undefined };
+                }
             }
         }
     }

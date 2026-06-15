@@ -2,7 +2,7 @@
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'next/navigation'
-import { getActiveBatches } from '@/lib/actions/invoices'
+import { getActiveBatches, getActiveReanalysisJobsAction } from '@/lib/actions/invoices'
 import { getMaterialById } from '@/lib/actions/materiales'
 
 // Types for analytics data
@@ -74,6 +74,21 @@ export function useBatchProgress() {
         refetchOnWindowFocus: false,
         refetchOnMount: true,
         enabled: typeof window !== 'undefined', // Only run on client side
+    })
+}
+
+export function useActiveReanalysisJobs() {
+    return useQuery({
+        queryKey: ['reanalysis-jobs'],
+        queryFn: async () => {
+            return await getActiveReanalysisJobsAction()
+        },
+        staleTime: 2 * 1000,
+        gcTime: 5 * 60 * 1000,
+        refetchInterval: 3 * 1000,
+        refetchOnWindowFocus: false,
+        refetchOnMount: true,
+        enabled: typeof window !== 'undefined',
     })
 }
 

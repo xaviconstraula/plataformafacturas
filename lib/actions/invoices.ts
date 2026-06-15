@@ -6,7 +6,7 @@ import { Prisma, type Provider, type Material, type Invoice, type InvoiceItem, t
 import { groupBatchesByTimeWindow as groupBatchesUtil } from "@/lib/utils/batch-grouping";
 import { revalidatePath } from "next/cache";
 import { GoogleGenAI } from "@google/genai";
-import { getExtractFormat, extractInvoiceJsonFromPdf } from "@/lib/invoice-extraction";
+import { getExtractFormat, extractInvoiceJsonFromPdf, compareStoredVsExtracted, summarizeBatchReanalysisReport, type BatchReanalysisReport, type InvoiceComparisonResult, type StoredInvoiceForComparison } from "@/lib/invoice-extraction";
 import { normalizeMaterialCode, areMaterialCodesSimilar, normalizeCifForComparison, buildCifVariants } from "@/lib/utils";
 import { checkVAT, countries } from "jsvat";
 import { parseJsonLinesFromFile } from "@/lib/utils/jsonl-parser";
@@ -667,6 +667,20 @@ export interface BatchProgressInfo {
     errors?: BatchErrorDetail[]; // Array of error messages with metadata
 }
 
+export interface ReanalysisJobInfo {
+    id: string;
+    batchOrSessionId: string;
+    status: BatchStatus;
+    totalFiles: number;
+    processedFiles: number;
+    currentFile?: string | null;
+    report?: BatchReanalysisReport | null;
+    error?: string | null;
+    startedAt?: Date | null;
+    completedAt?: Date | null;
+    createdAt: Date;
+}
+
 function pushBatchError(
     target: BatchErrorDetail[],
     detail: {
@@ -946,18 +960,11 @@ export async function getBatchHistory(): Promise<BatchProgressInfo[]> {
     return groupBatchesByTimeWindow(batches);
 }
 
-// Retry processing for a batch session (or single batch) using PDFs stored in R2
-export async function retryBatchSession(batchOrSessionId: string): Promise<{ ok: boolean }> {
-    const user = await requireAuth();
+const BATCH_SESSION_TIME_WINDOW_MS = 5 * 60 * 1000;
 
-    // Ensure R2 is available before attempting any retry logic
-    if (!isR2Configured()) {
-        throw new Error('La funcionalidad de reintento no está disponible porque R2 no está configurado.');
-    }
-
+export async function resolveBatchR2Keys(batchOrSessionId: string, userId: string): Promise<string[]> {
     let r2Keys: string[] = [];
 
-    // Session-level retry (grouped batches by time window)
     if (batchOrSessionId.startsWith('session-')) {
         const rawTimestamp = batchOrSessionId.replace('session-', '');
         const timestamp = Number(rawTimestamp);
@@ -966,13 +973,12 @@ export async function retryBatchSession(batchOrSessionId: string): Promise<{ ok:
             throw new Error('Identificador de sesión de proceso inválido.');
         }
 
-        const TIME_WINDOW_MS = 5 * 60 * 1000; // 5 minutes – must stay in sync with grouping logic
-        const windowStart = new Date(timestamp - TIME_WINDOW_MS);
-        const windowEnd = new Date(timestamp + TIME_WINDOW_MS);
+        const windowStart = new Date(timestamp - BATCH_SESSION_TIME_WINDOW_MS);
+        const windowEnd = new Date(timestamp + BATCH_SESSION_TIME_WINDOW_MS);
 
         const sessionBatches = await prisma.batchProcessing.findMany({
             where: {
-                userId: user.id,
+                userId,
                 createdAt: {
                     gte: windowStart,
                     lte: windowEnd,
@@ -991,11 +997,10 @@ export async function retryBatchSession(batchOrSessionId: string): Promise<{ ok:
             }
         }
     } else {
-        // Single batch retry using its stored PDFs
         const batch = await prisma.batchProcessing.findFirst({
             where: {
                 id: batchOrSessionId,
-                userId: user.id,
+                userId,
             },
         });
 
@@ -1009,12 +1014,25 @@ export async function retryBatchSession(batchOrSessionId: string): Promise<{ ok:
         }
     }
 
-    // Normalize and deduplicate keys
     r2Keys = Array.from(new Set(r2Keys.filter((key) => typeof key === 'string' && key.length > 0)));
 
     if (r2Keys.length === 0) {
         throw new Error('Este proceso no tiene PDFs guardados para reintento.');
     }
+
+    return r2Keys;
+}
+
+// Retry processing for a batch session (or single batch) using PDFs stored in R2
+export async function retryBatchSession(batchOrSessionId: string): Promise<{ ok: boolean }> {
+    const user = await requireAuth();
+
+    // Ensure R2 is available before attempting any retry logic
+    if (!isR2Configured()) {
+        throw new Error('La funcionalidad de reintento no está disponible porque R2 no está configurado.');
+    }
+
+    const r2Keys = await resolveBatchR2Keys(batchOrSessionId, user.id);
 
     // Launch heavy work in background – mirror startInvoiceBatch behaviour
     void (async () => {
@@ -3367,7 +3385,7 @@ export async function processInvoicesFromR2Keys(
         const chunk = processableItems.slice(i, i + DB_CONCURRENCY_LIMIT);
 
         const chunkPromises = chunk.map(async (item): Promise<CreateInvoiceResult> => {
-            const { extractedData, fileName } = item;
+            const { extractedData, fileName, r2Key } = item;
             if (!extractedData) {
                 return { success: false, message: "No extracted data", fileName: fileName };
             }
@@ -3444,6 +3462,7 @@ export async function processInvoicesFromR2Keys(
                                 ivaPercentage: new Prisma.Decimal(extractedData.ivaPercentage.toFixed(2)),
                                 retentionAmount: new Prisma.Decimal(extractedData.retentionAmount.toFixed(2)),
                                 originalFileName: fileName,
+                                pdfUrl: getPdfUrlFromKey(r2Key),
                                 status: "PROCESSED",
                                 hasTotalsMismatch: totalsCheck.hasMismatch,
                             },
@@ -4681,6 +4700,307 @@ export async function updateInvoiceAction(payload: UpdateInvoiceInput): Promise<
             hasTotalsMismatch: totalsCheck.hasMismatch,
             errors: validationErrors.length > 0 ? validationErrors : undefined,
         };
+    }
+}
+
+function mapInvoiceToStoredComparison(
+    invoice: {
+        id: string;
+        invoiceCode: string;
+        issueDate: Date;
+        totalAmount: Prisma.Decimal;
+        ivaPercentage: Prisma.Decimal | null;
+        retentionAmount: Prisma.Decimal | null;
+        provider: { name: string; cif: string };
+        items: Array<{
+            id: string;
+            description: string | null;
+            quantity: Prisma.Decimal;
+            unitPrice: Prisma.Decimal;
+            totalPrice: Prisma.Decimal;
+            workOrder: string | null;
+            discountPercentage: Prisma.Decimal | null;
+            lineNumber: number | null;
+            material: { name: string; code: string };
+        }>;
+    },
+): StoredInvoiceForComparison {
+    return {
+        id: invoice.id,
+        invoiceCode: invoice.invoiceCode,
+        issueDate: invoice.issueDate,
+        totalAmount: invoice.totalAmount.toNumber(),
+        ivaPercentage: invoice.ivaPercentage?.toNumber() ?? 21,
+        retentionAmount: invoice.retentionAmount?.toNumber() ?? 0,
+        provider: {
+            name: invoice.provider.name,
+            cif: invoice.provider.cif,
+        },
+        items: invoice.items.map((item) => ({
+            id: item.id,
+            description: item.description,
+            quantity: item.quantity.toNumber(),
+            unitPrice: item.unitPrice.toNumber(),
+            totalPrice: item.totalPrice.toNumber(),
+            workOrder: item.workOrder,
+            discountPercentage: item.discountPercentage?.toNumber() ?? null,
+            lineNumber: item.lineNumber,
+            material: {
+                name: item.material.name,
+                code: item.material.code,
+            },
+        })),
+    };
+}
+
+async function reanalyzeSinglePdf(
+    r2Key: string,
+    userId: string,
+): Promise<InvoiceComparisonResult> {
+    const fileName = r2Key.split('/').pop() || 'invoice.pdf';
+
+    try {
+        const pdfFile = await downloadPdfFromR2(r2Key);
+        const extraction = await callPdfExtractAPI(pdfFile, []);
+
+        if (!extraction.extractedData) {
+            return {
+                fileName,
+                r2Key,
+                invoiceCode: fileName,
+                status: 'extraction_error',
+                error: extraction.error ?? 'No se pudo extraer datos del PDF',
+            };
+        }
+
+        const storedInvoice = await prisma.invoice.findFirst({
+            where: {
+                originalFileName: fileName,
+                provider: { userId },
+            },
+            include: {
+                provider: true,
+                items: {
+                    include: { material: true },
+                    orderBy: [
+                        { lineNumber: 'asc' },
+                        { createdAt: 'asc' },
+                    ],
+                },
+            },
+        });
+
+        if (!storedInvoice) {
+            return {
+                fileName,
+                r2Key,
+                invoiceCode: extraction.extractedData.invoiceCode,
+                status: 'not_found',
+                error: 'No se encontró una factura guardada con este archivo',
+            };
+        }
+
+        const comparison = compareStoredVsExtracted(
+            mapInvoiceToStoredComparison(storedInvoice),
+            extraction.extractedData,
+        );
+
+        return {
+            fileName,
+            r2Key,
+            invoiceId: storedInvoice.id,
+            invoiceCode: storedInvoice.invoiceCode,
+            status: comparison.status,
+            invoiceLevelDiffs: comparison.invoiceLevelDiffs,
+            lineDiffs: comparison.lineDiffs,
+        };
+    } catch (error) {
+        console.error(`[reanalyzeSinglePdf] Error processing ${r2Key}`, error);
+        return {
+            fileName,
+            r2Key,
+            invoiceCode: fileName,
+            status: 'extraction_error',
+            error: error instanceof Error ? error.message : 'Error inesperado al reanalizar el PDF',
+        };
+    }
+}
+
+function mapReanalysisJobRecord(job: {
+    id: string;
+    batchOrSessionId: string;
+    status: BatchStatus;
+    totalFiles: number;
+    processedFiles: number;
+    currentFile: string | null;
+    report: unknown;
+    error: string | null;
+    startedAt: Date | null;
+    completedAt: Date | null;
+    createdAt: Date;
+}): ReanalysisJobInfo {
+    return {
+        id: job.id,
+        batchOrSessionId: job.batchOrSessionId,
+        status: job.status,
+        totalFiles: job.totalFiles,
+        processedFiles: job.processedFiles,
+        currentFile: job.currentFile,
+        report: job.report ? (job.report as BatchReanalysisReport) : null,
+        error: job.error,
+        startedAt: job.startedAt,
+        completedAt: job.completedAt,
+        createdAt: job.createdAt,
+    };
+}
+
+async function processReanalysisJobInBackground(
+    jobId: string,
+    r2Keys: string[],
+    userId: string,
+): Promise<void> {
+    const results: InvoiceComparisonResult[] = [];
+
+    try {
+        await prisma.batchReanalysisJob.update({
+            where: { id: jobId },
+            data: {
+                status: 'PROCESSING',
+                startedAt: new Date(),
+            },
+        });
+
+        for (let index = 0; index < r2Keys.length; index++) {
+            const r2Key = r2Keys[index];
+            const fileName = r2Key.split('/').pop() || 'invoice.pdf';
+
+            await prisma.batchReanalysisJob.update({
+                where: { id: jobId },
+                data: {
+                    currentFile: fileName,
+                    processedFiles: index,
+                },
+            });
+
+            const result = await reanalyzeSinglePdf(r2Key, userId);
+            results.push(result);
+
+            await prisma.batchReanalysisJob.update({
+                where: { id: jobId },
+                data: {
+                    processedFiles: index + 1,
+                },
+            });
+        }
+
+        const report = summarizeBatchReanalysisReport(results);
+
+        await prisma.batchReanalysisJob.update({
+            where: { id: jobId },
+            data: {
+                status: 'COMPLETED',
+                processedFiles: r2Keys.length,
+                currentFile: null,
+                report: report as unknown as Prisma.InputJsonValue,
+                completedAt: new Date(),
+            },
+        });
+    } catch (error) {
+        console.error(`[processReanalysisJobInBackground] Fatal error for job ${jobId}`, error);
+        await prisma.batchReanalysisJob.update({
+            where: { id: jobId },
+            data: {
+                status: 'FAILED',
+                error: error instanceof Error ? error.message : 'Error inesperado durante el reanálisis',
+                completedAt: new Date(),
+            },
+        }).catch((updateError) => {
+            console.error(`[processReanalysisJobInBackground] Failed to mark job ${jobId} as FAILED`, updateError);
+        });
+    }
+}
+
+export async function startReanalyzeBatchSessionAction(batchOrSessionId: string): Promise<{ jobId: string }> {
+    const user = await requireAuth();
+
+    if (!isR2Configured()) {
+        throw new Error('La funcionalidad de reanálisis no está disponible porque R2 no está configurado.');
+    }
+
+    const existingJob = await prisma.batchReanalysisJob.findFirst({
+        where: {
+            userId: user.id,
+            batchOrSessionId,
+            status: { in: ['PENDING', 'PROCESSING'] },
+        },
+        orderBy: { createdAt: 'desc' },
+    });
+
+    if (existingJob) {
+        return { jobId: existingJob.id };
+    }
+
+    const r2Keys = await resolveBatchR2Keys(batchOrSessionId, user.id);
+
+    const job = await prisma.batchReanalysisJob.create({
+        data: {
+            userId: user.id,
+            batchOrSessionId,
+            status: 'PENDING',
+            totalFiles: r2Keys.length,
+        },
+    });
+
+    void processReanalysisJobInBackground(job.id, r2Keys, user.id);
+
+    return { jobId: job.id };
+}
+
+export async function getReanalysisJobAction(jobId: string): Promise<ReanalysisJobInfo | null> {
+    const user = await requireAuth();
+
+    const job = await prisma.batchReanalysisJob.findFirst({
+        where: {
+            id: jobId,
+            userId: user.id,
+        },
+    });
+
+    if (!job) {
+        return null;
+    }
+
+    return mapReanalysisJobRecord(job);
+}
+
+export async function getActiveReanalysisJobsAction(): Promise<ReanalysisJobInfo[]> {
+    const user = await requireAuth();
+
+    const jobs = await prisma.batchReanalysisJob.findMany({
+        where: {
+            userId: user.id,
+            status: { in: ['PENDING', 'PROCESSING', 'COMPLETED', 'FAILED'] },
+            createdAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
+        },
+        orderBy: { createdAt: 'desc' },
+    });
+
+    return jobs.map(mapReanalysisJobRecord);
+}
+
+export async function cleanupOldReanalysisJobs(): Promise<void> {
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+    try {
+        await prisma.batchReanalysisJob.deleteMany({
+            where: {
+                status: { in: ['COMPLETED', 'FAILED'] },
+                completedAt: { lt: sevenDaysAgo },
+            },
+        });
+    } catch (error) {
+        console.error('Error cleaning up old reanalysis jobs:', error);
     }
 }
 

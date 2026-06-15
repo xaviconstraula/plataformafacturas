@@ -163,6 +163,43 @@ export function getPdfUrlFromKey(key: string | null | undefined): string | null 
 }
 
 /**
+ * Derive the R2 object key from a stored public PDF URL.
+ */
+export function parseR2KeyFromPdfUrl(pdfUrl: string): string | null {
+    const trimmed = pdfUrl.trim();
+    if (!trimmed) return null;
+
+    if (R2_PUBLIC_URL) {
+        const normalizedBase = R2_PUBLIC_URL.replace(/\/$/, '');
+        if (trimmed.startsWith(normalizedBase)) {
+            const key = trimmed.slice(normalizedBase.length).replace(/^\//, '');
+            return key.length > 0 ? key : null;
+        }
+    }
+
+    try {
+        const url = new URL(trimmed);
+        const key = url.pathname.replace(/^\//, '');
+        if (!key) return null;
+
+        if (url.hostname.includes('r2.dev') || url.hostname.includes('r2.cloudflarestorage.com')) {
+            return key;
+        }
+
+        if (R2_PUBLIC_URL) {
+            const customHost = new URL(R2_PUBLIC_URL).hostname;
+            if (url.hostname === customHost) {
+                return key;
+            }
+        }
+    } catch {
+        return null;
+    }
+
+    return null;
+}
+
+/**
  * Check if R2 is properly configured
  * @returns true if R2 is configured
  */

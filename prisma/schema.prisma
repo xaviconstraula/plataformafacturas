@@ -299,6 +299,26 @@ model BatchProcessing {
   @@index([userId])
 }
 
+model BatchReanalysisJob {
+  id               String      @id @default(cuid())
+  userId           String
+  batchOrSessionId String
+  status           BatchStatus @default(PENDING)
+  totalFiles       Int
+  processedFiles   Int         @default(0)
+  currentFile      String?
+  report           Json?
+  error            String?
+  startedAt        DateTime?
+  completedAt      DateTime?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@index([batchOrSessionId, userId])
+}
+
 /// Tabla para mapear CIFs antiguos a proveedores existentes tras una fusión
 
 model ProviderAlias {

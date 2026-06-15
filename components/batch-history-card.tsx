@@ -1,15 +1,18 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { AlertTriangle, CheckCircle, XCircle, Clock, FileText, ChevronDown, ChevronUp, RotateCcw, Loader2 } from "lucide-react"
+import { AlertTriangle, CheckCircle, XCircle, Clock, FileText, ChevronDown, ChevronUp, RotateCcw, Loader2, ScanSearch, FileSearch } from "lucide-react"
 import { formatDateTime } from "@/lib/utils"
 import { BatchErrorsDialog } from "@/components/batch-errors-dialog"
-import { getBatchHistory, retryBatchSession, cancelBatchSession } from "@/lib/actions/invoices"
+import { BatchReanalysisDialog } from "@/components/batch-reanalysis-dialog"
+import { getBatchHistory, retryBatchSession, cancelBatchSession, startReanalyzeBatchSessionAction } from "@/lib/actions/invoices"
+import type { BatchProgressInfo, ReanalysisJobInfo } from "@/lib/actions/invoices"
+import { useActiveReanalysisJobs } from "@/hooks/use-analytics"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
-import type { BatchProgressInfo } from "@/lib/actions/invoices"
+import type { BatchReanalysisReport } from "@/lib/invoice-extraction"
 import { toast } from "sonner"
 
 const statusConfig = {
@@ -27,6 +30,10 @@ function BatchHistoryItem({
     isRetrying,
     onCancel,
     isCancelling,
+    onReanalyze,
+    isStartingReanalysis,
+    reanalysisJob,
+    onViewReanalysisReport,
 }: {
     batch: BatchProgressInfo
     onViewErrors: (batch: BatchProgressInfo) => void
@@ -34,26 +41,30 @@ function BatchHistoryItem({
     isRetrying?: boolean
     onCancel?: (batch: BatchProgressInfo) => void
     isCancelling?: boolean
+    onReanalyze?: (batch: BatchProgressInfo) => void
+    isStartingReanalysis?: boolean
+    reanalysisJob?: ReanalysisJobInfo | null
+    onViewReanalysisReport?: (batch: BatchProgressInfo, report: BatchReanalysisReport) => void
 }) {
     const [isExpanded, setIsExpanded] = useState(false)
     const config = statusConfig[batch.status]
-    const StatusIcon = config.icon
 
-    // Count duplicates vs actual errors
     const duplicateCount = batch.errors?.filter(e => e.kind === 'DUPLICATE_INVOICE').length ?? 0
     const actualErrorCount = batch.errors?.filter(e => e.kind !== 'DUPLICATE_INVOICE').length ?? 0
     const hasErrors = actualErrorCount > 0 || (batch.failedFiles ?? 0) > 0
     const hasDuplicates = duplicateCount > 0
     const canRetry = !!onRetry && (batch.status === 'FAILED' || (batch.status === 'COMPLETED' && hasErrors))
     const canCancel = !!onCancel && (batch.status === 'PENDING' || batch.status === 'PROCESSING')
+    const canReanalyze = !!onReanalyze && batch.status === 'COMPLETED'
+    const isReanalysisRunning = reanalysisJob?.status === 'PENDING' || reanalysisJob?.status === 'PROCESSING'
+    const hasReanalysisReport = reanalysisJob?.status === 'COMPLETED' && !!reanalysisJob.report
 
     return (
         <div className="border rounded-lg p-4 space-y-3">
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
-                    {/* <StatusIcon className={`h-4 w-4 ${config.color}`} /> */}
                     <div className="flex flex-col">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
                             <span className="font-medium text-sm">
                                 {batch.id.startsWith('session-') ? 'Sesión de carga' : `Batch ${batch.id.slice(-8)}`}
                             </span>
@@ -70,10 +81,21 @@ function BatchHistoryItem({
                                     {duplicateCount} duplicadas
                                 </Badge>
                             )}
+                            {isReanalysisRunning ? (
+                                <Badge variant="outline" className="text-xs text-blue-600 border-blue-200">
+                                    <Loader2 className="h-3 w-3 mr-1 animate-spin inline" />
+                                    Reanalizando {reanalysisJob.processedFiles}/{reanalysisJob.totalFiles}
+                                </Badge>
+                            ) : null}
                         </div>
                         <div className="text-xs text-muted-foreground mt-3">
                             {batch.totalFiles} archivos • {formatDateTime(batch.createdAt)}
                         </div>
+                        {isReanalysisRunning && reanalysisJob.currentFile ? (
+                            <p className="text-xs text-muted-foreground mt-1 truncate max-w-md">
+                                Procesando: {reanalysisJob.currentFile}
+                            </p>
+                        ) : null}
                     </div>
                 </div>
                 <div className="flex items-center gap-2">
@@ -88,6 +110,34 @@ function BatchHistoryItem({
                             {hasErrors ? 'Ver errores' : 'Ver duplicadas'}
                         </Button>
                     )}
+                    {hasReanalysisReport ? (
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => onViewReanalysisReport?.(batch, reanalysisJob.report!)}
+                            className="text-xs"
+                        >
+                            <FileSearch className="h-3 w-3 mr-1" />
+                            Ver informe
+                        </Button>
+                    ) : null}
+                    {canReanalyze ? (
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => onReanalyze?.(batch)}
+                            className="text-xs"
+                            disabled={isStartingReanalysis || isReanalysisRunning}
+                            title="Vuelve a escanear los PDFs del lote y compara con lo guardado"
+                        >
+                            {isStartingReanalysis || isReanalysisRunning ? (
+                                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                            ) : (
+                                <ScanSearch className="h-3 w-3 mr-1" />
+                            )}
+                            Reanalizar escaneo
+                        </Button>
+                    ) : null}
                     {canRetry && (
                         <Button
                             variant="outline"
@@ -174,22 +224,85 @@ function BatchHistoryItem({
     )
 }
 
+function buildReanalysisJobMap(jobs: ReanalysisJobInfo[]): Map<string, ReanalysisJobInfo> {
+    const map = new Map<string, ReanalysisJobInfo>()
+    for (const job of jobs) {
+        if (!map.has(job.batchOrSessionId)) {
+            map.set(job.batchOrSessionId, job)
+        }
+    }
+    return map
+}
+
 export function BatchHistoryCard() {
-    const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null)
     const [errorsDialogOpen, setErrorsDialogOpen] = useState(false)
     const [selectedBatchData, setSelectedBatchData] = useState<BatchProgressInfo | null>(null)
     const [retryingBatchId, setRetryingBatchId] = useState<string | null>(null)
     const [cancellingBatchId, setCancellingBatchId] = useState<string | null>(null)
+    const [startingReanalysisBatchId, setStartingReanalysisBatchId] = useState<string | null>(null)
+    const [reanalysisDialogOpen, setReanalysisDialogOpen] = useState(false)
+    const [reanalysisBatchId, setReanalysisBatchId] = useState<string | null>(null)
+    const [reanalysisReport, setReanalysisReport] = useState<BatchReanalysisReport | null>(null)
+    const [reanalysisError, setReanalysisError] = useState<string | null>(null)
     const queryClient = useQueryClient()
+    const previousReanalysisJobsRef = useRef<ReanalysisJobInfo[]>([])
+    const shownReanalysisNotificationsRef = useRef<Set<string>>(new Set())
 
     const { data: batches = [], isLoading, error } = useQuery({
         queryKey: ['batch-history'],
         queryFn: async () => {
             return await getBatchHistory()
         },
-        staleTime: 30 * 1000, // 30 seconds - refresh reasonably often
-        gcTime: 5 * 60 * 1000, // 5 minutes
+        staleTime: 30 * 1000,
+        gcTime: 5 * 60 * 1000,
     })
+
+    const { data: reanalysisJobs = [] } = useActiveReanalysisJobs()
+    const reanalysisJobMap = useMemo(() => buildReanalysisJobMap(reanalysisJobs), [reanalysisJobs])
+
+    useEffect(() => {
+        if (reanalysisJobs.length === 0) return
+
+        const previousJobs = previousReanalysisJobsRef.current
+        const newlyCompletedJobs = previousJobs.filter((prevJob) => {
+            const currentJob = reanalysisJobs.find((job) => job.id === prevJob.id)
+            return currentJob
+                && (prevJob.status === 'PENDING' || prevJob.status === 'PROCESSING')
+                && (currentJob.status === 'COMPLETED' || currentJob.status === 'FAILED')
+        })
+
+        for (const job of newlyCompletedJobs) {
+            if (shownReanalysisNotificationsRef.current.has(job.id)) {
+                continue
+            }
+
+            const currentJob = reanalysisJobs.find((current) => current.id === job.id)
+            if (!currentJob) continue
+
+            shownReanalysisNotificationsRef.current.add(job.id)
+
+            if (currentJob.status === 'COMPLETED' && currentJob.report) {
+                toast.success("Informe de reanálisis listo", {
+                    description: `${currentJob.report.matchedCount} iguales, ${currentJob.report.diffCount} con diferencias`,
+                    action: {
+                        label: "Ver informe",
+                        onClick: () => {
+                            setReanalysisBatchId(currentJob.batchOrSessionId)
+                            setReanalysisReport(currentJob.report!)
+                            setReanalysisError(null)
+                            setReanalysisDialogOpen(true)
+                        },
+                    },
+                })
+            } else if (currentJob.status === 'FAILED') {
+                toast.error("No se pudo completar el reanálisis", {
+                    description: currentJob.error ?? 'Ocurrió un error inesperado durante el reanálisis.',
+                })
+            }
+        }
+
+        previousReanalysisJobsRef.current = reanalysisJobs
+    }, [reanalysisJobs])
 
     const handleViewErrors = (batch: BatchProgressInfo) => {
         setSelectedBatchData(batch)
@@ -244,6 +357,37 @@ export function BatchHistoryCard() {
             toast.error("No se pudo cancelar el proceso", { description })
         } finally {
             setCancellingBatchId(null)
+        }
+    }
+
+    const handleCloseReanalysisDialog = () => {
+        setReanalysisDialogOpen(false)
+        setReanalysisBatchId(null)
+        setReanalysisReport(null)
+        setReanalysisError(null)
+    }
+
+    const handleViewReanalysisReport = (batch: BatchProgressInfo, report: BatchReanalysisReport) => {
+        setReanalysisBatchId(batch.id)
+        setReanalysisReport(report)
+        setReanalysisError(null)
+        setReanalysisDialogOpen(true)
+    }
+
+    const handleReanalyzeBatch = async (batch: BatchProgressInfo) => {
+        setStartingReanalysisBatchId(batch.id)
+        try {
+            await startReanalyzeBatchSessionAction(batch.id)
+            toast.success("Reanálisis iniciado en segundo plano", {
+                description: "Puedes seguir navegando. Te avisaremos cuando el informe esté listo.",
+            })
+            await queryClient.invalidateQueries({ queryKey: ['reanalysis-jobs'] })
+        } catch (err) {
+            console.error('[BatchHistoryCard] Error starting batch reanalysis', err)
+            const description = err instanceof Error ? err.message : 'Ocurrió un error inesperado al iniciar el reanálisis.'
+            toast.error("No se pudo iniciar el reanálisis", { description })
+        } finally {
+            setStartingReanalysisBatchId(null)
         }
     }
 
@@ -322,6 +466,10 @@ export function BatchHistoryCard() {
                                     isRetrying={retryingBatchId === batch.id}
                                     onCancel={handleCancelBatch}
                                     isCancelling={cancellingBatchId === batch.id}
+                                    onReanalyze={handleReanalyzeBatch}
+                                    isStartingReanalysis={startingReanalysisBatchId === batch.id}
+                                    reanalysisJob={reanalysisJobMap.get(batch.id) ?? null}
+                                    onViewReanalysisReport={handleViewReanalysisReport}
                                 />
                             ))}
                         </div>
@@ -340,6 +488,14 @@ export function BatchHistoryCard() {
                     totalFiles={selectedBatchData.totalFiles || 0}
                 />
             )}
+
+            <BatchReanalysisDialog
+                isOpen={reanalysisDialogOpen}
+                onClose={handleCloseReanalysisDialog}
+                batchId={reanalysisBatchId ?? ''}
+                report={reanalysisReport}
+                errorMessage={reanalysisError}
+            />
         </>
     )
 }
